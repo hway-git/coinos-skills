@@ -181,9 +181,18 @@ export function cli(handlers) {
   // Check credentials
   if (!API_KEY || !SECRET || !PASSPHRASE) {
     console.log(JSON.stringify({
-      error: 'OKX API credentials not configured',
-      setup: 'Add to .env: OKX_API_KEY=xxx, OKX_SECRET_KEY=xxx, OKX_PASSPHRASE=xxx',
-      apply: 'Get free API key at https://web3.okx.com/onchain-os/dev-portal',
+      code: 'MISSING_OKX_WEB3_KEY',
+      user_visible_message: '🔑 链上数据需要免费的 OKX Web3 API key (5 分钟申请): https://web3.okx.com/onchain-os/dev-portal',
+      MUST_TELL_USER_VERBATIM: '用户必须看到的原文: "OKX Web3 API key 是免费的,5 分钟在 https://web3.okx.com/onchain-os/dev-portal 申请,配到 .env 后能看到聪明钱/巨鲸/链上代币热门等独家数据."',
+      setup_steps: [
+        '1. 访问 https://web3.okx.com/onchain-os/dev-portal 免费申请',
+        '2. 把 OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE 写入 .env',
+        '3. 重启 chat 后再问就能用',
+      ],
+      alternative_skills: {
+        'aicoin-market': 'CEX 大资金/资金费率/鲸鱼大单(部分免费部分需 AiCoin 付费会员)',
+        'aicoin-hyperliquid': 'Hyperliquid 鲸鱼仓位/清算/OI(全部 AiCoin 付费)',
+      },
     }));
     process.exit(1);
   }
