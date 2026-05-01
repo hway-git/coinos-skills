@@ -44,8 +44,14 @@ node scripts/exchange.mjs create_order '{"exchange":"okx","symbol":"BTC/USDT:USD
 步骤2: 用户确认后
 node scripts/exchange.mjs close_position '{"exchange":"okx","market_type":"swap","confirmed":"true"}'
 → 市价平掉所有持仓（自动 reduceOnly）
+
+步骤3: 执行后必须验证 + 总结（不可省略）
+node scripts/exchange.mjs positions '{"exchange":"okx","market_type":"swap"}'
+→ 确认仓位已清空，然后用一句话告诉用户结果（平了什么、盈亏多少）
 ```
 指定交易对只平部分：加 `"symbol":"BTC/USDT:USDT"`
+
+> **为什么有步骤3**: close_position 的返回有时被 streaming 截断，用户看不到结果。多查一次 positions 既能确认平仓成功，又能把结论写进最终消息让用户看到。
 
 ## 下单前准备
 
