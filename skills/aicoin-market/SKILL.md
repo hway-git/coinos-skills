@@ -39,6 +39,7 @@ Crypto market data toolkit powered by [AiCoin Open API](https://www.aicoin.com/o
 - **`coin_ticker` 返回字段单位陷阱**: 所有数值都是 **string 类型**, 别忘了 `parseFloat`。`degree_24h_usd` / `degree_7day_usd` / `degree_24h_cny` 等"涨跌"字段 **本身就是百分比数值**, 例如 `"-0.61"` 表示 **-0.61%**, **不要再 ×100**。`price_usd` / `price_cny` 是绝对价格,`supply_usd` 是市值(USD),`trade_24h_usd` 是 24h 成交额(USD),`fundNetIn_24h_usd` 是 24h 净流入(USD,负数=流出)。
 - **`ls_ratio` 是全局加权汇总, 不分交易所/币种**: 返回 `{detail: {last, last_day, last_week}}` 三个数, 代表全市场多空比快照 (`last`=现在 / `last_day`=24h 前 / `last_week`=一周前)。 `>1` 多头占优, `<1` 空头占优。 **Open API 暂未暴露分交易所/分币种的多空比**, 用户要看 Binance/OKX 单所多空比时, 老实告知"AiCoin Open API 当前只返全局多空比, 分交易所版本暂未开放, 可去 aicoin.com 网页端查看"。 不要瞎猜参数 (传 `symbol` / `marketKey` 都没用, 接口忽略)。
 - **`newsflash.mjs list` 字段名陷阱**: 返回结构是 `{data: {isLive, list: [...]}}`, 每条快讯有 40+ 字段(直播 / 投票 / Pro 等冗余字段), 但**最常用的就 4 个**: `timestamp` (秒级 unix, 不是 createtime/publish_time), `title` (标题), `content` (正文), `is_important` / `is_pro` (重要 / Pro 标记)。 想要双语版用 `transTitle` / `transContent`。 别瞎猜 `createtime` / `content_text` / `description` —— 不存在。
+- **`big_orders` / `agg_trades` 的 `high_amount` 单位是合约张数, 不是币数量**: 不同交易所每张面值不同, 比如 **OKX 永续每张 = 0.01 BTC**(`high_amount=3419` 张 = 34 BTC), **Binance 永续每张 = 1 BTC**(`high_amount=41.6` 张 = 41.6 BTC)。 想拿真实币数量用 `depth_vol` 字段(已换算成币), 或自己算 `high_turnover / depth_price`。 想拿美元成交额直接用 `high_turnover`。 **agent 输出给用户时务必用美元金额, 别报"X 张" / "X BTC"** —— 张数没意义, BTC 数算错了离谱。
 
 ## Quick Reference
 
