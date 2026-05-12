@@ -148,9 +148,9 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `index_info` | Index details | 高级版 | `{"key":"i:diniw:ice"}` |
 | `depth_full` | Full order book | 高级版 | `{"symbol":"btcswapusdt:binance"}` |
 | `depth_grouped` | Grouped depth | 高级版 | `{"symbol":"btcswapusdt:binance","groupSize":"100"}` |
-| `stock_quotes` | Stock quotes | 专业版 | `{"tickers":"i:mstr:nasdaq"}` |
-| `stock_top_gainer` | Top gainers | 专业版 | `{"us_stock":"true"}` |
-| `stock_company` | Company details — 见 [Known Issues](#known-issues-broken--临时不稳的端点) 后端偶发 500 | 专业版 | `{"symbol":"i:mstr:nasdaq"}` |
+| `stock_quotes` | ⚠️ **"加密概念股"专用**, 不是通用美股接口 — 端点路径 `/crypto_stock/quotes`, 只覆盖 AiCoin 整理的加密相关公司 (MSTR/COIN/TSLA/BULL 等约 2-30 家)。**NVDA/AAPL/MSFT 等通用股票返空**, 不是接口故障。用户问通用美股价格直接说"AiCoin 这套接口只覆盖加密概念股, 通用美股查 Google Finance / 交易软件"。 | 专业版 | `{"tickers":"i:mstr:nasdaq"}` 不传 tickers 返默认 2 条 |
+| `stock_top_gainer` | 同 `stock_quotes` — 加密概念股范围内的涨幅榜, 不是全美股 | 专业版 | `{"us_stock":"true"}` |
+| `stock_company` | Company details — 见 [Known Issues](#known-issues-broken--临时不稳的端点) 后端偶发 500。同范围仅加密概念股 | 专业版 | `{"symbol":"i:mstr:nasdaq"}` |
 | `treasury_entities` | Holding entities | 专业版 | `{"coin":"BTC"}` |
 | `treasury_history` | Transaction history | 专业版 | `{"coin":"BTC"}` |
 | `treasury_accumulated` | Accumulated holdings | 专业版 | `{"coin":"BTC"}` |
@@ -169,15 +169,15 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `pair_list` | Pair list (必填 market) | 基础版 | `{"market":"binance","currency":"USDT"}` |
 | `grayscale_trust` | Grayscale trust 总览 (GBTC/ETHE) | 标准版 | None |
 | `gray_scale` | Grayscale 单币持仓细分。脚本自动把 BTC/ETH 转 bitcoin/ethereum。返空 detail 时脚本加 `_note`, 引导改用 `grayscale_trust`。 | 标准版 | `{"coins":"bitcoin,ethereum"}` |
-| `signal_alert` | Signal alerts | 标准版 | None |
-| `signal_config` | Alert config | 标准版 | `{"language":"cn"}` |
+| `signal_alert` | ⚠️ **返的是当前账号在 AiCoin 网页端配置过的预警**, 不是全市场实时触发列表。用户没配过任何预警时返空; 配了 ETH 预警就只看到 ETH 触发。要看全市场技术指标实时触发, AiCoin Open API **暂未暴露**, 用户引导去 aicoin.com 网页端"指标信号"板块。 | 标准版 | None |
+| `signal_alert_list` | 同 `signal_alert` — 返当前账号订阅的预警列表 (不是全市场) | 专业版 | None |
+| `signal_config` | Alert config — 系统支持的指标 + 周期字典 (MA/MACD/BOLL/TD/RSI/KDJ 等), **不返实时触发**, 只是配置目录 | 标准版 | `{"language":"cn"}` |
 | `strategy_signal` | 见 [Known Issues](#known-issues-broken--临时不稳的端点) — 后端 broken 脚本本地拦截 | 标准版 | — |
 | `change_signal` | Anomaly signal | 标准版 | `{"type":"1"}` |
 | `big_orders` | Whale orders. ⚠️ **仅支持 8 家** (binance 永续+现货 / okcoinfutures(OKX 永续) / bybit / bitget / gate / coinbase / upbit), 其他交易所脚本本地拒绝。**`high_amount` 单位是合约张数不是币数量** (OKX 永续 1 张=0.01 BTC; Binance 永续 1 张=1 BTC), 用户输出**必须用美元金额 `high_turnover`**, 别报"X 张" / "X BTC"。 | 标准版 | `{"symbol":"btcswapusdt:binance"}` (OKX 永续传 `:okcoinfutures`, bitget 永续传 `btcumcblusdt:bitget`; 写错的也会被脚本自动转) |
 | `agg_trades` | 同 big_orders。**注: bybit agg_trades 当前后端返空 list** (success=true 但 list 长度 0), 调用方判长度。 | 标准版 | 同 big_orders |
 | `liquidation` | Liquidation data | 高级版 | `{"type":"1","coinKey":"bitcoin"}` |
-| `signal_alert_list` | Alert list | 专业版 | None |
-| `stock_market` | Crypto stocks | 专业版 | None |
+| `stock_market` | Crypto stocks index (4 大盘: 上证 / 纳指 / 道指 / 标普) | 专业版 | None |
 | `delete_signal` | Delete alert | 专业版 | `{"id":"xxx"}` |
 | `add_signal` | Add signal alert | 标准版 | `{"subType":"ma:1440:single_ma:7","symbol":"btcusdt:binance"}` Optional: `remark` |
 

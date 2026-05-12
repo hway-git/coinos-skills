@@ -55,6 +55,15 @@ agent 调用时容易把上游故障当用户参数错,误导用户。
 - `search` 支持 page/page_size 翻页 (全库 ~350 个币)
 - `hot_coins` key 字典只 `defi` 通, `meme/new` 返空 — 用户问 meme 走 `coin.search`
 
+## 2026-05 后续 — sub-agent 互动测试挖到的字段语义陷阱
+
+7 题互动测试 (主线程出题 / sub-agent 用 SKILL.md 答) 发现 2 个 SKILL.md 没说明的字段陷阱:
+
+- **`signal_alert / signal_alert_list`** 返的是**当前账号在 AiCoin 网页端配置过的预警**, 不是全市场实时触发。 sub-agent 实测发现 50 条结果全是 ETH MACD 5min (因为该账号订阅过 ETH 预警), 一条 BTC 都没。Open API 暂未暴露"全市场技术指标实时触发"接口。
+- **`stock_quotes / stock_top_gainer / stock_company`** 是**加密概念股专用** (端点路径 `/crypto_stock/`), 只覆盖 AiCoin 整理的有限名单 (MSTR/COIN/TSLA/BULL 等约 2-30 家)。NVDA/AAPL/MSFT 等通用美股返空, **不是接口故障**。 SKILL.md 之前写 "Stock quotes" 容易让 agent 以为是通用美股接口。
+
+附带清理: 表里 `signal_alert_list` 之前有两行重复, 现合并到 signal data 段一行 (带语义说明)。
+
 ## 提交时间线
 
 - `5caa59b` (2026-05): 第 1 轮 12 文件 458 行 — 平台 alias / 命名 alias / 上游 5xx hint / 默认参数 / requireAddress (HL skill)
