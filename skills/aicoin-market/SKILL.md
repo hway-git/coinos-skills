@@ -36,6 +36,7 @@ Crypto market data toolkit powered by [AiCoin Open API](https://www.aicoin.com/o
 - `search` 支持翻页参数: `{"search":"BTC","page":"2","page_size":"50"}` (默认 page=1 / page_size=20, 全库 ~350 个币要翻几页才全)
 - `hot_coins` 的 `key` 实测只 `defi` 通; `meme` / `new` 都返空,可能需要后端更新字典。 用户问 meme 热点币改用 `coin.mjs search '{"search":"meme","trade_type":"spot"}'`
 - `market.mjs ticker '{"market_list":"binance"}'` 返的是**平台整体 24h 资金净流入**, 不是单币 OHLC。 单币行情用 `coin.mjs coin_ticker` 或 `features.mjs pair_ticker`
+- **`coin_ticker` 返回字段单位陷阱**: 所有数值都是 **string 类型**, 别忘了 `parseFloat`。`degree_24h_usd` / `degree_7day_usd` / `degree_24h_cny` 等"涨跌"字段 **本身就是百分比数值**, 例如 `"-0.61"` 表示 **-0.61%**, **不要再 ×100**。`price_usd` / `price_cny` 是绝对价格,`supply_usd` 是市值(USD),`trade_24h_usd` 是 24h 成交额(USD),`fundNetIn_24h_usd` 是 24h 净流入(USD,负数=流出)。
 
 ## Quick Reference
 
