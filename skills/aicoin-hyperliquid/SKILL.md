@@ -33,6 +33,16 @@ Hyperliquid whale tracking and analytics powered by [AiCoin Open API](https://ww
 - 单地址端点缺 address 时脚本本地拦截, 不再产生 `traders/undefined/...` 这种错误 URL
 - `smart_find` 只返地址 + 通用业绩字段(realizedPnl/胜率/leverage 等), **没有"该地址做什么币"的字段**。想知道地址主攻哪些币, 拿 address 后再调 `performance '{"address":"0x..."}'` 看 per-coin 拆解
 - HL 后端把 "position not found" 这类**业务错误**塞到 HTTP 200 body `{code:"400", msg:"position not found"}` 里(不是 HTTP 4xx), `completed_*` 三个端点已在脚本里 wrap 这种 body 给清晰提示, agent 不要自己解析 raw `code` 字段
+- **HL 上同名资产可能存在多个市场 (HIP-3 deployer)**: `tickers` 返回 ~686 个市场, 除了 184 个常规 crypto perp (裸大写名 `BTC` / `ETH` / `SOL`) 和 280 个 spot index (`@N` 格式), 还有 7 类 HIP-3 第三方 deployer prefix:
+    - `cash:` / `xyz:` — 美股合成 (cash:TSLA, xyz:AMZN, cash:NVDA 等)
+    - `flx:` — 贵金属/指数/商品 (flx:GOLD, flx:USA500, flx:OIL, flx:COPPER)
+    - `vntl:` — 主题指数 (vntl:DEFENSE, vntl:ENERGY, vntl:OPENAI, vntl:SEMIS)
+    - `km:` — 中概股/原油 (km:TENCENT, km:XIAOMI, km:USOIL)
+    - `hyna:` — 第三方加密 perp (hyna:BNB, hyna:DOGE)
+    - `para:` — 市场宽度指标 (para:BTCD, para:TOTAL2)
+    - `k*` — 1000x 系列 (kPEPE, kSHIB)
+
+    **agent 调用规则**: 主流 crypto 直接传裸名(BTC/ETH/SOL/XRP/DOGE/BNB)。 美股/商品/指数**必须带 prefix**(`coin: "cash:TSLA"` 不是 `coin: "TSLA"`)。 同名资产可能有多个 deployer 版本, 流动性和价格略有差异 (例如 `xyz:NVDA` vs `flx:NVDA` 可能差 0.1%), 用户没指定时优先 `cash:`(主流 deployer)。 调 `whale_positions` / `ticker` 等接口前若不确定 prefix, 先 `tickers` 拿全表筛一遍, 别瞎猜。
 
 ## Setup
 
