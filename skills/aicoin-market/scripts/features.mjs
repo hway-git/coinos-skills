@@ -49,14 +49,22 @@ cli({
   liq: function(args) { return this.liquidation(args); },
   grayscale_trust: () => apiGet('/api/v2/mix/grayscale-trust'),
   // gray_scale 接受 coin key 必须小写完整名 (bitcoin/ethereum), 不是 ticker (BTC/ETH)
-  gray_scale: ({ coins }) => {
+  gray_scale: async ({ coins }) => {
     const norm = String(coins || '').split(',').map(c => {
       const low = c.trim().toLowerCase();
       if (low === 'btc') return 'bitcoin';
       if (low === 'eth') return 'ethereum';
       return low;
     }).join(',');
-    return apiGet('/api/v2/mix/gray-scale', { coins: norm });
+    const json = await apiGet('/api/v2/mix/gray-scale', { coins: norm });
+    // 实测: 即使 coins 正确转成 bitcoin/ethereum, 上游 detail 也常返空 {} 对象。
+    // 加 _note 提示 agent 这是数据不可用 (灰度持仓窗口未填充或权限差异), 不是接口故障。
+    const detail = json?.data?.detail;
+    const isEmpty = detail && typeof detail === 'object' && !Array.isArray(detail) && Object.keys(detail).length === 0;
+    if (isEmpty) {
+      json._note = `gray_scale 上游 detail 返空 {}。这通常是当前 Pro 档没覆盖该 endpoint 的历史窗口或数据未填充, 不是接口故障。想看灰度持仓概览改用 grayscale_trust (列出 GBTC/ETHE 总览)。`;
+    }
+    return json;
   },
   stock_market: () => apiGet('/api/v2/mix/stock-market'),
   // order_flow — 必须经 fixPlatformAlias + 支持列表校验

@@ -28,10 +28,17 @@ cli({
   // market_info
   exchanges: () => apiGet('/api/v2/market'),
   ticker: ({ market_list }) => apiGet('/api/v2/market/ticker', { market_list }),
-  hot_coins: ({ key, currency }) => {
+  hot_coins: async ({ key, currency }) => {
     const p = { key };
     if (currency) p.currency = currency;
-    return apiGet('/api/v2/market/hotTabCoins', p);
+    const json = await apiGet('/api/v2/market/hotTabCoins', p);
+    // 实测: 后端字典 key 限定 (`defi` 通, `meme`/`new` 返 data.list=[])。
+    // 真实返回结构 {data:{list:[...]}}, 不是 {data:[...]}。返空时加 _note。
+    const list = json?.data?.list;
+    if (Array.isArray(list) && list.length === 0) {
+      json._note = `hot_coins '${key}' 返空。后端 key 字典有限 (实测仅 'defi' 通, 'meme'/'new' 返空)。想查 meme 热门币改用 coin.mjs search '{"search":"meme","trade_type":"spot"}', 这不是接口故障。`;
+    }
+    return json;
   },
   futures_interest: ({ language, lan, page, page_size, pageSize, currency } = {}) => {
     const p = {};
