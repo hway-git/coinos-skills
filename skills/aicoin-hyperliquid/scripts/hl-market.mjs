@@ -3,7 +3,15 @@
 import { apiGet, apiPost, cli } from '../lib/aicoin-api.mjs';
 
 cli({
-  tickers: () => apiGet('/api/upgrade/v2/hl/tickers'),
+  // P2 #4: tickers 返回里混 "@241" "@248" 这种 HL 内部 spot token id, 跟正常 "BTC" / "ETH" 一起列。
+  // agent 不知道 @xxx 是啥, 加 _field_doc 解释。
+  tickers: async () => {
+    const json = await apiGet('/api/upgrade/v2/hl/tickers');
+    if (json && typeof json === 'object') {
+      json._field_doc = `coin 字段格式: (1) 大写字母 (BTC/ETH/SOL/HYPE 等) = HL 永续合约的标准命名; (2) "@<数字>" (@241 / @248 等) = HL 现货 spot 的内部 token id, 不是永续, 命名是数字 ID 因为 HL 现货上市的代币太多。完整 spot 映射查 HL 官方 spot metadata。**永续看 BTC/ETH 等大写, 现货走 @xxx**, 别混。`;
+    }
+    return json;
+  },
   ticker: ({ coin }) => apiGet(`/api/upgrade/v2/hl/tickers/coin/${coin}`),
   whale_positions: ({ coin, dir, npnlSide, frSide, topBy, take } = {}) => {
     const p = {};

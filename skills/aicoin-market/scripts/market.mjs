@@ -131,7 +131,17 @@ const CRYPTO_STOCK_WHITELIST = new Set([
 cli({
   // market_info
   exchanges: () => apiGet('/api/v2/market'),
-  ticker: ({ market_list }) => apiGet('/api/v2/market/ticker', { market_list }),
+  ticker: async ({ market_list } = {}) => {
+    if (!market_list) {
+      return { success: false, errorCode: 400, error: 'ticker 必填 market_list (CSV, 例 "btcusdt:binance,ethusdt:binance")', _note: 'market_list 是完整 market pair 格式 (币种+计价+交易所), 不接受裸 "btc"。需要短名解析改用 coin.coin_ticker。' };
+    }
+    const json = await apiGet('/api/v2/market/ticker', { market_list });
+    const list = Array.isArray(json?.data) ? json.data : json?.data?.list;
+    if (Array.isArray(list) && list.length === 0) {
+      json._note = `ticker 对 market_list "${market_list}" 返空。可能 market pair 格式不对 (要 "<symbol>:<exchange>" 如 "btcusdt:binance"), 或该交易所不在覆盖范围。先用 exchanges 看支持的交易所, 或 pair_list 查某交易所所有合法 pair。`;
+    }
+    return json;
+  },
   hot_coins: async ({ key, currency }) => {
     const p = { key };
     if (currency) p.currency = currency;
@@ -273,11 +283,20 @@ cli({
   treasury_entities: async (body = {}) => {
     if (body.coin && !/^(BTC|ETH)$/i.test(body.coin)) return treasuryUnsupportedCoin('treasury_entities', body.coin);
     const json = await apiPost('/api/upgrade/v2/coin-treasuries/entities', body);
-    // 实测 (Q9 v2 subagent): share 字段对 BTC 和 ETH 量级不一致 — BTC 实例
-    // 里是小数 (0.012 表示 1.2%), ETH 实例里直接是百分数 (1.2 表示 1.2%)。
-    // agent 跨币种横比时容易闹乌龙。提示 agent 注意。
-    if (Array.isArray(json?.data) && body.coin) {
-      json._note = `⚠️ share 字段口径在 BTC/ETH 之间可能不一致 (BTC 实例: 小数, 如 0.012 = 1.2%; ETH 实例: 百分数, 如 1.2 = 1.2%)。**跨币种比 share 前先用一个已知持有量验证一下口径**, 不要直接拿数字比大小。`;
+    // 2026-05-13 P2 #5 dogfood: 详细字段含义 + share/mnav/mcap 口径差异警告。
+    // 实测确认 (treasury_entities BTC + ETH 真实数据):
+    // - BTC share: 0-1 分数 (Lombard 11780 BTC / 21M total = 0.00056 → 0.056%)
+    // - ETH share: 0-100 百分数 (BMNR 4.6M ETH / 120M total = 3.83 → 3.83%)
+    // - BTC 用 mcap = in_usd / market_cap (持币/市值, Neptune=0.395 表示持币占公司价值 39.5%)
+    // - ETH 用 mnav = market_cap / in_usd (市值/持币, BrainDAO=146 表示市值 146 倍于持币)
+    // 跨币种比 share / mnav / mcap 前必须核对口径, 否则会闹乌龙。
+    const hasItems = Array.isArray(json?.data) || Array.isArray(json?.data?.list);
+    if (hasItems && body.coin) {
+      const c = body.coin.toUpperCase();
+      json._field_doc = c === 'ETH'
+        ? '字段含义 (ETH 实例): hold_amount=ETH 个数; share=占总流通**百分数** (3.83→3.83%, 0.00275→0.00275%); in_usd=持币现价 USD; market_cap=公司市值 USD; mnav=market_cap/in_usd 倍数 (>1=市场给溢价, <1=低于持币); entity_type=eth-treasuries 等。**⚠️ share 跟 BTC 实例 0-1 分数口径不同, 跨币种比前先核对。**'
+        : '字段含义 (BTC 实例): hold_amount=BTC 个数; share=占总流通**分数** 0-1 范围 (0.00056→0.056%, 即 hold/21M); in_usd=持币现价 USD; market_cap=公司市值 USD; mcap=in_usd/market_cap (持币价值/公司市值, <1 表示持币只占公司价值一小部分); entity_type=public-companies / defi-and-other / private-companies 等。**⚠️ share 跟 ETH 实例 0-100 百分数口径不同, 跨币种比前先核对。**';
+      json._note = `⚠️ share 字段口径在 BTC/ETH 之间不一致 (实测: BTC=0-1 分数 / ETH=0-100 百分数), 同样 BTC 用 mcap / ETH 用 mnav 是不同字段不同口径。**跨币种横比这些字段前必须先用已知数据核对**, 不要直接拿数字比大小。详细见 _field_doc。`;
     }
     return json;
   },

@@ -114,6 +114,37 @@ function buildHttpErrorHint(status, text, path) {
   return '';
 }
 
+// 2026-05-13 P1 #1 dogfood: AiCoin 内同 SDK 共 3 套响应 envelope 并存, agent 写 generic
+// 解析容易漏分支:
+//   - 老 /api/v2/*: {success: true|false, errorCode: 200|304|403, error: str, data}
+//   - 新 /api/upgrade/v2/*: {code: "0"|"403"|..., msg: str, data}
+//   - ai_analysis 之类: {success: bool, message: str, status: int, data}
+// normalizeEnvelope 在每个 GET/POST 出口附加 _envelope 和 _ok 字段,
+// agent 看 _ok 就知道是不是 success, 不用判 success vs code vs status 三套逻辑。
+// 原始字段保留不动 (保持现有 agent 不破坏)。
+function normalizeEnvelope(json) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return json;
+  if ('_ok' in json) return json; // 已经规范化过
+  let envelope, ok;
+  if ('success' in json) {
+    envelope = 'v2_classic';
+    ok = json.success === true;
+  } else if ('code' in json) {
+    envelope = 'v2_upgrade';
+    const c = String(json.code);
+    ok = c === '0' || c === '200';
+  } else if ('contentType' in json && 'body' in json) {
+    envelope = 'text_xml';
+    ok = !!json.body;
+  } else {
+    envelope = 'unknown';
+    ok = json.data != null || Object.keys(json).length > 0;
+  }
+  json._envelope = envelope;
+  json._ok = ok;
+  return json;
+}
+
 // 业务层错误 (paywall / 限流 / 参数错) 三分类。直接 mutate json 加提示字段。
 // GET / POST 共用,避免 apiPost 早期实现只塞一句话没拼升级指南导致 treasury_entities
 // / interaction_stats 的 403 看起来比 treasury_summary 的 403 简陋很多 (2026-05-13 dogfood)。
@@ -168,6 +199,7 @@ export async function apiGet(path, params = {}) {
   //   3. rate limit ("请求过于频繁")
   // 见 classifyBusinessError 注释。
   classifyBusinessError(json);
+  normalizeEnvelope(json);
   return json;
 }
 
@@ -182,7 +214,9 @@ export async function apiGetText(path, params = {}) {
     const hint = res.status >= 500 ? upstreamFaultHint(res.status, path) : '';
     throw new Error(`API ${res.status}: ${text}${hint}`);
   }
-  return { contentType: res.headers.get('content-type') || '', body: await res.text() };
+  const result = { contentType: res.headers.get('content-type') || '', body: await res.text() };
+  normalizeEnvelope(result);
+  return result;
 }
 
 // Validate a key pair by making a test API call
@@ -215,6 +249,7 @@ export async function apiPost(path, body = {}) {
   }
   const json = await res.json();
   classifyBusinessError(json);
+  normalizeEnvelope(json);
   return json;
 }
 

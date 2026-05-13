@@ -86,7 +86,10 @@ cli({
   },
   // coin_info
   coin_list: () => apiGet('/api/v2/coin'),
-  coin_ticker: async ({ coin_list }) => {
+  coin_ticker: async ({ coin_list } = {}) => {
+    if (!coin_list) {
+      return { success: false, errorCode: 400, error: 'coin_ticker 必填 coin_list (CSV, 例 "bitcoin,ethereum")', _note: 'coin_list 用 AiCoin 的 coin_key 命名 (bitcoin/ethereum/solana 等), 不是 ticker (BTC/ETH/SOL)。拿不准用 coin.search 查准确 coin_key。' };
+    }
     const json = await apiGet('/api/v2/coin/ticker', { coin_list });
     // 实测: 后端对 coin_list CSV 里不认识的 key 静默丢弃, agent 拿到 partial
     // data 当全数据用就是 silent wrong。这里本地对比, 把缺失 key 列出来。

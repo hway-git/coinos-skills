@@ -141,24 +141,33 @@ cli({
     if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
     return apiPost('/api/upgrade/v2/hl/traders/statistics', { addresses: addrs });
   },
-  // hl_fills
-  fills: ({ address, coin, limit } = {}) => {
-    const err = requireAddress(address); if (err) return Promise.resolve(err);
+  // hl_fills — P1 #3: 空数据 _note 引导
+  fills: async ({ address, coin, limit } = {}) => {
+    const err = requireAddress(address); if (err) return err;
     const p = {}; if (coin) p.coin = coin; if (limit) p.limit = limit;
-    return apiGet(`/api/upgrade/v2/hl/fills/${address}`, p);
+    const json = await apiGet(`/api/upgrade/v2/hl/fills/${address}`, p);
+    if (json && Array.isArray(json.data) && json.data.length === 0) {
+      json._note = `fills 该地址${coin ? ` ${coin}` : ''} 近期无成交。可能: (1) 地址不活跃 (用 statistics / accounts 看是否有任何 HL 历史) (2) 该 coin 无成交但其他 coin 有 (不传 coin 看全部)。**不是接口故障**。`;
+    }
+    return json;
   },
   fills_by_oid: ({ oid }) => apiGet(`/api/upgrade/v2/hl/fills/oid/${oid}`),
   fills_by_twapid: ({ twapid }) => apiGet(`/api/upgrade/v2/hl/fills/twapid/${twapid}`),
-  top_trades: ({ coin, interval, limit } = {}) => {
-    // 实测: interval 必填, 默认 1h
-    const p = { coin, interval: interval || '1h' }; if (limit) p.limit = limit;
+  top_trades: ({ coin, interval, period, cycle, limit } = {}) => {
+    // 实测: interval 必填, 默认 1h. P0 #5 alias: 接受 period/cycle.
+    const _interval = interval || period || cycle || '1h';
+    const p = { coin, interval: _interval }; if (limit) p.limit = limit;
     return apiGet('/api/upgrade/v2/hl/fills/top-trades', p);
   },
-  // hl_orders
-  orders_latest: ({ address, coin, limit } = {}) => {
-    const err = requireAddress(address); if (err) return Promise.resolve(err);
+  // hl_orders — P1 #3: 空数据 _note 引导
+  orders_latest: async ({ address, coin, limit } = {}) => {
+    const err = requireAddress(address); if (err) return err;
     const p = {}; if (coin) p.coin = coin; if (limit) p.limit = limit;
-    return apiGet(`/api/upgrade/v2/hl/orders/${address}/latest`, p);
+    const json = await apiGet(`/api/upgrade/v2/hl/orders/${address}/latest`, p);
+    if (json && Array.isArray(json.data) && json.data.length === 0) {
+      json._note = `orders_latest 该地址${coin ? ` ${coin}` : ''} 当前无活跃挂单。常态 — 大部分地址不持续挂限价单。想看历史成交用 fills / filled_orders, 想看活跃账户状态用 statistics。**不是接口故障**。`;
+    }
+    return json;
   },
   order_by_oid: ({ oid }) => apiGet(`/api/upgrade/v2/hl/orders/oid/${oid}`),
   filled_orders: ({ address, coin, limit } = {}) => {

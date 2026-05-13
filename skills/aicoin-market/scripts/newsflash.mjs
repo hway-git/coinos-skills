@@ -2,8 +2,8 @@
 // AiCoin Newsflash (OpenData) CLI
 import { apiGet, cli } from '../lib/aicoin-api.mjs';
 
-// 标记 is_ad=1 的广告位条目, 避免 agent 把广告当头条 (跟 news.mjs 同款逻辑,
-// 但因为这两个文件没共享 lib helper, 这里复制一份)。
+// 标记广告位条目, 避免 agent 把广告当头条 (跟 news.mjs 同款逻辑, 这两个文件没共享 lib helper)。
+// 2026-05-13 P1 #5 dogfood: 除 is_ad / isAd 还要看 flashType (非 0 通常是广告/推广位)。
 function markAds(json) {
   let list = null;
   if (Array.isArray(json?.data)) list = json.data;
@@ -11,22 +11,25 @@ function markAds(json) {
   if (!Array.isArray(list)) return json;
   const adIndices = [];
   list.forEach((item, i) => {
-    if (item?.is_ad === 1 || item?.is_ad === true || item?.isAd === 1 || item?.isAd === true) {
+    const isAdFlag = item?.is_ad === 1 || item?.is_ad === true || item?.isAd === 1 || item?.isAd === true;
+    const isAdFlashType = typeof item?.flashType === 'number' && item.flashType !== 0;
+    if (isAdFlag || isAdFlashType) {
       adIndices.push(i);
     }
   });
   if (adIndices.length > 0) {
-    json._note = `本次返回 ${list.length} 条快讯中, 第 ${adIndices.join(',')} 条 (0-indexed) 是 is_ad=1 的广告位, 不是真实新闻。**总结今日头条时跳过这些 index**, 不要把广告当头条引用给用户。`;
+    json._note = `本次返回 ${list.length} 条快讯中, 第 ${adIndices.join(',')} 条 (0-indexed) 是广告位 (is_ad=1 或 flashType≠0), 不是真实新闻。**总结今日头条时跳过这些 index**, 不要把广告当头条引用给用户。`;
     json.ad_indices = adIndices;
   }
   return json;
 }
 
 cli({
-  search: async ({ keyword, word, page, page_size, size } = {}) => {
+  // P2 #3: 接受 page_size / pagesize / size 互相 alias (newsflash 跟 news 字段名不统一, 兼容)
+  search: async ({ keyword, word, page, page_size, pagesize, size } = {}) => {
     const p = { word: keyword || word };
     if (page) p.page = page;
-    const ps = page_size || size;
+    const ps = page_size || pagesize || size;
     if (ps) p.size = ps;
     return markAds(await apiGet('/api/upgrade/v2/content/newsflash/search', p));
   },

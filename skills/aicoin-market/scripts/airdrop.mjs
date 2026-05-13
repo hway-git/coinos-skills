@@ -29,7 +29,9 @@ cli({
     }
     return result;
   },
-  list: ({ source, status, page, page_size, exchange, activity_type, lan } = {}) => {
+  // 2026-05-13 P1 #8 dogfood: list 默认参数经常返 count=0, agent 当 "没空投活动" 误判。
+  // 但 airdrop.all 同一时刻能拼出 1060+ 条链上早期项目。返空时强制 _note 引导用 all。
+  list: async ({ source, status, page, page_size, exchange, activity_type, lan } = {}) => {
     const p = {};
     if (source) p.source = source;
     if (status) p.status = status;
@@ -38,7 +40,14 @@ cli({
     if (exchange) p.exchange = exchange;
     if (activity_type) p.activity_type = activity_type;
     if (lan) p.lan = lan;
-    return apiGet('/api/upgrade/v2/content/airdrop/list', p);
+    const json = await apiGet('/api/upgrade/v2/content/airdrop/list', p);
+    const count = json?.data?.count;
+    const listArr = json?.data?.list;
+    const isEmpty = count === 0 || (Array.isArray(listArr) && listArr.length === 0);
+    if (isEmpty) {
+      json._note = `airdrop.list 当前 ${status ? `status="${status}" ` : ''}筛选条件下返空。**这不代表全市场没空投** — airdrop.list 默认走交易所空投, 当前可能确实没活动 (币安 HODLer / OKX X Launch / Bitget 等交易所空投本来就少)。想要更全的项目, 改用 \`airdrop.all\` 一次拼三个维度 (交易所空投 + 交易所高亮活动 + 链上早期项目, 链上那块通常有 1000+ 条)。`;
+    }
+    return json;
   },
   detail: async ({ type, token, lan } = {}) => {
     if (!type || !token) {

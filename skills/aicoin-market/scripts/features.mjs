@@ -12,6 +12,29 @@ function fixPlatformAlias(s) {
   return s;
 }
 
+// 2026-05-13 P1 #7 dogfood: features.big_orders / agg_trades 之前只接受完整 dbkey (btcswapusdt:binance),
+// 而 coin.big_orders 接受短名 "btc" 自动解析 — agent 跨 script 切换易踩坑。
+// 复用同样的短名表, 让两边行为一致。
+const SYMBOL_ALIASES = {
+  btc: 'btcswapusdt:binance', bitcoin: 'btcswapusdt:binance',
+  btcusdt: 'btcswapusdt:binance', 'btc/usdt': 'btcswapusdt:binance',
+  btcswapusdt: 'btcswapusdt:binance',
+  eth: 'ethswapusdt:binance', ethereum: 'ethswapusdt:binance',
+  ethusdt: 'ethswapusdt:binance', 'eth/usdt': 'ethswapusdt:binance',
+  sol: 'solswapusdt:binance', solana: 'solswapusdt:binance',
+  solusdt: 'solswapusdt:binance',
+  doge: 'dogeswapusdt:binance', dogecoin: 'dogeswapusdt:binance',
+  dogeusdt: 'dogeswapusdt:binance',
+  xrp: 'xrpswapusdt:binance', xrpusdt: 'xrpswapusdt:binance',
+  bnb: 'bnbswapusdt:binance',
+};
+function resolveSymbol(symbol) {
+  if (!symbol) return symbol;
+  if (symbol.includes(':')) return fixPlatformAlias(symbol);
+  const key = symbol.toLowerCase().replace(/[\s/]/g, '');
+  return fixPlatformAlias(SYMBOL_ALIASES[key] || symbol);
+}
+
 // big_orders/agg_trades 已知不支持的交易所(实测): huobi/huobifutures/kraken/
 // deribit/mexc/kucoin/bithumb/bitfinex/binancespot 等。遇到这些 platform 直接
 // 返回一个清晰的错误说明,不去调上游浪费一次签名。
@@ -36,7 +59,14 @@ function checkBigOrdersSupport(symbol) {
 cli({
   // market_overview
   nav: ({ language, lan } = {}) => { const p = {}; const lg = language || lan; if (lg) p.lan = lg; return apiGet('/api/v2/mix/nav', p); },
-  ls_ratio: () => apiGet('/api/v2/mix/ls-ratio'),
+  // P2 #2: features.ls_ratio 跟 coin.ls_ratio / coin.long_short_ratio 是同一接口同一数据
+  ls_ratio: async () => {
+    const json = await apiGet('/api/v2/mix/ls-ratio');
+    if (json && typeof json === 'object') {
+      json._alias_note = 'features.ls_ratio 跟 coin.ls_ratio / coin.long_short_ratio 是同一接口同一数据 (端点 /api/v2/mix/ls-ratio)。优先用 coin.ls_ratio, 跟其他 coin.* 接口源同一。';
+    }
+    return json;
+  },
   liquidation: ({ currency, type, coinKey, marketKey } = {}) => {
     const p = {};
     if (currency) p.currency = currency;
@@ -67,15 +97,15 @@ cli({
     return json;
   },
   stock_market: () => apiGet('/api/v2/mix/stock-market'),
-  // order_flow — 必须经 fixPlatformAlias + 支持列表校验
+  // order_flow — P1 #7: 用 resolveSymbol (含短名解析 + fixPlatformAlias), 跟 coin.big_orders 一致
   big_orders: ({ symbol }) => {
-    const fixed = fixPlatformAlias(symbol);
+    const fixed = resolveSymbol(symbol);
     const blocked = checkBigOrdersSupport(fixed);
     if (blocked) return Promise.resolve(blocked);
     return apiGet('/api/v2/order/bigOrder', { symbol: fixed });
   },
   agg_trades: async ({ symbol }) => {
-    const fixed = fixPlatformAlias(symbol);
+    const fixed = resolveSymbol(symbol);
     const blocked = checkBigOrdersSupport(fixed);
     if (blocked) return blocked;
     const json = await apiGet('/api/v2/order/aggTrade', { symbol: fixed });
