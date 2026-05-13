@@ -24,6 +24,45 @@ function resolveKlineSymbol(symbol) {
   return KLINE_ALIASES[key] || symbol;
 }
 
+// Period 自然名 → AiCoin 后端期望的秒数字符串。
+// 2026-05-13 dogfood: subagent 传 "1day" 后端 400, 实际后端只认 "86400"。SDK
+// 应该自己转换, 别让 agent 试错。
+const PERIOD_ALIASES = {
+  '1m': '60', '1min': '60', 'm1': '60',
+  '3m': '180', '3min': '180',
+  '5m': '300', '5min': '300', 'm5': '300',
+  '15m': '900', '15min': '900', 'm15': '900',
+  '30m': '1800', '30min': '1800', 'm30': '1800',
+  '1h': '3600', '1hour': '3600', 'hour': '3600', 'h1': '3600',
+  '2h': '7200', '2hour': '7200',
+  '4h': '14400', '4hour': '14400', 'h4': '14400',
+  '6h': '21600', '6hour': '21600',
+  '12h': '43200', '12hour': '43200',
+  '1d': '86400', '1day': '86400', 'day': '86400', 'daily': '86400', 'd': '86400', 'd1': '86400',
+  '3d': '259200', '3day': '259200',
+  '1w': '604800', '1week': '604800', 'week': '604800', 'weekly': '604800', 'w': '604800', 'w1': '604800',
+  '1mon': '2592000', '1month': '2592000', 'month': '2592000', 'monthly': '2592000',
+};
+
+function resolveKlinePeriod(period) {
+  if (period == null) return period;
+  const s = String(period).trim().toLowerCase();
+  if (/^\d+$/.test(s)) return s; // 已经是秒数字符串
+  return PERIOD_ALIASES[s] || s;
+}
+
+// treasury_* 系列只覆盖 BTC / ETH 上市公司持币数据, 其他币 AiCoin 没数据源。
+// 2026-05-13 dogfood: 6 个 treasury_* action 拦截文案要一致, 不能光给 error
+// 还得给 _note 引导外部数据源, 否则 agent 拿到 400 后只会让用户改 coin 重试。
+function treasuryUnsupportedCoin(action, coin) {
+  return {
+    success: false,
+    errorCode: 400,
+    error: `${action} 仅支持 coin=BTC 或 ETH (传入: ${coin})。`,
+    _note: `treasury_* 系列 AiCoin 只覆盖 BTC / ETH 上市公司持币数据。其他币 (SOL/DOGE/XRP/...) AiCoin 没数据源, 建议查公开源: BTC 全市场储备见 bitcointreasuries.net, ETH 全市场储备见 ethtreasuries.com, 或查公司财报 10-K / 10-Q。**这是数据覆盖范围问题, 不是参数错, 不要让用户改 coin 重试**。`,
+  };
+}
+
 cli({
   // market_info
   exchanges: () => apiGet('/api/v2/market'),
@@ -53,8 +92,8 @@ cli({
   // kline
   kline: async ({ symbol, period, size = '100', since, open_time } = {}) => {
     if (!symbol) return { error: 'symbol is required. Example: "btcusdt:okex" or short name "btc"' };
-    if (!period) return { error: 'period is required. Values: "60"(1m), "300"(5m), "900"(15m), "1800"(30m), "3600"(1h), "14400"(4h), "86400"(1d), "604800"(1w)' };
-    const p = { symbol: resolveKlineSymbol(symbol), period, size };
+    if (!period) return { error: 'period is required. 自然名 "1m / 5m / 15m / 30m / 1h / 4h / 1d / 1w" 或秒数字符串 "60 / 300 / 900 / 1800 / 3600 / 14400 / 86400 / 604800" 都可。' };
+    const p = { symbol: resolveKlineSymbol(symbol), period: resolveKlinePeriod(period), size };
     if (since) p.since = since;
     if (open_time) p.open_time = open_time;
     return apiGet('/api/v2/commonKline/dataRecords', p);
@@ -134,10 +173,9 @@ cli({
   // coin_treasury
   // 实测: treasury_* 全套只支持 coin=BTC 或 ETH, 传 SOL/其他会 400。
   // 本地拦截以省签名 + 给 agent 明确边界。
+  // 2026-05-13 dogfood: 拦截一致带 _note 引导外部数据源, 别只甩 error 一句话。
   treasury_entities: async (body = {}) => {
-    if (body.coin && !/^(BTC|ETH)$/i.test(body.coin)) {
-      return { success: false, errorCode: 400, error: `treasury_entities 仅支持 coin=BTC 或 ETH (传入: ${body.coin})。其他币的上市公司持币数据 AiCoin 没覆盖, 可查公开源 bitcointreasuries.net 或 ethtreasuries.com。` };
-    }
+    if (body.coin && !/^(BTC|ETH)$/i.test(body.coin)) return treasuryUnsupportedCoin('treasury_entities', body.coin);
     const json = await apiPost('/api/upgrade/v2/coin-treasuries/entities', body);
     // 实测 (Q9 v2 subagent): share 字段对 BTC 和 ETH 量级不一致 — BTC 实例
     // 里是小数 (0.012 表示 1.2%), ETH 实例里直接是百分数 (1.2 表示 1.2%)。
@@ -148,15 +186,11 @@ cli({
     return json;
   },
   treasury_history: async (body = {}) => {
-    if (body.coin && !/^(BTC|ETH)$/i.test(body.coin)) {
-      return { success: false, errorCode: 400, error: `treasury_history 仅支持 coin=BTC 或 ETH (传入: ${body.coin})。` };
-    }
+    if (body.coin && !/^(BTC|ETH)$/i.test(body.coin)) return treasuryUnsupportedCoin('treasury_history', body.coin);
     return apiPost('/api/upgrade/v2/coin-treasuries/history', body);
   },
   treasury_accumulated: async (body = {}) => {
-    if (body.coin && !/^(BTC|ETH)$/i.test(body.coin)) {
-      return { success: false, errorCode: 400, error: `treasury_accumulated 仅支持 coin=BTC 或 ETH (传入: ${body.coin})。` };
-    }
+    if (body.coin && !/^(BTC|ETH)$/i.test(body.coin)) return treasuryUnsupportedCoin('treasury_accumulated', body.coin);
     const json = await apiPost('/api/upgrade/v2/coin-treasuries/history/accumulated', body);
     // 实测 (Q9 v2): SKILL 里描述"返 30 天每天一个点", 实际 ETH 数据返了
     // 跨 5 个月的不连续点。窗口口径跟描述对不上。
@@ -166,21 +200,15 @@ cli({
     return json;
   },
   treasury_latest_entities: async ({ coin }) => {
-    if (coin && !/^(BTC|ETH)$/i.test(coin)) {
-      return { success: false, errorCode: 400, error: `treasury_latest_entities 仅支持 coin=BTC 或 ETH (传入: ${coin})。` };
-    }
+    if (coin && !/^(BTC|ETH)$/i.test(coin)) return treasuryUnsupportedCoin('treasury_latest_entities', coin);
     return apiGet('/api/upgrade/v2/coin-treasuries/latest/entities', { coin });
   },
   treasury_latest_history: async ({ coin }) => {
-    if (coin && !/^(BTC|ETH)$/i.test(coin)) {
-      return { success: false, errorCode: 400, error: `treasury_latest_history 仅支持 coin=BTC 或 ETH (传入: ${coin})。` };
-    }
+    if (coin && !/^(BTC|ETH)$/i.test(coin)) return treasuryUnsupportedCoin('treasury_latest_history', coin);
     return apiGet('/api/upgrade/v2/coin-treasuries/latest/history', { coin });
   },
   treasury_summary: async ({ coin }) => {
-    if (coin && !/^(BTC|ETH)$/i.test(coin)) {
-      return { success: false, errorCode: 400, error: `treasury_summary 仅支持 coin=BTC 或 ETH (传入: ${coin})。` };
-    }
+    if (coin && !/^(BTC|ETH)$/i.test(coin)) return treasuryUnsupportedCoin('treasury_summary', coin);
     return apiGet('/api/upgrade/v2/coin-treasuries/summary', { coin });
   },
   // depth

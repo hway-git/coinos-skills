@@ -38,6 +38,36 @@ function wrapPositionNotFound(json, fallback) {
   return json;
 }
 
+// hl-trader 高级查询 (smart_find / discover / discover_history) 是标准版以上才有的
+// endpoint, 当前 key 拿不到。 2026-05-13 dogfood: 之前直接 raw apiPost, agent
+// 拿到的就是 raw 403 没引导。这里包一层, 业务码 / HTTP 4xx 都附加替代方案。
+// HL 上游 paywall 用 {code:"403", msg:"..."} 格式 (不是 success:false), 两种都要识别。
+async function hlAdvancedPaywall(path, params, name, fallback) {
+  try {
+    const json = await apiPost(path, params || {});
+    const isPaywall = json && (
+      (json.success === false && (json.errorCode === 403 || json.errorCode === 304))
+      || json.code === '403' || json.code === '304'
+    );
+    if (isPaywall) {
+      json.替代方案 = fallback;
+      json.实测结论 = `${name} 是 hl-trader 付费档功能 (标准版以上), 当前 key 不支持。**不要重试, 不要让用户改参数**。`;
+    }
+    return json;
+  } catch (e) {
+    if (/^API 40[34]/.test(e.message || '')) {
+      return {
+        success: false,
+        errorCode: 403,
+        error: e.message,
+        替代方案: fallback,
+        实测结论: `${name} 是 hl-trader 付费档功能 (标准版以上), 当前 key 不支持。**不要重试, 不要让用户改参数**。`,
+      };
+    }
+    throw e;
+  }
+}
+
 cli({
   // hl_trader — period 实测必填且没默认, 不传 400。这里给 "30" (30 天) 兜底。
   trader_stats: ({ address, period }) => {
@@ -249,16 +279,75 @@ cli({
     return apiGet(`/api/upgrade/v2/hl/ledger-updates/net-flow/${address}`, { days: days || '30' });
   },
   // hl_advanced
-  info: ({ type, user, extra_params }) => {
-    const body = { type }; if (user) body.user = user;
+  // 2026-05-13 dogfood: info 当前是 raw apiPost, 传错 type ("userState") 后端 400 没列枚举。
+  // 加合法 type 列表 + 别名修正 + 错误时引导。
+  info: async ({ type, user, extra_params } = {}) => {
+    const COMMON_TYPES = [
+      'clearinghouseState', 'spotClearinghouseState', 'portfolio',
+      'meta', 'spotMeta', 'allMids', 'l2Book', 'candleSnapshot',
+      'fundingHistory', 'predictedFundings',
+      'userFees', 'userFunding', 'userNonFundingLedgerUpdates',
+      'subAccounts', 'vaultDetails', 'twapHistory', 'referral',
+    ];
+    // 用户常传错的 type 名,自动纠正避免 silent 400
+    const ALIASES = {
+      userState: 'clearinghouseState',
+      spotState: 'spotClearinghouseState',
+      accountState: 'clearinghouseState',
+    };
+    if (!type) {
+      return {
+        success: false, errorCode: 400,
+        error: 'info 必填 type 参数。',
+        常用_type: COMMON_TYPES,
+        _note: 'info 是 HL /info 原生 passthrough。常用: clearinghouseState (账户状态/持仓), spotClearinghouseState (现货账户), meta (永续 universe meta), allMids (全币现价), candleSnapshot (K 线 snapshot)。完整 type 见 HL 官方 docs https://hyperliquid.gitbook.io/。',
+      };
+    }
+    const resolvedType = ALIASES[type] || type;
+    const aliasUsed = resolvedType !== type;
+    const body = { type: resolvedType };
+    if (user) body.user = user;
     if (extra_params) {
       try { Object.assign(body, typeof extra_params === 'string' ? JSON.parse(extra_params) : extra_params); } catch {}
     }
-    return apiPost('/api/upgrade/v2/hl/info', body);
+    try {
+      const json = await apiPost('/api/upgrade/v2/hl/info', body);
+      // HL 上游对未知 type 返 HTTP 200 + body {code:"400", msg:"未知的type类型..."},
+      // 不走 throw 分支。这里也要识别。
+      const code = String(json?.code ?? '');
+      const msg = String(json?.msg ?? '');
+      if ((code === '400' || /未知的type/i.test(msg))) {
+        return {
+          success: false, errorCode: 400,
+          error: msg || `info type "${type}" 后端不认`,
+          常用_type: COMMON_TYPES,
+          _note: `info type "${type}" 后端不认。常用 type 见上, 完整列表见 https://hyperliquid.gitbook.io/。注意 "userState" 已弃用, 现在叫 "clearinghouseState"。**这是 type 名问题, 不是付费问题**。`,
+          _raw: json,
+        };
+      }
+      if (aliasUsed) {
+        json._note = `type "${type}" 已自动纠正为 "${resolvedType}" (HL 官方接口名)。下次直接传纠正后的名字省一步。`;
+      }
+      return json;
+    } catch (e) {
+      // 上游 HTTP 400 throw 分支
+      if (/^API 400|未知的type/.test(e.message || '')) {
+        return {
+          success: false, errorCode: 400,
+          error: e.message,
+          常用_type: COMMON_TYPES,
+          _note: `info type "${type}" 后端不认。常用 type 见上, 完整列表见 https://hyperliquid.gitbook.io/。注意 "userState" 已弃用, 现在叫 "clearinghouseState"。**这是 type 名问题, 不是付费问题**。`,
+        };
+      }
+      throw e;
+    }
   },
-  smart_find: (params) => apiPost('/api/upgrade/v2/hl/smart/find', params || {}),
-  discover: (params) => apiPost('/api/upgrade/v2/hl/traders/discover', params || {}),
-  discover_history: (params) => apiPost('/api/upgrade/v2/hl/traders/discover-history', params || {}),
+  smart_find: (params) => hlAdvancedPaywall('/api/upgrade/v2/hl/smart/find', params, 'smart_find',
+    '想找鲸鱼/大户头寸: 改用 hl-market.mjs 的 whale_positions (按持仓量排序看头部地址) 或 whale_events (按时间窗看大额事件)。'),
+  discover: (params) => hlAdvancedPaywall('/api/upgrade/v2/hl/traders/discover', params, 'discover',
+    '想找优秀交易员: 免费档可改用 hl-market.mjs 的 tickers + whale_positions 自己筛, 或升级标准版后再用 discover。'),
+  discover_history: (params) => hlAdvancedPaywall('/api/upgrade/v2/hl/traders/discover-history', params, 'discover_history',
+    '历史发现接口同 discover, 当前 key 不支持。免费档无对应平替, 改用 whale_events 看大额事件时间线。'),
   // batch endpoints
   fills_by_builder: ({ builder, coin, limit, minVal } = {}) => {
     const p = {}; if (coin) p.coin = coin; if (limit) p.limit = limit; if (minVal) p.minVal = minVal;

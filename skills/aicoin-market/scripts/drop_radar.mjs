@@ -3,7 +3,9 @@
 import { apiGet, cli } from '../lib/aicoin-api.mjs';
 
 cli({
-  list: ({ page, page_size, status, activity_type, reward_type, min_total_raise, max_total_raise, created_at, keyword, board_keys, eco_keys, sort_by, sort_order, lan } = {}) => {
+  // 2026-05-13 dogfood: sort_by="hot" 后端返 500, 其他 sort 模式都通。
+  // catch 500 给替代方案, 别让 agent 把后端故障描述为参数错。
+  list: async ({ page, page_size, status, activity_type, reward_type, min_total_raise, max_total_raise, created_at, keyword, board_keys, eco_keys, sort_by, sort_order, lan } = {}) => {
     const p = {};
     if (page) p.page = page;
     if (page_size) p.page_size = page_size;
@@ -19,7 +21,20 @@ cli({
     if (sort_by) p.sort_by = sort_by;
     if (sort_order) p.sort_order = sort_order;
     if (lan) p.lan = lan;
-    return apiGet('/api/upgrade/v2/content/drop-radar/list', p);
+    try {
+      return await apiGet('/api/upgrade/v2/content/drop-radar/list', p);
+    } catch (e) {
+      if (sort_by === 'hot' && /^API 5\d\d/.test(e.message || '')) {
+        return {
+          success: false,
+          errorCode: 500,
+          error: e.message,
+          实测结论: 'drop_radar.list({sort_by:"hot"}) 后端当前故障 (2026-05-13 dogfood), 其他 sort 模式都通。**不要重试**, 也不要当成参数错。',
+          替代方案: '改用 sort_by 不传 (默认排序), 或换 sort_by="popularity" / "created_at" / "updated_at" / "total_raise" / "moni_score"。如需 hot 排序长期可用, 请联系 AiCoin 客服 service@aicoin.com 报修。',
+        };
+      }
+      throw e;
+    }
   },
   detail: async ({ airdrop_id, lan } = {}) => {
     if (!airdrop_id) return { error: 'airdrop_id is required. Use "list" action first to find valid IDs.' };

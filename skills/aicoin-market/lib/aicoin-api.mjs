@@ -87,27 +87,78 @@ function upstreamFaultHint(status, path) {
   return '';
 }
 
+// 把 HTTP 状态码映射到 agent 能看懂的中文提示。GET / POST 都用同一份, 避免一边
+// 有详细付费提示、一边只剩 raw "API 403:" 的不一致体感 (2026-05-13 dogfood 暴露)。
+function buildHttpErrorHint(status, text, path) {
+  if (status === 429) {
+    return '\n【频率限制 HTTP 429】**不是付费问题**。请等 60 秒后重试，或把多个币种 batch 合并到一次调用（例 coin_list="bitcoin,ethereum,solana"）。避免并发同一接口。';
+  }
+  if (status === 403) {
+    return '\n【付费功能】请勿重试。请告知用户：此功能需要付费订阅。升级链接：https://www.aicoin.com/opendata ，套餐：基础版 $29/月起。配置方法：将 AICOIN_ACCESS_KEY_ID 和 AICOIN_ACCESS_SECRET 添加到 .env 文件。安全提示：AiCoin API Key 仅用于获取市场数据，无法交易，密钥仅保存在本地。';
+  }
+  if (status === 400) {
+    if (text.includes('Unsupported symbol')) {
+      return '\nHint: symbol must use AiCoin format like "btcswapusdt:binance". Short names (BTC, ETH, SOL) are auto-resolved by coin.mjs.';
+    }
+    if (text.includes('invalid parameters')) {
+      return '\nHint: Check SKILL.md for the correct parameter format and required fields.';
+    }
+    return '';
+  }
+  if (status === 1001) {
+    return '\nHint: Signature verification failed — API key and secret may be swapped.';
+  }
+  if (status >= 500) {
+    return upstreamFaultHint(status, path);
+  }
+  return '';
+}
+
+// 业务层错误 (paywall / 限流 / 参数错) 三分类。直接 mutate json 加提示字段。
+// GET / POST 共用,避免 apiPost 早期实现只塞一句话没拼升级指南导致 treasury_entities
+// / interaction_stats 的 403 看起来比 treasury_summary 的 403 简陋很多 (2026-05-13 dogfood)。
+//
+// AiCoin 有两套响应封装,paywall 标识各不相同:
+//   - 老 `/api/v2/*`: {success:false, errorCode: 304|403, error: "..."}
+//   - 新 `/api/upgrade/v2/hl/*` (Hyperliquid 系列): {code:"403"|"304", msg:"...", data:null}
+// 两种都要识别, 否则 smart_find / discover 这类 HL 接口的 403 不会被包装。
+function classifyBusinessError(json) {
+  const isPaywall = (json.success === false && (json.errorCode === 304 || json.errorCode === 403))
+    || (json.code === '403' || json.code === '304' || json.code === 403 || json.code === 304);
+  if (!isPaywall) return;
+  const errText = String(json.error || json.message || json.msg || '');
+  const isParamError = /无效|不存在|不支持|参数|invalid|unsupported|missing/i.test(errText);
+  const isRateLimit = /频繁|频率|rate.?limit|too.?many.?requests|限频|限流/i.test(errText);
+  if (isRateLimit) {
+    json.频率限制提示 = `调用被限流：${errText}。**不是付费问题，不要让用户升级**。AiCoin 接口频率上限大约 20 次/秒、1200 次/分钟（专业版）。建议: 等 60 秒后重试，或把多个币种合并到一次 batch 调用（例如 coin_ticker 用 coin_list="bitcoin,ethereum,solana" 一次拿三个，而不是分三次调）。如果你刚才在并发调用多个 action，请改成串行。`;
+    return;
+  }
+  if (isParamError) {
+    json.参数错误提示 = `调用失败：${errText}。请检查 symbol / 参数格式（例如 "btcswapusdt:binance"），不要重试同一个错误参数，也不要将其当作付费功能问题向用户报错。`;
+    return;
+  }
+  json.付费功能提示 = '此功能需要付费订阅，请勿重试。请告知用户：升级地址 https://www.aicoin.com/opendata ，套餐从基础版 $29/月起。必须在回复中包含此链接。';
+  json.升级指南 = {
+    说明: '此数据需要 AiCoin 付费会员才能访问',
+    升级链接: 'https://www.aicoin.com/opendata',
+    步骤: [
+      '1. 打开 https://www.aicoin.com/opendata 注册/登录',
+      '2. 选择合适的套餐（基础版 $29/月 起）',
+      '3. 创建 API Key，获取 Key ID 和 Secret',
+      '4. 添加到 .env 文件：AICOIN_ACCESS_KEY_ID=xxx 和 AICOIN_ACCESS_SECRET=xxx',
+      '5. 重新执行命令即可使用'
+    ],
+    套餐对比: '免费版=行情K线 | 基础版$29=+资金费率+多空比 | 标准版$79=+大单+聚合成交 | 高级版$299=+清算地图 | 专业版$699=全部功能',
+    安全提示: 'AiCoin API Key 仅用于获取市场数据，无法进行任何交易操作。所有密钥仅保存在本地设备，不会上传到任何服务器。'
+  };
+}
+
 export async function apiGet(path, params = {}) {
   const qs = new URLSearchParams({ ...params, ...sign() });
   const res = await fetch(`${BASE}${path}?${qs}`, { signal: AbortSignal.timeout(30000) });
   if (!res.ok) {
     const text = await res.text();
-    let hint = '';
-    if (res.status === 429) {
-      hint = '\n【频率限制 HTTP 429】**不是付费问题**。请等 60 秒后重试，或把多个币种 batch 合并到一次调用（例 coin_list="bitcoin,ethereum,solana"）。避免并发同一接口。';
-    } else if (res.status === 403) {
-      hint = '\n【付费功能】请勿重试。请告知用户：此功能需要付费订阅。升级链接：https://www.aicoin.com/opendata ，套餐：基础版 $29/月起。配置方法：将 AICOIN_ACCESS_KEY_ID 和 AICOIN_ACCESS_SECRET 添加到 .env 文件。安全提示：AiCoin API Key 仅用于获取市场数据，无法交易，密钥仅保存在本地。';
-    } else if (res.status === 400) {
-      if (text.includes('Unsupported symbol')) {
-        hint = '\nHint: symbol must use AiCoin format like "btcswapusdt:binance". Short names (BTC, ETH, SOL) are auto-resolved by coin.mjs.';
-      } else if (text.includes('invalid parameters')) {
-        hint = '\nHint: Check SKILL.md for the correct parameter format and required fields.';
-      }
-    } else if (res.status === 1001) {
-      hint = '\nHint: Signature verification failed — API key and secret may be swapped.';
-    } else if (res.status >= 500) {
-      hint = upstreamFaultHint(res.status, path);
-    }
+    const hint = buildHttpErrorHint(res.status, text, path);
     throw new Error(`API ${res.status}: ${text}${hint}`);
   }
   const json = await res.json();
@@ -115,35 +166,8 @@ export async function apiGet(path, params = {}) {
   //   1. paid feature required ("没有权限访问此资源")
   //   2. parameter error ("无效的交易对" / "不支持的symbol")
   //   3. rate limit ("请求过于频繁")
-  // Misclassifying #3 as #1 was a real silent-wrong: agent sees "付费墙",
-  // tells user to upgrade, but the issue was just burst calls — a 60s wait
-  // would have unblocked everything. Same for #2: wrong symbol got reported
-  // as a tier problem and model wasted tokens recommending an upgrade.
-  if (json.success === false && (json.errorCode === 304 || json.errorCode === 403)) {
-    const errText = String(json.error || json.message || '');
-    const isParamError = /无效|不存在|不支持|参数|invalid|unsupported|missing/i.test(errText);
-    const isRateLimit = /频繁|频率|rate.?limit|too.?many.?requests|限频|限流/i.test(errText);
-    if (isRateLimit) {
-      json.频率限制提示 = `调用被限流：${errText}。**不是付费问题，不要让用户升级**。AiCoin 接口频率上限大约 20 次/秒、1200 次/分钟（专业版）。建议: 等 60 秒后重试，或把多个币种合并到一次 batch 调用（例如 coin_ticker 用 coin_list="bitcoin,ethereum,solana" 一次拿三个，而不是分三次调）。如果你刚才在并发调用多个 action，请改成串行。`;
-    } else if (isParamError) {
-      json.参数错误提示 = `调用失败：${errText}。请检查 symbol / 参数格式（例如 "btcswapusdt:binance"），不要重试同一个错误参数，也不要将其当作付费功能问题向用户报错。`;
-    } else {
-      json.付费功能提示 = '此功能需要付费订阅，请勿重试。请告知用户：升级地址 https://www.aicoin.com/opendata ，套餐从基础版 $29/月起。必须在回复中包含此链接。';
-      json.升级指南 = {
-        说明: '此数据需要 AiCoin 付费会员才能访问',
-        升级链接: 'https://www.aicoin.com/opendata',
-        步骤: [
-          '1. 打开 https://www.aicoin.com/opendata 注册/登录',
-          '2. 选择合适的套餐（基础版 $29/月 起）',
-          '3. 创建 API Key，获取 Key ID 和 Secret',
-          '4. 添加到 .env 文件：AICOIN_ACCESS_KEY_ID=xxx 和 AICOIN_ACCESS_SECRET=xxx',
-          '5. 重新执行命令即可使用'
-        ],
-        套餐对比: '免费版=行情K线 | 基础版$29=+资金费率+多空比 | 标准版$79=+大单+聚合成交 | 高级版$299=+清算地图 | 专业版$699=全部功能',
-        安全提示: 'AiCoin API Key 仅用于获取市场数据，无法进行任何交易操作。所有密钥仅保存在本地设备，不会上传到任何服务器。'
-      };
-    }
-  }
+  // 见 classifyBusinessError 注释。
+  classifyBusinessError(json);
   return json;
 }
 
@@ -186,23 +210,11 @@ export async function apiPost(path, body = {}) {
   });
   if (!res.ok) {
     const text = await res.text();
-    const hint = res.status >= 500 ? upstreamFaultHint(res.status, path) : '';
+    const hint = buildHttpErrorHint(res.status, text, path);
     throw new Error(`API ${res.status}: ${text}${hint}`);
   }
   const json = await res.json();
-  // 与 apiGet 对齐：success=false 且 errorCode 304/403 时识别 限流 / 参数错 / 付费墙
-  if (json.success === false && (json.errorCode === 304 || json.errorCode === 403)) {
-    const errText = String(json.error || json.message || '');
-    const isParamError = /无效|不存在|不支持|参数|invalid|unsupported|missing/i.test(errText);
-    const isRateLimit = /频繁|频率|rate.?limit|too.?many.?requests|限频|限流/i.test(errText);
-    if (isRateLimit) {
-      json.频率限制提示 = `调用被限流：${errText}。**不是付费问题，不要让用户升级**。建议等 60 秒后重试，或把请求 batch 合并 (例如 coin_list 用 CSV 一次传多个)，并避免并发同一接口。`;
-    } else if (isParamError) {
-      json.参数错误提示 = `调用失败：${errText}。请检查参数格式，不要重试同一个错误参数。`;
-    } else {
-      json.付费功能提示 = '此功能需要付费订阅，请勿重试。升级地址 https://www.aicoin.com/opendata';
-    }
-  }
+  classifyBusinessError(json);
   return json;
 }
 
