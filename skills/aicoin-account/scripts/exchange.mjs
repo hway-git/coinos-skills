@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // CCXT Exchange Trading CLI
 // Requires: npm install ccxt
-import { cli } from '../lib/aicoin-api.mjs';
+import { cli } from '../lib/cli.mjs';
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

@@ -13,7 +13,7 @@ if (PROXY_URL) {
   } catch {}
 }
 
-// ── .env loading (same pattern as aicoin-api.mjs) ──
+// ── .env loading ──
 function loadEnv() {
   const candidates = [
     resolve(process.cwd(), '.env'),
@@ -161,7 +161,7 @@ async function handleResponse(res) {
   return { code: '0', data: json.data };
 }
 
-// ── CLI dispatcher (same pattern as aicoin-api.mjs) ──
+// ── CLI dispatcher ──
 export function cli(handlers) {
   const [action, ...rest] = process.argv.slice(2);
   if (!action || !handlers[action]) {
