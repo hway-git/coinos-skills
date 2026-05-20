@@ -6,3 +6,5 @@ package-lock.json
 *.sqlite
 *.sqlite-journal
 .env
+__pycache__/
+*.pyc

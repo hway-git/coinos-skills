@@ -17,19 +17,19 @@ export const AVAILABLE_INDICATORS = [
 ];
 
 export const AVAILABLE_AICOIN_DATA = [
-  'funding_rate (基础版 $29/mo)',
-  'ls_ratio (基础版 $29/mo)',
-  'big_orders (标准版 $79/mo)',
-  'open_interest (专业版 $699/mo)',
-  'liquidation_map (高级版 $299/mo)',
+  'funding_rate (付费套餐)',
+  'ls_ratio (付费套餐)',
+  'big_orders (付费套餐)',
+  'open_interest (v3 聚合 OI 历史暂未接通，会自动降级)',
+  'liquidation_map (付费套餐)',
 ];
 
 export const PAID_DATA = {
-  funding_rate: '基础版 ($29/mo)',
-  ls_ratio: '基础版 ($29/mo)',
-  big_orders: '标准版 ($79/mo)',
-  open_interest: '专业版 ($699/mo)',
-  liquidation_map: '高级版 ($299/mo)',
+  funding_rate: '付费套餐',
+  ls_ratio: '付费套餐',
+  big_orders: '付费套餐',
+  open_interest: '付费套餐（注意 v3 聚合 OI 历史暂未接通）',
+  liquidation_map: '付费套餐',
 };
 
 export function buildStrategyCode(name, tf, desc, ds, indicators, entryLogic, exitLogic, direction = 'long') {
@@ -267,82 +267,48 @@ export function buildStrategyCode(name, tf, desc, ds, indicators, entryLogic, ex
     L.push(`            _sd = os.path.dirname(os.path.abspath(__file__))`);
     L.push(`            if _sd not in sys.path:`);
     L.push(`                sys.path.insert(0, _sd)`);
-    L.push(`            from aicoin_data import AiCoinData, ccxt_to_aicoin`);
+    L.push(`            from aicoin_data import AiCoinData`);
     L.push(`            ac = AiCoinData(cache_ttl=300)`);
     L.push(`            pair = metadata.get('pair', 'BTC/USDT:USDT')`);
     L.push(`            exchange = self.config.get('exchange', {}).get('name', 'binance')`);
-    L.push(`            symbol = ccxt_to_aicoin(pair, exchange)`);
-    if (has('open_interest'))
-      L.push(`            base = pair.split('/')[0]`);
     L.push(``);
 
     if (has('funding_rate')) {
       L.push(`            try:`);
-      L.push(`                data = ac.funding_rate(symbol, weighted=True, limit='5')`);
-      L.push(`                items = data.get('data', [])`);
-      L.push(`                if isinstance(items, list) and items:`);
-      L.push(`                    latest = items[0]`);
-      L.push(`                    if isinstance(latest, dict) and 'close' in latest:`);
-      L.push(`                        self._ac_funding_rate = float(latest['close']) * 100`);
-      L.push(`                        logger.info(f"AiCoin funding rate for {pair}: {self._ac_funding_rate:.4f}%")`);
+      L.push(`                self._ac_funding_rate = ac.funding_rate_pct(pair, exchange)`);
+      L.push(`                logger.info(f"AiCoin funding rate for {pair}: {self._ac_funding_rate:.4f}%")`);
       L.push(`            except Exception as e:`);
       L.push(`                logger.debug(f"AiCoin funding_rate unavailable: {e}")`);
       L.push(``);
     }
     if (has('ls_ratio')) {
       L.push(`            try:`);
-      L.push(`                ls = ac.ls_ratio()`);
-      L.push(`                detail = ls.get('data', {}).get('detail', {})`);
-      L.push(`                if detail:`);
-      L.push(`                    ratio = float(detail.get('last', 1.0))`);
-      L.push(`                    self._ac_ls_ratio = max(0.0, min(1.0, ratio / (1.0 + ratio)))`);
-      L.push(`                    logger.info(f"AiCoin L/S ratio: {self._ac_ls_ratio:.2f}")`);
+      L.push(`                self._ac_ls_ratio = ac.ls_ratio_norm()`);
+      L.push(`                logger.info(f"AiCoin L/S ratio: {self._ac_ls_ratio:.2f}")`);
       L.push(`            except Exception as e:`);
       L.push(`                logger.debug(f"AiCoin ls_ratio unavailable: {e}")`);
       L.push(``);
     }
     if (has('big_orders')) {
       L.push(`            try:`);
-      L.push(`                orders = ac.big_orders(symbol)`);
-      L.push(`                if 'data' in orders and isinstance(orders['data'], list):`);
-      L.push(`                    buy_vol = sum(float(o.get('amount', 0)) for o in orders['data'] if o.get('side', '').lower() in ('buy', 'bid', 'long'))`);
-      L.push(`                    sell_vol = sum(float(o.get('amount', 0)) for o in orders['data'] if o.get('side', '').lower() in ('sell', 'ask', 'short'))`);
-      L.push(`                    total = buy_vol + sell_vol`);
-      L.push(`                    if total > 0:`);
-      L.push(`                        self._ac_whale_signal = (buy_vol - sell_vol) / total`);
-      L.push(`                        logger.info(f"AiCoin whale signal for {pair}: {self._ac_whale_signal:.2f}")`);
+      L.push(`                self._ac_whale_signal = ac.whale_signal(pair, exchange)`);
+      L.push(`                logger.info(f"AiCoin whale signal for {pair}: {self._ac_whale_signal:.2f}")`);
       L.push(`            except Exception as e:`);
       L.push(`                logger.debug(f"AiCoin big_orders unavailable: {e}")`);
       L.push(``);
     }
     if (has('open_interest')) {
       L.push(`            try:`);
-      L.push(`                oi_data = ac.open_interest(base, interval='${tf}', limit='10')`);
-      L.push(`                if 'data' in oi_data and isinstance(oi_data['data'], list) and len(oi_data['data']) >= 2:`);
-      L.push(`                    def get_oi(item):`);
-      L.push(`                        for k in ('openInterest', 'open_interest', 'oi', 'value'):`);
-      L.push(`                            if k in item: return float(item[k])`);
-      L.push(`                        return 0`);
-      L.push(`                    first_oi, last_oi = get_oi(oi_data['data'][0]), get_oi(oi_data['data'][-1])`);
-      L.push(`                    if first_oi > 0:`);
-      L.push(`                        change = (last_oi - first_oi) / first_oi * 100`);
-      L.push(`                        self._ac_oi_rising = change > 3.0`);
-      L.push(`                        logger.info(f"AiCoin OI: rising={self._ac_oi_rising}, change={change:.2f}%")`);
+      L.push(`                self._ac_oi_rising, _chg = ac.oi_trend(pair, exchange)`);
+      L.push(`                logger.info(f"AiCoin OI rising={self._ac_oi_rising} change={_chg:.2f}%")`);
       L.push(`            except Exception as e:`);
       L.push(`                logger.debug(f"AiCoin OI unavailable: {e}")`);
       L.push(``);
     }
     if (has('liquidation_map')) {
       L.push(`            try:`);
-      L.push(`                liq = ac.liquidation_map(symbol, cycle='24h')`);
-      L.push(`                if 'data' in liq and isinstance(liq['data'], dict):`);
-      L.push(`                    d = liq['data']`);
-      L.push(`                    long_liq = float(d.get('longLiquidation', d.get('long_vol', 0)))`);
-      L.push(`                    short_liq = float(d.get('shortLiquidation', d.get('short_vol', 0)))`);
-      L.push(`                    total = long_liq + short_liq`);
-      L.push(`                    if total > 0:`);
-      L.push(`                        self._ac_liq_bias = (short_liq - long_liq) / total`);
-      L.push(`                        logger.info(f"AiCoin liq bias for {pair}: {self._ac_liq_bias:.2f}")`);
+      L.push(`                self._ac_liq_bias = ac.liq_bias(pair, exchange)`);
+      L.push(`                logger.info(f"AiCoin liq bias for {pair}: {self._ac_liq_bias:.2f}")`);
       L.push(`            except Exception as e:`);
       L.push(`                logger.debug(f"AiCoin liquidation_map unavailable: {e}")`);
       L.push(``);

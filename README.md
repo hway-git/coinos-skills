@@ -273,12 +273,12 @@ Indicators:     RSI, Bollinger Bands
    ┌──────▼──────┐ ┌────▼────┐ ┌────▼────┐ ┌────▼────┐ ┌─────▼─────┐
    │   market    │ │ trading │ │freqtrade│ │  hyper  │ │  account  │
    │             │ │         │ │         │ │ liquid  │ │           │
-   │ coin.mjs    │ │exchange │ │ft-deploy│ │hl-market│ │exchange   │
-   │ market.mjs  │ │  .mjs   │ │  .mjs   │ │  .mjs   │ │  .mjs     │
-   │ news.mjs    │ │auto-    │ │ ft.mjs  │ │hl-trader│ │register   │
-   │ features.mjs│ │trade.mjs│ │ft-dev   │ │  .mjs   │ │  .mjs     │
-   │ twitter.mjs │ │         │ │  .mjs   │ │         │ │           │
-   │newsflash.mjs│ │         │ │         │ │         │ │           │
+   │ aicoin.mjs  │ │exchange │ │ft-deploy│ │aicoin   │ │exchange   │
+   │             │ │  .mjs   │ │  .mjs   │ │  .mjs   │ │  .mjs     │
+   │ (one tool,  │ │auto-    │ │ ft.mjs  │ │(one tool│ │register   │
+   │  all v3     │ │trade.mjs│ │ft-dev   │ │ all v3) │ │  .mjs     │
+   │  endpoints) │ │         │ │  .mjs   │ │         │ │           │
+   │             │ │         │ │         │ │         │ │           │
    └──────┬──────┘ └────┬────┘ └────┬────┘ └────┬────┘ └─────┬─────┘
           │             │           │           │             │
           └─────────────┴───────┬───┴───────────┘             │
@@ -291,7 +291,7 @@ Indicators:     RSI, Bollinger Bands
 
 <div align="center">
 
-Each skill is **self-contained** with its own `SKILL.md`, `lib/`, and `scripts/`. All scripts share a common `aicoin-api.mjs` client library.
+Each skill is **self-contained** with its own `SKILL.md`, `lib/`, and `scripts/`. `aicoin-market` and `aicoin-hyperliquid` use a single catalog-driven v3 client (`scripts/aicoin.mjs` + `lib/client.mjs`) that can call any of the 183 AiCoin Open API v3 endpoints.
 
 <br />
 <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
@@ -376,8 +376,8 @@ CoinOS:  Fetches 100 candles from OKX, returns OHLCV data
 
 ```bash
 # Direct script call
-node skills/aicoin-market/scripts/market.mjs kline \
-  '{"symbol":"ethusdt:okex","period":"3600","size":"100"}'
+node skills/aicoin-market/scripts/aicoin.mjs market/klines \
+  '{"coin_key":"ethereum","market":"okx","interval":"1h","limit":100}'
 ```
 
 </details>
@@ -488,14 +488,7 @@ coinos-skills/
 │   │   ├── SKILL.md
 │   │   ├── lib/
 │   │   └── scripts/
-│   │       ├── coin.mjs          Prices, tickers, coin info
-│   │       ├── market.mjs        K-lines, funding rates, OI
-│   │       ├── features.mjs      Whale orders, large trades
-│   │       ├── news.mjs          News feed, search
-│   │       ├── newsflash.mjs     Breaking news alerts
-│   │       ├── twitter.mjs       Crypto Twitter/X feed
-│   │       ├── airdrop.mjs       Airdrop queries
-│   │       └── drop_radar.mjs    Drop radar & project analysis
+│   │       └── aicoin.mjs        One CLI → all 183 AiCoin v3 endpoints (catalog-driven)
 │   │
 │   ├── aicoin-trading/       # Exchange trading
 │   │   ├── SKILL.md
@@ -516,8 +509,7 @@ coinos-skills/
 │   │   ├── SKILL.md
 │   │   ├── lib/
 │   │   └── scripts/
-│   │       ├── hl-market.mjs     Tickers, orderbook, trades
-│   │       └── hl-trader.mjs     Whale positions, PnL, leaderboard
+│   │       └── aicoin.mjs        One CLI → all Hyperliquid v3 endpoints
 │   │
 │   └── aicoin-account/       # Account management
 │       ├── SKILL.md

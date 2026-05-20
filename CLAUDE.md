@@ -35,7 +35,7 @@ coinos-skills/
 └── .claude-plugin/         # 插件 metadata
 ```
 
-每个 skill 自包含 (`SKILL.md`, `lib/`, `scripts/`). aicoin-* skill 共用 `../lib/aicoin-api.mjs`; aicoin-onchain 用自己的 `lib/okx-api.mjs`.
+每个 skill 自包含 (`SKILL.md`, `lib/`, `scripts/`). aicoin-market / aicoin-hyperliquid 用 v3 client (`lib/client.mjs` + `scripts/aicoin.mjs` + `lib/endpoints.json` 快照, 调 AiCoin Open API **v3**); aicoin-freqtrade 策略内取数用 `lib/aicoin_data.py` (也是 v3); aicoin-onchain 用自己的 `lib/okx-api.mjs`.
 
 ## CoinClaw 三引擎适配
 

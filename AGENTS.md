@@ -21,7 +21,7 @@ CoinClaw 用 Helm 起的实例 pod 有三种引擎 — **OpenClaw / Hermes / Cla
 
 ### 一、禁止本地计算技术指标
 
-不要用 pandas / talib / 心算计算 MA / EMA / MACD / RSI / KDJ / BOLL / ADX / ATR 给用户看. 必须调 `aicoin-market` 的 `kline` / `ai_analysis` / `signal_alert` 等接口, 或者调 freqtrade `/api/v1/pair_history` 拿 daemon 算好的指标值. 本地算的指标常因取样窗口 / 周期口径 / 收盘价定义跟交易所 / freqtrade 显示值不一致, 用户立刻发现 → 信任度归零.
+不要用 pandas / talib / 心算计算 MA / EMA / MACD / RSI / KDJ / BOLL / ADX / ATR 给用户看. 必须调 `aicoin-market` 的 `market/klines` / `market/indicator-klines` / `signals/*` 等接口, 或者调 freqtrade `/api/v1/pair_history` 拿 daemon 算好的指标值. 本地算的指标常因取样窗口 / 周期口径 / 收盘价定义跟交易所 / freqtrade 显示值不一致, 用户立刻发现 → 信任度归零.
 
 ### 二、禁止自己推算合约张数 / 保证金 / 爆仓价
 
@@ -45,13 +45,13 @@ CoinClaw 用 Helm 起的实例 pod 有三种引擎 — **OpenClaw / Hermes / Cla
 
 **强制执行顺序, 违反任何一步都是错**:
 
-1. **先调** `aicoin-market` 的 `coin_ticker` 拿当前实时价 — 这一步**所有**涉及价格的对话都要做(用户给的价 / agent 自己要引用的价 / 市场观察 / 策略推荐 等)
+1. **先调** `aicoin-market` 的 `coins/tickers` 拿当前实时价 — 这一步**所有**涉及价格的对话都要做(用户给的价 / agent 自己要引用的价 / 市场观察 / 策略推荐 等)
 2. 如果用户给了具体价格, **比较** vs 现价
 3. 差 **> 2%** → **STOP**: 整条消息**只**含反问问题. 禁止附 P&L 计算 / "假设场景"浮盈表 / "参考数字" / "如果用现价计算..."等绕开反问的内容. 等用户回复才能算.
 4. 反问模板（直接照抄换数字）:
    > "我查了下 BTC 现价 $76,XXX, 跟你说的 $70,000 差 8.7%. 这是哪天开的仓?还是想问历史假设场景?"
 5. 差 **< 2%** → 直接用现价继续, 不打扰
-6. **agent 自己引用价格**(写策略推荐 / 市场观察 / 趋势分析 等): **禁止**凭印象 hardcode 具体数字. 必须先 `coin_ticker` 拿现价再说"现在 BTC 在 X 区域..."
+6. **agent 自己引用价格**(写策略推荐 / 市场观察 / 趋势分析 等): **禁止**凭印象 hardcode 具体数字. 必须先 `coins/tickers` 拿现价再说"现在 BTC 在 X 区域..."
 7. 明确假设场景（"如果 BTC 涨到 X"、"假如 BTC 60k 时…"）不需 sanity check
 
 **违反规则的反例**:
@@ -59,7 +59,7 @@ CoinClaw 用 Helm 起的实例 pod 有三种引擎 — **OpenClaw / Hermes / Cla
 - ❌ 你输出反问后又附"如果想用现价 $76k 计算参考, 浮盈大概 +$30k" — 用户没回答你就先算了 = 错
 - ❌ 用户问"现在做策略合不合适", 你自答"BTC 在 95k 偏空震荡推荐 RSI 反转..." — 95k 是凭记忆, 真实 75k = 错
 - ✅ 只输出反问问题, 等用户告诉你开仓日期, 才计算
-- ✅ 用户问策略, 你先 `coin_ticker` 拿到 BTC 75k, 再说"BTC 在 75k 区域偏空震荡..."
+- ✅ 用户问策略, 你先 `coins/tickers` 拿到 BTC 75k, 再说"BTC 在 75k 区域偏空震荡..."
 
 ## Freqtrade dashboard 数据对齐规则
 

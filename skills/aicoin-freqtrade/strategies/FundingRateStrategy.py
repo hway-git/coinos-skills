@@ -87,36 +87,20 @@ class FundingRateStrategy(IStrategy):
         return dataframe
 
     def _update_funding(self, metadata: dict):
-        """Fetch latest funding rate from AiCoin."""
+        """Fetch the latest funding rate from AiCoin (live/dry-run only)."""
         try:
             import sys, os
             _sd = os.path.dirname(os.path.abspath(__file__))
             if _sd not in sys.path:
                 sys.path.insert(0, _sd)
-            from aicoin_data import AiCoinData, ccxt_to_aicoin
+            from aicoin_data import AiCoinData
             ac = AiCoinData(cache_ttl=300)
             pair = metadata.get('pair', 'BTC/USDT:USDT')
             exchange = self.config.get('exchange', {}).get('name', 'binance')
-            symbol = ccxt_to_aicoin(pair, exchange)
 
-            # Try weighted cross-exchange rate first (more accurate)
             try:
-                data = ac.funding_rate(symbol, weighted=True, limit='5')
-                rate = self._extract_funding_rate(data)
-                if rate is not None:
-                    self._ac_funding_rate = rate
-                    logger.info(f"AiCoin weighted funding rate for {pair}: {rate:.4f}%")
-                    return
-            except Exception:
-                pass
-
-            # Fallback to single-exchange rate
-            try:
-                data = ac.funding_rate(symbol, weighted=False, limit='5')
-                rate = self._extract_funding_rate(data)
-                if rate is not None:
-                    self._ac_funding_rate = rate
-                    logger.info(f"AiCoin funding rate for {pair}: {rate:.4f}%")
+                self._ac_funding_rate = ac.funding_rate_pct(pair, exchange)
+                logger.info(f"AiCoin funding rate for {pair}: {self._ac_funding_rate:.4f}%")
             except Exception as e:
                 logger.debug(f"AiCoin funding_rate unavailable: {e}")
 
@@ -124,25 +108,6 @@ class FundingRateStrategy(IStrategy):
             logger.warning("aicoin_data module not found. Run ft-deploy.mjs to install.")
         except Exception as e:
             logger.warning(f"AiCoin data error: {e}")
-
-    @staticmethod
-    def _extract_funding_rate(data: dict):
-        """Extract the latest funding rate as a percentage.
-        AiCoin funding_rate API returns OHLC data:
-          { code: "0", data: [{ time, open, high, low, close }, ...] }
-        The 'close' field is the funding rate (e.g., 5.252e-05 = 0.005252%).
-        """
-        try:
-            items = data.get('data', [])
-            if isinstance(items, list) and items:
-                latest = items[0]  # Most recent first
-                if isinstance(latest, dict) and 'close' in latest:
-                    rate = float(latest['close'])
-                    # Rate is already in decimal (e.g., 5e-05), convert to percentage
-                    return rate * 100  # 5e-05 -> 0.005%
-        except Exception:
-            pass
-        return None
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         # Long: price at BB lower + RSI oversold + volume confirmation

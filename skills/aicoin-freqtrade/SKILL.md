@@ -119,7 +119,7 @@ node scripts/ft-deploy.mjs create_strategy '{"name":"WhaleStrat","timeframe":"15
 可选 `direction`: `"long"` (默认,只做多) | `"short"` (只做空) | `"both"` (双向)。
 **用户说"RSI<30 买入, RSI>70 卖出"→ direction="long"**(RSI>70 = 平多, 不是开空)。只有用户明确说"做空 / 双向 / 多空都做"时才用 `"both"` 或 `"short"`。
 
-可选 `aicoin_data`: `funding_rate` (基础版), `ls_ratio` (基础版), `big_orders` (标准版), `open_interest` (专业版), `liquidation_map` (高级版).
+可选 `aicoin_data`: `funding_rate`、`ls_ratio`、`big_orders`、`liquidation_map`（都需付费套餐），`open_interest`（v3 聚合 OI 历史暂未接通，会自动降级到默认值）。
 
 **生成器的局限**：只能组合预设指标，不支持跨周期、多币种轮动、自定义复合指标。遇到这些需求直接走 B。
 
@@ -137,33 +137,29 @@ node scripts/ft-deploy.mjs create_strategy '{"name":"WhaleStrat","timeframe":"15
 
 用 AiCoin Python SDK (`aicoin_data.py`, image build 时已复制到上面目录, 也由 `create_strategy` 兜底拷贝):
 
+它封装了 AiCoin Open API v3：
+
 ```python
-from aicoin_data import AiCoinData, ccxt_to_aicoin
+from aicoin_data import AiCoinData
 
-ac = AiCoinData(cache_ttl=300)
-symbol = ccxt_to_aicoin("BTC/USDT:USDT", "binance")  # → "btcswapusdt:binance"
+ac = AiCoinData(cache_ttl=300)   # 自动从 .env 读 key，内置 5 分钟缓存
 
-# 免费版
-ac.coin_ticker("bitcoin")
-ac.kline(symbol, period="3600")
-ac.hot_coins("market")
+# 高层信号 —— 直接返回能用的数字，丢进策略即可
+ac.whale_signal("BTC/USDT:USDT", "binance")        # 大单买卖压力 -1..+1
+ac.ls_ratio_norm()                                 # 多空比 0..1（>0.5 偏多）
+ac.funding_rate_pct("BTC/USDT:USDT", "binance")    # 最新资金费率（百分比）
+ac.liq_bias("BTC/USDT:USDT", "binance")            # 清算图方向偏向 -1..+1
 
-# 基础版 ($29/mo)
-ac.funding_rate(symbol)
-ac.funding_rate(symbol, weighted=True)
-ac.ls_ratio()
+# 原始数据
+ac.coin_ticker("bitcoin,ethereum")                 # 实时行情
+ac.klines("BTC/USDT", "binance", interval="1h", limit=100)
 
-# 标准版 ($79/mo)
-ac.big_orders(symbol)
-ac.agg_trades(symbol)
-
-# 高级版 ($299/mo)
-ac.liquidation_map(symbol, cycle="24h")
-
-# 专业版 ($699/mo)
-ac.open_interest("BTC", interval="15m")
-ac.ai_analysis(["BTC"])
+# 任意 v3 接口 —— path 是 /api/v3/ 后那段，清单见 https://open.aicoin.com/api/v3/_catalog
+ac.get("markets/hot-coins", {"tab_key": "defi"})
+ac.get("hyperliquid/whales/open-positions", {"coin": "BTC"})
 ```
+
+回测期 AiCoin 实时数据不可用，高层信号会抛异常 —— 策略里要 `try/except` 兜底用默认值。资金费率、大单、清算等需要付费套餐，没权限同样抛异常（一样兜底）。
 
 #### 完整模板
 
@@ -217,15 +213,11 @@ class MyStrategy(IStrategy):
             _sd = os.path.dirname(os.path.abspath(__file__))
             if _sd not in sys.path:
                 sys.path.insert(0, _sd)
-            from aicoin_data import AiCoinData, ccxt_to_aicoin
+            from aicoin_data import AiCoinData
             ac = AiCoinData(cache_ttl=300)
             pair = metadata.get('pair', 'BTC/USDT:USDT')
             exchange = self.config.get('exchange', {}).get('name', 'binance')
-            symbol = ccxt_to_aicoin(pair, exchange)
-            data = ac.funding_rate(symbol, weighted=True, limit='5')
-            items = data.get('data', [])
-            if isinstance(items, list) and items:
-                self._ac_funding_rate = float(items[0].get('close', 0)) * 100
+            self._ac_funding_rate = ac.funding_rate_pct(pair, exchange)
         except Exception as e:
             logger.warning(f"AiCoin data error: {e}")
 

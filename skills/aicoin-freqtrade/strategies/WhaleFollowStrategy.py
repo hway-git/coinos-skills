@@ -84,30 +84,27 @@ class WhaleFollowStrategy(IStrategy):
         return dataframe
 
     def _update_aicoin_data(self, metadata: dict):
-        """Fetch latest AiCoin whale data."""
+        """Fetch latest AiCoin whale data (live/dry-run only)."""
         try:
             import sys, os
             _sd = os.path.dirname(os.path.abspath(__file__))
             if _sd not in sys.path:
                 sys.path.insert(0, _sd)
-            from aicoin_data import AiCoinData, ccxt_to_aicoin
+            from aicoin_data import AiCoinData
             ac = AiCoinData(cache_ttl=300)
             pair = metadata.get('pair', 'BTC/USDT:USDT')
             exchange = self.config.get('exchange', {}).get('name', 'binance')
-            symbol = ccxt_to_aicoin(pair, exchange)
 
-            # Whale big orders
+            # Whale order-book pressure: -1 (selling) .. +1 (buying)
             try:
-                orders = ac.big_orders(symbol)
-                self._ac_whale_signal = self._parse_whale_signal(orders)
+                self._ac_whale_signal = ac.whale_signal(pair, exchange)
                 logger.info(f"AiCoin whale signal for {pair}: {self._ac_whale_signal:.2f}")
             except Exception as e:
-                logger.debug(f"AiCoin big_orders unavailable: {e}")
+                logger.debug(f"AiCoin whale data unavailable: {e}")
 
-            # Long/short ratio
+            # Long/short ratio normalized to 0..1 ( >0.5 = more longs )
             try:
-                ls = ac.ls_ratio()
-                self._ac_ls_ratio = self._parse_ls_ratio(ls)
+                self._ac_ls_ratio = ac.ls_ratio_norm()
                 logger.info(f"AiCoin L/S ratio: {self._ac_ls_ratio:.2f}")
             except Exception as e:
                 logger.debug(f"AiCoin ls_ratio unavailable: {e}")
@@ -116,51 +113,6 @@ class WhaleFollowStrategy(IStrategy):
             logger.warning("aicoin_data module not found. Run ft-deploy.mjs to install.")
         except Exception as e:
             logger.warning(f"AiCoin data error: {e}")
-
-    @staticmethod
-    def _parse_whale_signal(data: dict) -> float:
-        """Parse big_orders response into a -1 to +1 signal.
-        Positive = whale buying pressure, Negative = whale selling pressure.
-        """
-        try:
-            # big_orders response may contain buy/sell volume or order lists
-            # Try common response structures
-            if 'data' in data:
-                items = data['data']
-                if isinstance(items, list):
-                    buy_vol = sum(float(o.get('amount', 0)) for o in items
-                                 if o.get('side', '').lower() in ('buy', 'bid', 'long'))
-                    sell_vol = sum(float(o.get('amount', 0)) for o in items
-                                  if o.get('side', '').lower() in ('sell', 'ask', 'short'))
-                    total = buy_vol + sell_vol
-                    if total > 0:
-                        return (buy_vol - sell_vol) / total  # -1 to +1
-                elif isinstance(items, dict):
-                    buy_vol = float(items.get('buyAmount', items.get('buy_amount', 0)))
-                    sell_vol = float(items.get('sellAmount', items.get('sell_amount', 0)))
-                    total = buy_vol + sell_vol
-                    if total > 0:
-                        return (buy_vol - sell_vol) / total
-        except Exception:
-            pass
-        return 0.0
-
-    @staticmethod
-    def _parse_ls_ratio(data: dict) -> float:
-        """Parse ls_ratio response into a 0-1 value. >0.5 = more longs.
-        AiCoin ls_ratio API returns:
-          { data: { detail: { last: "0.87", last_day: 0.81, last_week: 2.12 } } }
-        'last' is the long/short ratio (longs / shorts).
-        Convert to 0-1: ratio / (1 + ratio). e.g., 0.87 -> 0.465, 1.0 -> 0.5, 2.0 -> 0.667
-        """
-        try:
-            detail = data.get('data', {}).get('detail', {})
-            if detail:
-                ratio = float(detail.get('last', 1.0))
-                return max(0.0, min(1.0, ratio / (1.0 + ratio)))
-        except Exception:
-            pass
-        return 0.5
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         w = self.whale_weight.value

@@ -274,12 +274,12 @@ AiCoin 数据:   funding_rate（实盘/模拟盘可用）
    │   market    │ │ trading │ │freqtrade│ │  hyper  │ │  account  │
    │   行情数据   │ │  交易    │ │  量化    │ │ liquid  │ │  账户管理  │
    │             │ │         │ │         │ │  鲸鱼    │ │           │
-   │ coin.mjs    │ │exchange │ │ft-deploy│ │hl-market│ │exchange   │
-   │ market.mjs  │ │  .mjs   │ │  .mjs   │ │  .mjs   │ │  .mjs     │
-   │ news.mjs    │ │auto-    │ │ ft.mjs  │ │hl-trader│ │register   │
-   │ features.mjs│ │trade.mjs│ │ft-dev   │ │  .mjs   │ │  .mjs     │
-   │ twitter.mjs │ │         │ │  .mjs   │ │         │ │           │
-   │newsflash.mjs│ │         │ │         │ │         │ │           │
+   │ aicoin.mjs  │ │exchange │ │ft-deploy│ │aicoin   │ │exchange   │
+   │             │ │  .mjs   │ │  .mjs   │ │  .mjs   │ │  .mjs     │
+   │ (one tool,  │ │auto-    │ │ ft.mjs  │ │(one tool│ │register   │
+   │  all v3     │ │trade.mjs│ │ft-dev   │ │ all v3) │ │  .mjs     │
+   │  endpoints) │ │         │ │  .mjs   │ │         │ │           │
+   │             │ │         │ │         │ │         │ │           │
    └──────┬──────┘ └────┬────┘ └────┬────┘ └────┬────┘ └─────┬─────┘
           │             │           │           │             │
           └─────────────┴───────┬───┴───────────┘             │
@@ -292,7 +292,7 @@ AiCoin 数据:   funding_rate（实盘/模拟盘可用）
 
 <div align="center">
 
-每个 Skill **完全独立**，拥有自己的 `SKILL.md`、`lib/` 和 `scripts/`。所有脚本共享 `aicoin-api.mjs` 客户端库。
+每个 Skill **完全独立**，拥有自己的 `SKILL.md`、`lib/` 和 `scripts/`。`aicoin-market` 和 `aicoin-hyperliquid` 共用一个 catalog 驱动的 v3 客户端（`scripts/aicoin.mjs` + `lib/client.mjs`），一个工具能调 AiCoin Open API v3 全部 183 个接口。
 
 <br />
 <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
@@ -377,8 +377,8 @@ CoinOS:  从 OKX 获取 100 根 K 线，返回 OHLCV 数据
 
 ```bash
 # 直接调用脚本
-node skills/aicoin-market/scripts/market.mjs kline \
-  '{"symbol":"ethusdt:okex","period":"3600","size":"100"}'
+node skills/aicoin-market/scripts/aicoin.mjs market/klines \
+  '{"coin_key":"ethereum","market":"okx","interval":"1h","limit":100}'
 ```
 
 </details>
@@ -489,14 +489,7 @@ coinos-skills/
 │   │   ├── SKILL.md
 │   │   ├── lib/
 │   │   └── scripts/
-│   │       ├── coin.mjs          价格、行情、币种信息
-│   │       ├── market.mjs        K线、资金费率、持仓量
-│   │       ├── features.mjs      大单、鲸鱼订单
-│   │       ├── news.mjs          新闻推送、搜索
-│   │       ├── newsflash.mjs     快讯提醒
-│   │       ├── twitter.mjs       加密推特/X 动态
-│   │       ├── airdrop.mjs       空投查询
-│   │       └── drop_radar.mjs    上币雷达与项目分析
+│   │       └── aicoin.mjs        一个 CLI → 全部 183 个 AiCoin v3 接口（catalog 驱动）
 │   │
 │   ├── aicoin-trading/       # 交易所交易
 │   │   ├── SKILL.md
@@ -517,8 +510,7 @@ coinos-skills/
 │   │   ├── SKILL.md
 │   │   ├── lib/
 │   │   └── scripts/
-│   │       ├── hl-market.mjs     行情、订单簿、成交
-│   │       └── hl-trader.mjs     大户持仓、盈亏、排行榜
+│   │       └── aicoin.mjs        一个 CLI → 全部 Hyperliquid v3 接口
 │   │
 │   └── aicoin-account/       # 账户管理
 │       ├── SKILL.md

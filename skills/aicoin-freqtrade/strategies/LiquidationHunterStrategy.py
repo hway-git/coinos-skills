@@ -100,32 +100,28 @@ class LiquidationHunterStrategy(IStrategy):
         return dataframe
 
     def _update_aicoin_data(self, metadata: dict):
-        """Fetch OI and liquidation data from AiCoin."""
+        """Fetch OI and liquidation data from AiCoin (live/dry-run only)."""
         try:
             import sys, os
             _sd = os.path.dirname(os.path.abspath(__file__))
             if _sd not in sys.path:
                 sys.path.insert(0, _sd)
-            from aicoin_data import AiCoinData, ccxt_to_aicoin
+            from aicoin_data import AiCoinData
             ac = AiCoinData(cache_ttl=300)
             pair = metadata.get('pair', 'BTC/USDT:USDT')
             exchange = self.config.get('exchange', {}).get('name', 'binance')
-            symbol = ccxt_to_aicoin(pair, exchange)
-            base = pair.split('/')[0]
 
-            # Open interest trend
+            # Open-interest trend (v3 aggregated OI is not wired yet — degrades gracefully)
             try:
-                oi_data = ac.open_interest(base, interval='15m', limit='10')
-                self._ac_oi_rising, self._ac_oi_change_pct = self._parse_oi_trend(oi_data)
-                logger.info(f"AiCoin OI for {base}: rising={self._ac_oi_rising}, "
+                self._ac_oi_rising, self._ac_oi_change_pct = ac.oi_trend(pair, exchange)
+                logger.info(f"AiCoin OI for {pair}: rising={self._ac_oi_rising}, "
                             f"change={self._ac_oi_change_pct:.2f}%")
             except Exception as e:
                 logger.debug(f"AiCoin OI unavailable: {e}")
 
-            # Liquidation map bias
+            # Liquidation-map bias: -1 (long liqs) .. +1 (short liqs)
             try:
-                liq_data = ac.liquidation_map(symbol, cycle='24h')
-                self._ac_liq_bias = self._parse_liq_bias(liq_data)
+                self._ac_liq_bias = ac.liq_bias(pair, exchange)
                 logger.info(f"AiCoin liquidation bias for {pair}: {self._ac_liq_bias:.2f}")
             except Exception as e:
                 logger.debug(f"AiCoin liquidation_map unavailable: {e}")
@@ -134,60 +130,6 @@ class LiquidationHunterStrategy(IStrategy):
             logger.warning("aicoin_data module not found. Run ft-deploy.mjs to install.")
         except Exception as e:
             logger.warning(f"AiCoin data error: {e}")
-
-    @staticmethod
-    def _parse_oi_trend(data: dict) -> tuple:
-        """Parse OI data to detect if OI is rising rapidly.
-        Returns (is_rising: bool, change_pct: float)
-        """
-        try:
-            if 'data' in data:
-                items = data['data']
-                if isinstance(items, list) and len(items) >= 2:
-                    # Compare latest vs earliest OI value
-                    def get_oi(item):
-                        for k in ('openInterest', 'open_interest', 'oi', 'value'):
-                            if k in item:
-                                return float(item[k])
-                        return 0
-
-                    first_oi = get_oi(items[0])
-                    last_oi = get_oi(items[-1])
-                    if first_oi > 0:
-                        change_pct = (last_oi - first_oi) / first_oi * 100
-                        return (change_pct > 3.0, change_pct)  # >3% rise = significant
-        except Exception:
-            pass
-        return (False, 0.0)
-
-    @staticmethod
-    def _parse_liq_bias(data: dict) -> float:
-        """Parse liquidation map to determine directional bias.
-        Returns: -1 (more long liquidations above) to +1 (more short liquidations below)
-        A positive value means shorts are more at risk -> potential short squeeze -> bullish
-        """
-        try:
-            if 'data' in data:
-                d = data['data']
-                if isinstance(d, dict):
-                    # Try to find long vs short liquidation volumes
-                    long_liq = float(d.get('longLiquidation', d.get('long_vol', 0)))
-                    short_liq = float(d.get('shortLiquidation', d.get('short_vol', 0)))
-                    total = long_liq + short_liq
-                    if total > 0:
-                        return (short_liq - long_liq) / total
-                elif isinstance(d, list):
-                    # Sum up liquidation values by side
-                    long_total = sum(float(x.get('longAmount', x.get('long', 0)))
-                                     for x in d if isinstance(x, dict))
-                    short_total = sum(float(x.get('shortAmount', x.get('short', 0)))
-                                      for x in d if isinstance(x, dict))
-                    total = long_total + short_total
-                    if total > 0:
-                        return (short_total - long_total) / total
-        except Exception:
-            pass
-        return 0.0
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         # Long: catch the bounce after a liquidation cascade + EMA uptrend
