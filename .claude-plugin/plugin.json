@@ -1,6 +1,6 @@
 {
   "name": "coinos-skills",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "skills": [
     "./skills/"
   ],
@@ -11,6 +11,8 @@
     "trading",
     "freqtrade",
     "hyperliquid",
+    "onchain",
+    "dex",
     "market-data",
     "coinOS"
   ]
