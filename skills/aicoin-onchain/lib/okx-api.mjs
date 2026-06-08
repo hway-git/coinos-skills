@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // OKX Web3 DEX API client with HMAC-SHA256 signing
 import { createHmac } from 'node:crypto';
-import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadEnv } from './env-loader.mjs';
+
+const __dir = dirname(fileURLToPath(import.meta.url));
 
 // ── Proxy support (for environments where OKX domains are DNS-blocked) ──
 const PROXY_URL = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY;
@@ -13,33 +16,8 @@ if (PROXY_URL) {
   } catch {}
 }
 
-// ── .env loading ──
-function loadEnv() {
-  const candidates = [
-    resolve(process.cwd(), '.env'),
-    resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
-    resolve(process.env.HOME || '', '.openclaw', '.env'),
-    resolve(process.env.HOME || '', '.hermes', '.env'),
-    resolve(process.env.HOME || '', '.workbuddy', '.env'),
-  ];
-  for (const file of candidates) {
-    if (!existsSync(file)) continue;
-    try {
-      for (const line of readFileSync(file, 'utf-8').split('\n')) {
-        const t = line.trim();
-        if (!t || t.startsWith('#')) continue;
-        const eq = t.indexOf('=');
-        if (eq < 1) continue;
-        const key = t.slice(0, eq).trim();
-        let val = t.slice(eq + 1).trim();
-        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
-          val = val.slice(1, -1);
-        if (!process.env[key]) process.env[key] = val;
-      }
-    } catch {}
-  }
-}
-loadEnv();
+// ── .env loading (shared loader) ──
+loadEnv(__dir);
 
 // ── Credentials ──
 // OKX Web3 DEX key 用 OKX_WEB3_* 命名,与 aicoin-trading 的 CEX 交易 key

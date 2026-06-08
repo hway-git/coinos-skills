@@ -237,8 +237,7 @@ OKX_WEB3_PASSPHRASE=your-passphrase
 ```
 
 `.env` 自动加载位置:
-- CoinClaw Hermes / Claude Code: `/workspace/.env`
-- CoinClaw OpenClaw: `/home/node/.openclaw/workspace/.env`
-- 本地: cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env`
+- 本地 host: **`~/.coinos/.env`**(coinos 文件夹, 推荐;不管从哪个目录跑都能读到), 也认当前目录 `.env` + 旧 `~/.openclaw/.env`
+- CoinClaw 容器: `/workspace/.env`(web UI EnvSection 配置)
 
 **Security notice**: OKX Web3 API Key is for reading market data and generating unsigned swap calldata. It cannot access your wallet funds or sign transactions. All signing happens locally.

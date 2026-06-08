@@ -120,13 +120,25 @@ cli({
     const swapData = swapRes.data?.[0];
     if (!swapData?.tx) return { error: 'No swap tx data', raw: swapRes };
 
-    // ── Safety checks ──
-    const rr = swapData.routerResult || {};
-    const fromToken = rr.fromToken || {};
-    const toToken = rr.toToken || {};
+    // ── Safety checks (fail-closed: 缺数据即中止,绝不静默放行) ──
+    // 所有安全数据都在 routerResult 里 — 缺失则无从评估,直接中止。
+    const rr = swapData.routerResult;
+    if (!rr)
+      return { error: 'BLOCKED — OKX 未返回 routerResult,无法评估安全性,已中止以防资金损失' };
+
+    // honeypot: 信任 isHoneyPot===false 之前要求 fromToken/toToken 对象存在;
+    // 缺失则中止(不默认"非貔貅")。
+    if (!rr.fromToken || !rr.toToken)
+      return { error: 'BLOCKED — OKX 未返回 fromToken/toToken,无法评估貔貅风险,已中止以防资金损失' };
+    const fromToken = rr.fromToken;
+    const toToken = rr.toToken;
     if (fromToken.isHoneyPot || toToken.isHoneyPot)
       return { error: 'BLOCKED — honeypot token detected' };
-    const impact = parseFloat(rr.priceImpactPercent || '0');
+
+    // priceImpact: 字段缺失/为 null 时不能默认 0% 放行 — 中止。
+    if (rr.priceImpactPercent == null)
+      return { error: 'OKX 未返回 priceImpactPercent,无法评估滑点,已中止以防资金损失' };
+    const impact = parseFloat(rr.priceImpactPercent);
     if (impact > 10)
       return { error: `Price impact ${impact}% > 10% — blocked for safety` };
 
