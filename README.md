@@ -476,7 +476,7 @@ CoinOS:  BTC 鲸鱼持仓 Top (Hyperliquid)
 
 </div>
 
-创建 `.env` 文件即可（脚本自动加载，依次查找：当前目录、`~/.openclaw/workspace/.env`、`~/.openclaw/.env`、`~/.hermes/.env`、`~/.workbuddy/.env` —— 已兼容 OpenClaw / Hermes / WorkBuddy 等本地 Agent）：
+把 key 放进 **`~/.coinos/.env`**（推荐 —— 不管从哪个目录跑脚本都能读到）。脚本自动加载，依次查找：容器 `/workspace/.env` → `~/.coinos/.env`（规范位置）→ 当前目录 `.env` → 旧 `~/.openclaw/workspace/.env`、`~/.openclaw/.env`（向后兼容）。也可以直接在 shell 里 `export`（环境变量优先级最高）：
 
 ```bash
 # AiCoin API（可选 — 内置免费 Key，有 IP 频率限制）

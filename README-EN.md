@@ -476,7 +476,7 @@ CoinOS:  Top BTC Whale Positions (Hyperliquid)
 
 </div>
 
-Create a `.env` file (scripts auto-load from cwd, `~/.openclaw/workspace/.env`, `~/.openclaw/.env`, `~/.hermes/.env`, `~/.workbuddy/.env` — compatible with OpenClaw / Hermes / WorkBuddy local agents):
+Put your keys in **`~/.coinos/.env`** (recommended — read no matter which directory you run scripts from). Scripts auto-load in this order: container `/workspace/.env` → `~/.coinos/.env` (canonical) → cwd `.env` → legacy `~/.openclaw/workspace/.env`, `~/.openclaw/.env` (backward-compat). You can also `export` them in your shell (env vars take highest priority):
 
 ```bash
 # AiCoin API (optional — built-in free key works with IP rate limits)

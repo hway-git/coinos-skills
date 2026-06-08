@@ -61,6 +61,16 @@ CoinClaw 用 Helm 起的实例 pod 有三种引擎 — **OpenClaw / Hermes / Cla
 - ✅ 只输出反问问题, 等用户告诉你开仓日期, 才计算
 - ✅ 用户问策略, 你先 `coins/tickers` 拿到 BTC 75k, 再说"BTC 在 75k 区域偏空震荡..."
 
+### 六、解读拿到的数据 — 别被排序 / 单笔 / 旧数据 / 权限误导
+
+拿到数据只是第一步, **读错比没数据更糟**(用户会拿你的错误结论真去下单)。以下都是真实翻过车的:
+
+1. **时序数据看 `_timeseries.latest`, 不要 tail / 默认末尾或开头**。`history-long-ratio`、`*/history`、`*/klines` 等返回的数组**顺序不保证**(很多是倒序, 最新在 `arr[0]`)。脚本已自动附 `_timeseries`(`latest` = 时间戳最大那条, 与数组顺序无关) —— **取"当前/最新"值直接读 `_timeseries.latest`**。做"边际变化/趋势"用 `_timeseries.latest` vs `_timeseries.oldest` 或自己按 `_timeseries.field` 排序, 绝不靠数组位置猜方向(曾把 2 天前的旧值当最新, 推出"大户边际加空"的错误结论)。
+2. **单笔事件 ≠ 整体仓位结构**。`whales/latest-events` 里某一笔"$1.25M 开空"是**单个事件**, 不能拿它代表"大户在看空"。判断大户整体方向用聚合口径: `whales/directions`(当前快照)、`open-interest/summary`(全网多空)、`history-long-ratio` 的 `_timeseries.latest`。单笔大单只能当"有这么一笔", 别 cherry-pick 去烘托一个整体结论。
+3. **散户多空比 ≠ 大户**。`ls_ratio`(交易所散户)和 `whales/*`(链上大户)是两拨人, 经常相反。极度拥挤的散户(如 3:1 做多)往往是被收割方, 别把散户情绪说成"市场共识"。两边都报, 标清楚谁是谁。
+4. **403/无权限先查 key, 别张口就"套餐不够"**。本地 host 最常见是脚本 fallback 到了免费/旧 key —— 先 `aicoin.mjs key` 看 key_id 是不是用户的专业版(key 应在 `~/.coinos/.env`), 确认后再判断是不是真的套餐限制。把"key 没加载对"误报成"这接口要付费"会让付费用户暴怒。
+5. **看数据新鲜度**。报结论前看一眼时间戳(`_timeseries` 给了 `latest`/`oldest`)。拿几小时/几天前的数据当"现在", 用户立刻发现。拿不到新数据就说"最新到 X 时间", 不要假装是实时。
+
 ## Freqtrade dashboard 数据对齐规则
 
 CoinClaw 实例右侧的 freqtrade dashboard 顶栏显示**累计盈亏 / 持仓 / 当前策略**. 用户问相关问题时, agent 给的答案**必须跟 dashboard 一致** — 否则用户立刻发现矛盾.
@@ -114,7 +124,8 @@ Skills 在 `skills/` 目录, 每个有 `SKILL.md` 包含:
 
 ## 安全规则
 
-- 永远不要 `cat ~/.openclaw/workspace/.env` / `cat /workspace/.env` 把里面的交易所 key / AiCoin key / freqtrade `.ft_api_pass` 贴给用户看 — 引导用户去 web UI EnvSection 配置
+- 永远不要 `cat` 任何 `.env` / `.ft_api_pass` 把里面的交易所 key / AiCoin key / daemon 密码贴给用户看
 - 永远不要 `printenv` / `env` 把环境变量 dump 出来
 - 永远不要在 chat 里 echo 任何用户提供的私钥 / 助记词 / API secret
+- **用户在 chat 里提供 key 时(本地 host,无 web UI)**: 用脚本动作写进规范位置 `~/.coinos/.env` —— 交易所 key 用 `aicoin-trading` 的 `save_key '{"exchange":"binance","api_key":"...","api_secret":"..."}'`,AiCoin key 用 `aicoin-market`/任一 v3 skill 的 `aicoin.mjs set-key <id> <secret>`。两者都会 `chmod 600` 且**不回显 secret**。**别**用 `echo ... >> .env` 这种把 secret 暴露在命令行/历史里的写法,也别把 key 复述回 chat。更安全的做法是建议用户自己写 `~/.coinos/.env` 或 `export` 环境变量(secret 全程不经过 agent;已注入的环境变量优先级高于 `.env`)。**容器内**有 web UI EnvSection,引导用户去那配,别在 chat 收 key
 - 切实盘 (`set_dry_run {"dry_run":false}`) 之前必须强 confirm 一次, 用户明确同意才执行
