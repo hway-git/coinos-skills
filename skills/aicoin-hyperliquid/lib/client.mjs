@@ -10,7 +10,7 @@ import { loadEnv, writeEnvPath } from './env-loader.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // .env auto-load (宿主可能不向子进程注入 env)。共享 loader,见 lib/env-loader.mjs。
-loadEnv(__dirname);
+loadEnv();
 
 const defaults = JSON.parse(readFileSync(resolve(__dirname, 'defaults.json'), 'utf-8'));
 export const BASE = process.env.AICOIN_BASE_URL || 'https://open.aicoin.com';
@@ -176,7 +176,7 @@ export async function saveKey(keyId, secret) {
   const res = await fetch(`${BASE}/api/v3/coins/tickers?coin_key=bitcoin`, { headers, signal: AbortSignal.timeout(15000) });
   if (res.status === 401 || res.status === 403) return { ok: false, error: `key 验证失败 (HTTP ${res.status})` };
   if (!res.ok) return { ok: false, error: `验证请求失败 (HTTP ${res.status})` };
-  const target = writeEnvPath(__dirname);
+  const target = writeEnvPath();
   let lines = existsSync(target) ? readFileSync(target, 'utf-8').split('\n') : [];
   const set = (k, v) => {
     const i = lines.findIndex(l => l.trim().startsWith(k + '='));

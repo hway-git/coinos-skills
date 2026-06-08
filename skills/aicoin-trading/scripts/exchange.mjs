@@ -11,7 +11,7 @@ import { dirname, resolve } from 'node:path';
 const __dir = dirname(fileURLToPath(import.meta.url));
 
 // .env auto-load (宿主可能不向子进程注入 env)。共享 loader,见 lib/env-loader.mjs。
-loadEnv(__dir);
+loadEnv();
 
 const SUPPORTED = ['binance','okx','bybit','bitget','gate','htx','pionex','hyperliquid'];
 
@@ -172,7 +172,7 @@ cli({
     const s = api_secret || secret;
     const p = password || passphrase;
     if (!k || !s) throw new Error('需要 api_key 和 api_secret(OKX/Bitget 还需 password/passphrase)');
-    const target = writeEnvPath(__dir);
+    const target = writeEnvPath();
     let lines = [];
     try { lines = readFileSync(target, 'utf-8').split('\n'); } catch { /* 文件还不存在 */ }
     const set = (key, val) => {

@@ -1,11 +1,7 @@
 #!/usr/bin/env node
 // OKX Web3 DEX API client with HMAC-SHA256 signing
 import { createHmac } from 'node:crypto';
-import { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env-loader.mjs';
-
-const __dir = dirname(fileURLToPath(import.meta.url));
 
 // ── Proxy support (for environments where OKX domains are DNS-blocked) ──
 const PROXY_URL = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY;
@@ -17,7 +13,7 @@ if (PROXY_URL) {
 }
 
 // ── .env loading (shared loader) ──
-loadEnv(__dir);
+loadEnv();
 
 // ── Credentials ──
 // OKX Web3 DEX key 用 OKX_WEB3_* 命名,与 aicoin-trading 的 CEX 交易 key

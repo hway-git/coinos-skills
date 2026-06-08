@@ -5,13 +5,9 @@
 
 import { loadEnv, writeEnvPath, envCandidates } from '../lib/env-loader.mjs';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname } from 'node:path';
-
-const __dir = dirname(fileURLToPath(import.meta.url));
 
 // .env auto-load (宿主可能不向子进程注入 env)。共享 loader,见 lib/env-loader.mjs。
-loadEnv(__dir);
+loadEnv();
 
 function findKey() {
   const val = process.env.AICOIN_ACCESS_KEY_ID?.trim();
@@ -28,7 +24,7 @@ function findKey() {
 }
 
 const status = findKey();
-const envPath = writeEnvPath(__dir);
+const envPath = writeEnvPath();
 
 const result = {
   aicoin_key_status: status.found
