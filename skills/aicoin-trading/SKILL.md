@@ -94,6 +94,7 @@ node scripts/exchange.mjs stop_orders '{"exchange":"binance","symbol":"HYPE/USDT
 - 确认执行前 `set_stop` 会**再读一次持仓**把数量校准到当前仓位；若确认期间仓位已被平掉/反手，会直接报告“持仓已不存在”而不挂废单。
 - **为什么有步骤3**：条件单在部分交易所（OKX 等）属算法/委托单，**不出现在普通 `open_orders` 列表**，只能用 `stop_orders` 或交易所 APP 的「条件委托」栏查到。别用 `open_orders` 误判“没挂上”。
 - **兜底**：ccxt 跨所条件单细节有差异（币安触发用标记价/最新价、OKX algo 单等），若 `set_stop` 某条返回失败，如实告诉用户失败原因，并建议去交易所 APP 手动挂——不要谎报已挂上。
+- **条件单支持矩阵（ccxt 4.5.47 实测）**：止损/止盈/触发单 在 **Binance / OKX / Bybit / Bitget / Gate / HTX 6 家 CEX 全部支持**（各映射到该所 native 条件单）。下单前有**安全网**：若触发价被某所静默丢弃（会变成立即成交的市价单），`placeOrder` 会直接拒绝而非误下单。每次升级 ccxt 后跑 `npm run verify-orders`（请求体黄金矩阵）确认没漂移。Hyperliquid 走 trigger、属边角（USDC，多路由到 aicoin-onchain），以实盘为准。
 
 ## 下单前准备
 
