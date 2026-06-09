@@ -206,6 +206,27 @@ function closeParamsFor(exchange, marketType, pos) {
     if (idx === 1 || idx === 2) out.positionIdx = idx;
     return out;
   }
+  // Bitget 双向: reduceOnly 在 hedge 被忽略,裸 side 单=反向开仓(ccxt #17817 实锤)。必须 hedged:true,
+  // ccxt 才翻 side + tradeSide:Close(实证: {reduceOnly:true,hedged:true}+sell → {side:buy,tradeSide:Close}=平多;
+  // SL → holdSide:long 护多)。检测靠 pos.hedged(ccxt 据 posMode/holdMode 可靠填);模式完全测不出时**拒绝**,
+  // 绝不退回裸 reduceOnly(那会让隐藏的 hedge 账户反向开仓)。
+  if (exchange === 'bitget') {
+    const pm = String(info.posMode || info.holdMode || '').toLowerCase();
+    const isHedge = pos?.hedged === true || pm === 'hedge_mode';
+    const isOneWay = pos?.hedged === false || pm === 'one_way_mode';
+    if (isHedge) { out.hedged = true; out.reduceOnly = true; }
+    else if (isOneWay) { out.reduceOnly = true; }
+    else throw new Error('无法确定 Bitget 持仓模式(单向/双向)。为防双向账户被误当反向开仓,已中止 —— 请重试或在交易所核对持仓模式后再平。');
+    return out;
+  }
+  // HTX 双向(dual_side): 平仓靠 offset 不靠 reduce_only;ccxt 仅在 hedged:true 时写 offset,offset 由
+  // reduceOnly 决定(实证: {reduceOnly:true,hedged:true}+sell → offset:close=平多;漏 reduceOnly → offset:open=反向)。
+  // pos.hedged 在 htx 永远 undefined,只能读 info.position_mode。测不出退 reduceOnly(若实为双向会缺 offset 被拒=fail-safe)。
+  if (exchange === 'htx' || exchange === 'huobi' || exchange === 'huobipro') {
+    out.reduceOnly = true;
+    if (String(info.position_mode || '').toLowerCase() === 'dual_side') out.hedged = true;
+    return out;
+  }
   out.reduceOnly = true;
   return out;
 }
@@ -570,9 +591,10 @@ cli({
       }
       const closeSide = pos.side === 'long' ? 'sell' : 'buy';
       const amount = Math.abs(Number(pos.contracts));
-      // 方向参数从真实持仓推导(hedge/one-way 自适应),修了币安双向持仓 reduceOnly 被拒的老 bug。
-      const cp = closeParamsFor(exchange, mt, pos);
       try {
+        // 方向参数从真实持仓推导(hedge/one-way 自适应)。放进 try: Bitget 模式测不出时 closeParamsFor
+        // 会 throw(防反向开仓),应作为该仓的失败结果,不连累其它仓。
+        const cp = closeParamsFor(exchange, mt, pos);
         const order = await placeOrder(ex, pos.symbol, 'market', closeSide, amount, undefined, cp, exchange, mt);
         results.push({ symbol: pos.symbol, side: pos.side, amount, status: '已平仓', orderId: order.id });
       } catch (e) {
@@ -712,6 +734,7 @@ cli({
     const modeDesc = cp.positionSide ? `hedge / positionSide=${cp.positionSide}(币安双向,不带 reduceOnly)`
       : cp.posSide ? `hedge / posSide=${cp.posSide} + reduceOnly`
       : cp.positionIdx ? `hedge / positionIdx=${cp.positionIdx} + reduceOnly`
+      : cp.hedged ? `hedge / ${exchange}(ccxt 翻向 → tradeSide:Close / offset:close)`
       : 'one-way / reduceOnly';
 
     const pending = { exchange, symbol, market_type: mt, closeSide, posSide: pos.side, amount: amt, orders, timestamp: Date.now() };
