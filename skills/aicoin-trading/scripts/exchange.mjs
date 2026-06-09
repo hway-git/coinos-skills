@@ -13,7 +13,8 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 // .env auto-load (宿主可能不向子进程注入 env)。共享 loader,见 lib/env-loader.mjs。
 loadEnv();
 
-const SUPPORTED = ['binance','okx','bybit','bitget','gate','htx','pionex','hyperliquid'];
+// pionex 在当前 ccxt 版本无实现 → 不列入可交易所(REFERRALS 仍保留作注册引流)。getExchange 另有兜底。
+const SUPPORTED = ['binance','okx','bybit','bitget','gate','htx','hyperliquid'];
 
 // AiCoin referral links — shown in exchanges list and missing-key errors
 const REFERRALS = {
@@ -114,41 +115,60 @@ async function getExchange(id, marketType, skipAuth = false) {
     }
   }
   const Ex = ccxt.default?.[id] || ccxt[id];
+  if (typeof Ex !== 'function') {
+    // 防 `Ex is not a constructor` 裸崩 —— 交易所在当前 ccxt 版本无实现(如旧版没有的所、或拼写错)。
+    const avail = (ccxt.exchanges || []).filter((e) => SUPPORTED.includes(e)).join(', ');
+    throw new Error(`交易所 "${id}" 在当前 ccxt 版本中不可用。当前支持: ${avail || SUPPORTED.join(', ')}。`);
+  }
   return new Ex(opts);
 }
 
-// createOrder with OKX net-mode posSide fallback + Binance hedge-mode positionSide fallback
+// createOrder 兜底各所"账户配置相关"的方向/参数差异(ccxt 只翻译不替你判断该传什么)。
+// 处理: OKX 单向 posSide、币安/Bybit 双向(hedge)缺方向参数、Hyperliquid 市价需参考价。
 async function placeOrder(ex, symbol, type, side, amount, price, params, exchange, marketType) {
   const p = { ...(params || {}) };
-  const isOkxSwap = exchange === 'okx' && marketType && marketType !== 'spot';
-  const isBinanceSwap = exchange === 'binance' && marketType && marketType !== 'spot';
-  // 仅给"开/加仓"单(非 reduceOnly)自动补 posSide。平仓/止损这类 reduceOnly 单:OKX 双向已由
-  // closeParamsFor 显式塞好 posSide;OKX 单向(net)根本不该带 posSide —— 早先无条件猜一个 posSide
-  // 会让 net 模式平仓单"先必失败再 retry",而 retry 每次重算 clOrdId 无幂等键,对 algo 条件单有重复挂单风险。
+  const isSwap = marketType && marketType !== 'spot';
+  const isOkxSwap = exchange === 'okx' && isSwap;
+  const isBinanceSwap = exchange === 'binance' && isSwap;
+  const isBybitSwap = exchange === 'bybit' && isSwap;
+
+  // Hyperliquid 市价单需要参考价算滑点 —— ccxt 对 market + price 缺失直接 ArgumentsRequired,
+  // 导致 HL 上 create_order/close_position/set_stop 全失败。用现价喂给 ccxt(它按默认滑点转 IOC 限价)。
+  if (exchange === 'hyperliquid' && type === 'market' && (price == null || price === '')) {
+    try { const t = await ex.fetchTicker(symbol); price = t.last ?? t.close ?? t.mark; } catch {}
+    if (price == null) throw new Error(`Hyperliquid 市价单需要参考价(算滑点上限),但取不到 ${symbol} 现价,请稍后重试。`);
+  }
+
+  // 仅给"开/加仓"单(非 reduceOnly)自动补 posSide。OKX 双向平仓由 closeParamsFor 显式给 posSide;
+  // OKX 单向(net)不该带 posSide(早先无条件猜会让 net 平仓单先必失败再 retry,无幂等键有重复挂单风险)。
   if (isOkxSwap && !p.posSide && !p.reduceOnly) {
     p.posSide = side === 'buy' ? 'long' : 'short';
   }
   try {
     return await ex.createOrder(symbol, type, side, amount, price, p);
   } catch (e) {
-    // OKX net mode 不接受 posSide → retry 一次。但仅限 OKX swap/futures
-    // 且 error 真是 posSide 相关。早期版本看 51000 就 retry,导致 OKX
-    // race(订单已提交但响应带 51000 警告)时重复下单(dogfood 命中过 ETH
-    // spot 限价被挂两次)。spot 不可能有 posSide 问题,绝不在 spot 上 retry。
     const errMsg = String(e);
-    const isPosSideError = isOkxSwap && p.posSide && errMsg.includes('posSide');
-    if (isPosSideError) {
+    // OKX net mode 不接受 posSide → 删掉重试(仅 OKX swap 且确是 posSide 报错;不在 spot retry)。
+    if (isOkxSwap && p.posSide && errMsg.includes('posSide')) {
       delete p.posSide;
       return await ex.createOrder(symbol, type, side, amount, price, p);
     }
-    // 币安双向持仓(hedge mode): 开/加仓单未带 positionSide → 报 -4061。补 positionSide 重试一次:
-    // 开/加仓 buy→LONG、sell→SHORT。与 OKX 51000 不同,-4061 是币安**下单前的硬校验拒绝**(订单未入场),
-    // retry 不存在重复成交风险,所以这里安全。平仓/reduceOnly 单由 closeParamsFor 显式给 positionSide,
-    // 不会走到这(单向账户也不会:不带 positionSide 本就能下,不报 -4061)。
-    const isHedgeError = isBinanceSwap && !p.positionSide && !p.reduceOnly
-      && (errMsg.includes('-4061') || errMsg.includes('position side does not match'));
-    if (isHedgeError) {
-      p.positionSide = side === 'buy' ? 'LONG' : 'SHORT';
+    // 币安双向(hedge): 缺 positionSide 报 -4061(下单前硬拒绝、订单未入场、retry 无重复成交风险)。
+    //   开/加仓: buy→LONG / sell→SHORT。
+    //   reduceOnly 平仓单(如 auto-trade 的裸 SL/TP): hedge 不接受 reduceOnly,删掉它并按"平的哪侧仓"补
+    //   positionSide —— 平多(sell)挂 LONG、平空(buy)挂 SHORT(与开仓相反)。
+    if (isBinanceSwap && !p.positionSide
+        && (errMsg.includes('-4061') || errMsg.includes('position side does not match'))) {
+      if (p.reduceOnly) { delete p.reduceOnly; p.positionSide = side === 'buy' ? 'SHORT' : 'LONG'; }
+      else p.positionSide = side === 'buy' ? 'LONG' : 'SHORT';
+      return await ex.createOrder(symbol, type, side, amount, price, p);
+    }
+    // Bybit 双向(hedge): 缺 positionIdx 报 10001 "position idx not match position mode"。
+    //   开/加仓: buy→1(多)/ sell→2(空)。reduceOnly 平仓单按平的哪侧: 平多(sell)→1、平空(buy)→2。
+    //   Bybit reduceOnly 可与 positionIdx 共存,保留 reduceOnly。同属下单前硬拒绝,retry 安全。
+    if (isBybitSwap && p.positionIdx == null
+        && (errMsg.includes('10001') || /position idx/i.test(errMsg) || /position mode/i.test(errMsg))) {
+      p.positionIdx = p.reduceOnly ? (side === 'buy' ? 2 : 1) : (side === 'buy' ? 1 : 2);
       return await ex.createOrder(symbol, type, side, amount, price, p);
     }
     throw e;
@@ -325,7 +345,7 @@ cli({
     const ex = await getExchange(exchange, market_type);
     return ex.fetchOrder(order_id, symbol);
   },
-  create_order: async ({ exchange, symbol, type, side, amount, cost, leverage, price, market_type, params, confirmed }) => {
+  create_order: async ({ exchange, symbol, type, side, amount, amount_unit, cost, leverage, price, market_type, params, confirmed }) => {
     const pendingFile = resolve(__dir, '..', '.pending-order.json');
 
     // Internal calls (from auto-trade.mjs) bypass file-based confirmation
@@ -425,9 +445,33 @@ cli({
       amount = roundContracts(Number(cost) * lev / (mkt.contractSize * curP));
     }
 
-    // Auto-convert: non-integer amount on contract = user gave base currency (e.g. 0.01 BTC → 1 contract)
-    if (!cost && mkt?.contractSize && !Number.isInteger(Number(amount))) {
+    // 现货按金额买入(cost):反算 base 数量 amount = cost / 价格(通用,不依赖各所 cost 通道)。
+    // 否则 cost 在现货被静默丢弃 → amount=undefined → 预览 NaN、下出无数量的废单。
+    const isSpot = !market_type || market_type === 'spot';
+    if (cost && isSpot && !mkt?.contractSize) {
+      if (side !== 'buy') throw new Error('现货 cost(按金额下单)目前只支持买入;卖出请用 amount 指定币数量。');
+      let px = Number(price);
+      if (!(px > 0)) { try { px = (await ex.fetchTicker(symbol)).last; } catch {} }
+      if (!(px > 0)) throw new Error(`无法获取 ${symbol} 价格以按金额反算数量,请改用 amount(币数量)。`);
+      try { amount = Number(ex.amountToPrecision(symbol, Number(cost) / px)); } catch { amount = Number(cost) / px; }
+    }
+
+    // 非 cost 路径必须有有效 amount —— 这个校验要放在换算**之前**:roundContracts 会把 NaN/缺失
+    // 兜成 minAmt,若放换算后再校验就被掩盖,变成静默下出一个最小单(废单)。
+    if (!cost && (amount == null || !(Number(amount) > 0))) {
+      throw new Error('数量无效: 请提供 amount(币数量;合约要传张数时加 amount_unit:"contracts"),或现货市价买入用 cost(USDT 金额)。');
+    }
+
+    // 合约: amount 默认按"币数量"理解,统一 /contractSize 换算成张数。整数也换 —— 旧版用 Number.isInteger
+    // 猜单位(整数=张/小数=币),在 contractSize≠1 的所(OKX DOGE cs=1000、Gate BTC cs=0.0001 等)会把
+    // 张数算错几个数量级。显式 amount_unit:"contracts" 才跳过换算(给已按张数传入的调用方)。
+    if (!cost && mkt?.contractSize && market_type && market_type !== 'spot' && amount_unit !== 'contracts') {
       amount = roundContracts(Number(amount) / mkt.contractSize);
+    }
+
+    // 最终兜底: cost 路径若算出 0/NaN(金额过小、价格异常等)也拒绝,绝不落盘空 amount。
+    if (amount == null || !(Number(amount) > 0)) {
+      throw new Error('数量无效(经金额/张数换算后仍无效)。请检查 cost/amount 与当前价格、最小下单额。');
     }
 
     const pendingOrder = { exchange, symbol, type, side, amount, price, market_type, params, timestamp: Date.now() };
@@ -438,7 +482,9 @@ cli({
     // 识别条件单(params 带触发价),避免对无 price 的 STOP_MARKET 显示"限价 undefined"。
     // 注:挂"保护已有仓位"的止盈止损请用 set_stop(自动算方向/reduceOnly),别在这里手搓。
     const trigPx = params && (params.stopLossPrice ?? params.takeProfitPrice ?? params.triggerPrice ?? params.stopPrice);
-    const typeLabel = trigPx != null ? `条件单(触发价 ${trigPx})`
+    const trailRate = params && (params.trailingPercent ?? params.callbackRate);
+    const typeLabel = trailRate != null ? `追踪止损(回调 ${trailRate}%${params.activationPrice ? `,激活 ${params.activationPrice}` : ''})`
+      : trigPx != null ? `条件单(触发价 ${trigPx})`
       : type === 'market' ? '市价' : `限价 ${price}`;
     const mktType = market_type || 'spot';
 
@@ -729,19 +775,34 @@ cli({
     if (order_id) {
       try { return await ex.cancelOrder(order_id, symbol); }
       catch (e) {
-        // 普通订单端点找不到 → 多半是条件/算法单(币安 STOP_MARKET/TAKE_PROFIT/TRAILING 走独立的
-        // Algo 系统,id 是 algoId,不在 /fapi/v1/order)。用 {stop:true} 走条件单端点重试一次。
-        if (String(e).includes('-2011') || /Unknown order/i.test(String(e))) {
+        // 普通订单端点找不到 → 多半是条件/算法单(币安 algoId、OKX/Bitget algo/plan 单走独立端点)。
+        // 各所 not-found 信号都回退到 {stop:true}(条件单端点)再撤一次,别只认币安的 -2011。
+        const m = String(e);
+        if (/-2011|51400|51401|51402|51603|40109|43001|Unknown order|does not exist|order ?not ?found|订单不存在/i.test(m)) {
           return await ex.cancelOrder(order_id, symbol, { stop: true });
         }
         throw e;
       }
     }
-    // 无 id = 全撤。普通挂单 + 条件/算法单都要清 —— 币安 cancelAllOrders 不含条件单(set_stop 挂的
-    // 止盈止损就是这类),必须再用 {stop:true} 单独撤一遍。对不支持的交易所静默跳过。
+    // 无 id = 全撤: 普通单 + 条件/算法单都要清(set_stop 挂的止盈止损就是条件单)。
     const out = {};
-    try { out.regular = await ex.cancelAllOrders(symbol); } catch (e) { out.regular = { error: String(e).slice(0, 160) }; }
-    try { out.conditional = await ex.cancelAllOrders(symbol, { stop: true }); } catch (e) { out.conditional = { skipped: String(e).slice(0, 120) }; }
+    // 不支持一键全撤的所(OKX / Hyperliquid 的 cancelAllOrders has===false)别把 NotSupported 吞成假成功 —— 那会留下没撤掉的单。改 fetchOpenOrders 拉出来逐个撤。
+    const cancelByFetch = async (extra) => {
+      const orders = await ex.fetchOpenOrders(symbol, undefined, undefined, extra || {});
+      const res = [];
+      for (const o of orders) {
+        try { await ex.cancelOrder(o.id, symbol, extra || {}); res.push({ id: o.id, ok: true }); }
+        catch (e) { res.push({ id: o.id, ok: false, error: String(e).slice(0, 100) }); }
+      }
+      return { canceled: res.filter(r => r.ok).length, total: res.length, detail: res };
+    };
+    if (ex.has?.cancelAllOrders) {
+      try { out.regular = await ex.cancelAllOrders(symbol); } catch (e) { out.regular = { error: String(e).slice(0, 160) }; }
+      try { out.conditional = await ex.cancelAllOrders(symbol, { stop: true }); } catch (e) { out.conditional = { skipped: String(e).slice(0, 120) }; }
+    } else {
+      try { out.regular = await cancelByFetch(); } catch (e) { out.regular = { error: String(e).slice(0, 160) }; }
+      try { out.conditional = await cancelByFetch({ stop: true }); } catch (e) { out.conditional = { skipped: String(e).slice(0, 120) }; }
+    }
     return out;
   },
   set_leverage: async ({ exchange, symbol, leverage, market_type }) => {
@@ -896,6 +957,9 @@ cli({
         reason: 'OKX_UNIFIED_ACCOUNT',
         message: 'OKX 是统一账户，现货和合约共用同一个余额，不需要划转。直接下单即可。',
       };
+    }
+    if (!from_account || !to_account || !code || amount == null) {
+      throw new Error('划转需要 code(币种)、amount(数量)、from_account、to_account。例: {"exchange":"binance","code":"USDT","amount":10,"from_account":"spot","to_account":"future"}');
     }
     const ex = await getExchange(exchange);
     // Normalize account names to CCXT-recognized keys
