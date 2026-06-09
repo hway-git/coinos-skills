@@ -70,6 +70,30 @@ node scripts/exchange.mjs positions '{"exchange":"okx","market_type":"swap"}'
 
 > **为什么有步骤3**: close_position 的返回有时被 streaming 截断，用户看不到结果。多查一次 positions 既能确认平仓成功，又能把结论写进最终消息让用户看到。
 
+## 止盈止损 / 条件单流程（两步，不可跳过）
+
+**给已有仓位挂止损 / 止盈，必须用 `set_stop`，禁止手搓 `create_order` 的 `STOP_MARKET`+原始 params。**`set_stop` 会从交易所**真实持仓**自动推导方向、`reduceOnly` / `posSide` / `positionSide`（币安双向持仓、OKX、Bybit 各自适配），并校验触发价在现价正确一侧——手搓极易开成反向单或方向搞反。
+
+```
+步骤1: node scripts/exchange.mjs set_stop '{"exchange":"binance","symbol":"HYPE/USDT:USDT","market_type":"swap","stop_loss":63.5,"take_profit":66.5}'
+→ 返回预览（持仓方向、触发价、触发后动作、平仓模式、方向校验结果）
+→ 你必须把预览展示给用户
+
+步骤2: 用户确认后
+node scripts/exchange.mjs set_stop '{"exchange":"binance","symbol":"HYPE/USDT:USDT","market_type":"swap","stop_loss":63.5,"take_profit":66.5,"confirmed":"true"}'
+→ 实际挂条件单
+
+步骤3: 执行后复核（不可省略）
+node scripts/exchange.mjs stop_orders '{"exchange":"binance","symbol":"HYPE/USDT:USDT","market_type":"swap"}'
+→ 确认条件单已挂上，再把结论告诉用户
+```
+
+- 参数：`stop_loss`（止损触发价）/ `take_profit`（止盈触发价）至少给一个，可同时给；只给单一 `trigger_price` 会按方向自动归类为止损或止盈。`amount` 可选，默认全仓，超过持仓自动 clamp。`side`（`long`/`short`）：当同一交易对**同时持有多空两个仓**（双向持仓）时必须指定，否则 `set_stop` 会报错让你选边，绝不替你猜。
+- **多单**：止损 < 现价、止盈 > 现价；**空单**反之。设反会被 `set_stop` 拦下报错（防瞬间触发）。拿不到当前价时默认中止（无法校验方向），确需跳过校验可传 `"force":true` 自负风险。
+- 确认执行前 `set_stop` 会**再读一次持仓**把数量校准到当前仓位；若确认期间仓位已被平掉/反手，会直接报告“持仓已不存在”而不挂废单。
+- **为什么有步骤3**：条件单在部分交易所（OKX 等）属算法/委托单，**不出现在普通 `open_orders` 列表**，只能用 `stop_orders` 或交易所 APP 的「条件委托」栏查到。别用 `open_orders` 误判“没挂上”。
+- **兜底**：ccxt 跨所条件单细节有差异（币安触发用标记价/最新价、OKX algo 单等），若 `set_stop` 某条返回失败，如实告诉用户失败原因，并建议去交易所 APP 手动挂——不要谎报已挂上。
+
 ## 下单前准备
 
 | 步骤 | 命令 | 是否需要确认 |
@@ -88,7 +112,9 @@ node scripts/exchange.mjs positions '{"exchange":"okx","market_type":"swap"}'
 | 操作 | 命令 |
 |------|------|
 | 平仓（全部或指定） | `node scripts/exchange.mjs close_position '{"exchange":"okx","market_type":"swap"}'` — 加 `"symbol":"BTC/USDT:USDT"` 只平单个 |
-| 取消订单 | `node scripts/exchange.mjs cancel_order '{"exchange":"okx","symbol":"BTC/USDT","order_id":"xxx"}'` |
+| 止盈止损（给已有仓位挂保护单） | `node scripts/exchange.mjs set_stop '{"exchange":"binance","symbol":"HYPE/USDT:USDT","market_type":"swap","stop_loss":63.5,"take_profit":66.5}'` — 两步确认，见上方「止盈止损流程」 |
+| 查条件单/算法委托 | `node scripts/exchange.mjs stop_orders '{"exchange":"binance","symbol":"HYPE/USDT:USDT","market_type":"swap"}'` — 普通 `open_orders` 查不到的条件单用这个 |
+| 取消订单 | `node scripts/exchange.mjs cancel_order '{"exchange":"okx","symbol":"BTC/USDT","order_id":"xxx"}'` — 也能取消条件单 |
 | 存交易所 key（本地，用户在 chat 给了 key 时） | `node scripts/exchange.mjs save_key '{"exchange":"binance","api_key":"...","api_secret":"..."}'` — 写进 `~/.coinos/.env`、`chmod 600`、不回显 secret（OKX/Bitget 还要 `"password":"..."`）。容器内引导用户去 web UI EnvSection，别在 chat 收 key |
 
 ## 数量
