@@ -250,6 +250,25 @@ function closeParamsFor(exchange, marketType, pos) {
   return out;
 }
 
+// 查"条件/算法单"(止盈止损/触发/追踪),合并各 ordType 再去重 —— OKX 的止盈止损是 conditional 类,
+// 与 trigger 类**分开存**,必须各类都查再合并,不能"第一次返回空就 return"(否则 OKX 的 set_stop
+// 单会被漏掉:实测 stop_orders 旧逻辑先查 trigger 返回空就 return,读不到 conditional 类的 SL/TP)。
+async function fetchConditionalOrders(ex, exchange, symbol) {
+  const variants = [{ trigger: true }, { stop: true }];
+  if (exchange === 'okx') variants.push({ ordType: 'conditional' }, { ordType: 'oco' }, { ordType: 'trigger' }, { ordType: 'move_order_stop' });
+  const seen = new Map();
+  let any = false, lastErr = null;
+  for (const extra of variants) {
+    try {
+      const os = await ex.fetchOpenOrders(symbol, undefined, undefined, extra);
+      any = true;
+      for (const o of (os || [])) if (o && o.id != null) seen.set(o.id, o);
+    } catch (e) { lastErr = e; }
+  }
+  if (!any) throw lastErr || new Error('无法查询条件单');
+  return [...seen.values()];
+}
+
 cli({
   exchanges: async () => ({
     supported: SUPPORTED.map(id => {
@@ -778,12 +797,8 @@ cli({
   // 列出条件单/算法委托(止盈止损等)。OKX 等的算法单不在普通 open_orders 里,用这个查。
   stop_orders: async ({ exchange, symbol, market_type }) => {
     const ex = await getExchange(exchange, market_type || 'swap');
-    let lastErr = null;
-    for (const extra of [{ trigger: true }, { stop: true }]) {
-      try { return await ex.fetchOpenOrders(symbol, undefined, undefined, extra); }
-      catch (e) { lastErr = e; }
-    }
-    throw new Error(`查询条件单失败: ${lastErr?.message || lastErr}。部分交易所的算法/条件单需在交易所 APP 的「条件委托」栏查看。`);
+    try { return await fetchConditionalOrders(ex, exchange, symbol); }
+    catch (e) { throw new Error(`查询条件单失败: ${e?.message || e}。部分交易所的算法/条件单需在交易所 APP 的「条件委托」栏查看。`); }
   },
   funding_rate: async ({ exchange, symbol, market_type }) => {
     const ex = await getExchange(exchange, market_type || 'swap', true);
@@ -843,7 +858,16 @@ cli({
       try { out.conditional = await ex.cancelAllOrders(symbol, { stop: true }); } catch (e) { out.conditional = { skipped: String(e).slice(0, 120) }; }
     } else {
       try { out.regular = await cancelByFetch(); } catch (e) { out.regular = { error: String(e).slice(0, 160) }; }
-      try { out.conditional = await cancelByFetch({ stop: true }); } catch (e) { out.conditional = { skipped: String(e).slice(0, 120) }; }
+      // 条件单: 用合并查询(覆盖 OKX conditional 类,不漏)再逐个撤
+      try {
+        const conds = await fetchConditionalOrders(ex, exchange, symbol);
+        const res = [];
+        for (const o of conds) {
+          try { await ex.cancelOrder(o.id, symbol, { stop: true }); res.push({ id: o.id, ok: true }); }
+          catch (e) { res.push({ id: o.id, ok: false, error: String(e).slice(0, 100) }); }
+        }
+        out.conditional = { canceled: res.filter((r) => r.ok).length, total: res.length, detail: res };
+      } catch (e) { out.conditional = { skipped: String(e).slice(0, 120) }; }
     }
     return out;
   },
