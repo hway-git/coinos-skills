@@ -121,8 +121,11 @@ async function getExchange(id, marketType, skipAuth = false) {
 async function placeOrder(ex, symbol, type, side, amount, price, params, exchange, marketType) {
   const p = { ...(params || {}) };
   const isOkxSwap = exchange === 'okx' && marketType && marketType !== 'spot';
-  if (isOkxSwap && !p.posSide) {
-    p.posSide = p.reduceOnly ? (side === 'buy' ? 'short' : 'long') : (side === 'buy' ? 'long' : 'short');
+  // 仅给"开/加仓"单(非 reduceOnly)自动补 posSide。平仓/止损这类 reduceOnly 单:OKX 双向已由
+  // closeParamsFor 显式塞好 posSide;OKX 单向(net)根本不该带 posSide —— 早先无条件猜一个 posSide
+  // 会让 net 模式平仓单"先必失败再 retry",而 retry 每次重算 clOrdId 无幂等键,对 algo 条件单有重复挂单风险。
+  if (isOkxSwap && !p.posSide && !p.reduceOnly) {
+    p.posSide = side === 'buy' ? 'long' : 'short';
   }
   try {
     return await ex.createOrder(symbol, type, side, amount, price, p);
@@ -139,6 +142,41 @@ async function placeOrder(ex, symbol, type, side, amount, price, params, exchang
     }
     throw e;
   }
+}
+
+// 根据"真实持仓 + 交易所"推导平仓/减仓单该带的方向参数 —— 这是平仓/止损类操作防"反向单"和
+// "hedge 模式 reduceOnly 被拒"的安全底线。方向只取自交易所返回的真实持仓 (pos.info),绝不靠
+// agent 传的 side 猜。各所规则不同:
+//   - 币安双向 (hedge): 必须带 positionSide=LONG/SHORT,且**不能**带 reduceOnly
+//     (币安在 hedge 模式收到 reduceOnly 会直接拒单 → 这正是 close_position 早期"返回异常"的根因)。
+//   - 币安单向 (positionSide=BOTH 或缺省) / 多数交易所: reduceOnly:true。
+//   - OKX 双向: posSide=long/short + reduceOnly;单向 (net): 只给 reduceOnly,
+//     posSide 交给 placeOrder 的 OKX 兜底逻辑 + 51000 重试处理。
+//   - Bybit 双向: positionIdx 1=多/2=空 + reduceOnly;单向 (0): reduceOnly。
+function closeParamsFor(exchange, marketType, pos) {
+  const out = {};
+  if (!marketType || marketType === 'spot') return out;
+  const info = pos?.info || {};
+  if (exchange === 'binance') {
+    const ps = String(info.positionSide || '').toUpperCase();
+    if (ps === 'LONG' || ps === 'SHORT') out.positionSide = ps; // hedge: 带 positionSide,不带 reduceOnly
+    else out.reduceOnly = true;                                 // one-way
+    return out;
+  }
+  if (exchange === 'okx') {
+    out.reduceOnly = true;
+    const ps = String(info.posSide || '').toLowerCase();
+    if (ps === 'long' || ps === 'short') out.posSide = ps;
+    return out;
+  }
+  if (exchange === 'bybit') {
+    out.reduceOnly = true;
+    const idx = info.positionIdx != null ? Number(info.positionIdx) : null;
+    if (idx === 1 || idx === 2) out.positionIdx = idx;
+    return out;
+  }
+  out.reduceOnly = true;
+  return out;
 }
 
 cli({
@@ -386,7 +424,11 @@ cli({
 
     // Build order details
     const sideLabel = side === 'buy' ? '买入/做多' : '卖出/做空';
-    const typeLabel = type === 'market' ? '市价' : `限价 ${price}`;
+    // 识别条件单(params 带触发价),避免对无 price 的 STOP_MARKET 显示"限价 undefined"。
+    // 注:挂"保护已有仓位"的止盈止损请用 set_stop(自动算方向/reduceOnly),别在这里手搓。
+    const trigPx = params && (params.stopLossPrice ?? params.takeProfitPrice ?? params.triggerPrice ?? params.stopPrice);
+    const typeLabel = trigPx != null ? `条件单(触发价 ${trigPx})`
+      : type === 'market' ? '市价' : `限价 ${price}`;
     const mktType = market_type || 'spot';
 
     const orderInfo = { 交易所: exchange, 交易对: symbol, 方向: sideLabel, 类型: typeLabel };
@@ -464,16 +506,185 @@ cli({
     // Execute
     const results = [];
     for (const pos of open) {
+      // 方向必须明确取自交易所;拿不到就跳过,绝不默认 buy(否则对多仓会变成加仓而非平仓)。
+      if (pos.side !== 'long' && pos.side !== 'short') {
+        results.push({ symbol: pos.symbol, status: '跳过', error: '交易所未返回持仓方向,拒绝盲目平仓' });
+        continue;
+      }
       const closeSide = pos.side === 'long' ? 'sell' : 'buy';
       const amount = Math.abs(Number(pos.contracts));
+      // 方向参数从真实持仓推导(hedge/one-way 自适应),修了币安双向持仓 reduceOnly 被拒的老 bug。
+      const cp = closeParamsFor(exchange, mt, pos);
       try {
-        const order = await placeOrder(ex, pos.symbol, 'market', closeSide, amount, undefined, { reduceOnly: true }, exchange, mt);
+        const order = await placeOrder(ex, pos.symbol, 'market', closeSide, amount, undefined, cp, exchange, mt);
         results.push({ symbol: pos.symbol, side: pos.side, amount, status: '已平仓', orderId: order.id });
       } catch (e) {
         results.push({ symbol: pos.symbol, side: pos.side, amount, status: '失败', error: e.message });
       }
     }
     return { 平仓结果: results };
+  },
+  // 止盈止损 / 条件单 —— 给"已有仓位"挂服务器端保护单。两步确认。
+  // 方向、reduceOnly/posSide 全部从真实持仓推导(防反向单、防 hedge 模式 reduceOnly 被拒),
+  // 触发价做"在现价正确一侧"校验(防搞反/瞬间触发),用 ccxt 统一参数 stopLossPrice/
+  // takeProfitPrice 下独立的 reduceOnly 条件单(跨 Binance/OKX/Bybit 等通用)。
+  set_stop: async ({ exchange, symbol, market_type, stop_loss, take_profit, trigger_price, amount, side, force, confirmed }) => {
+    const pendingFile = resolve(__dir, '..', '.pending-stop.json');
+
+    // Step 2: 确认执行(读 step1 落盘的已解析订单,防 model 在两步之间篡改方向/数量/触发价)
+    if (confirmed === 'true' || confirmed === true) {
+      let pending;
+      try { pending = JSON.parse(readFileSync(pendingFile, 'utf8')); }
+      catch { throw new Error('没有待确认的止盈止损单。请先不带 confirmed 调用 set_stop 预览,等用户确认后再带 confirmed=true。'); }
+      if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
+        try { unlinkSync(pendingFile); } catch {}
+        throw new Error('止盈止损预览已过期(超过5分钟),请重新预览。');
+      }
+      const mt = pending.market_type || 'swap';
+      const ex = await getExchange(pending.exchange, mt);
+      // 防"两步窗口内持仓缩小/反手":再读一次盘,把数量 clamp 到当前同向持仓;持仓没了就不挂废单。
+      // 这对币安双向(走 positionSide、不带 reduceOnly)尤其重要 —— 它没有 reduceOnly 兜底。best-effort:
+      // 读盘失败则用原数量(OKX/Bybit/币安单向仍有 reduceOnly 兜住)。
+      let execAmount = pending.amount;
+      try {
+        const curPos = (await ex.fetchPositions([pending.symbol]))
+          .find(p => p.symbol === pending.symbol && p.side === pending.posSide && Math.abs(Number(p.contracts || 0)) > 0);
+        if (!curPos) {
+          try { unlinkSync(pendingFile); } catch {}
+          return { 止盈止损结果: [], _warning: `${pending.symbol} 的 ${pending.posSide} 持仓已不存在(可能在确认期间被平掉/反手),未挂任何止盈止损单。请重新查持仓后再决定。` };
+        }
+        const curSize = Math.abs(Number(curPos.contracts));
+        if (execAmount > curSize) execAmount = curSize;
+      } catch { /* 读盘失败,沿用原数量 */ }
+      const results = [];
+      for (const o of pending.orders) {
+        try {
+          const order = await placeOrder(ex, pending.symbol, 'market', pending.closeSide, execAmount, undefined, o.params, pending.exchange, mt);
+          results.push({ 类型: o.kind, 触发价: o.trigger, status: '已挂单', orderId: order.id });
+        } catch (e) {
+          results.push({ 类型: o.kind, 触发价: o.trigger, status: '失败', error: e.message });
+        }
+      }
+      try { unlinkSync(pendingFile); } catch {}
+      return {
+        止盈止损结果: results,
+        _note: '条件单在部分交易所(OKX 等)属算法/委托单,不出现在普通挂单列表 —— 用 stop_orders 动作或交易所 APP 的「条件委托」栏复核,别用 open_orders 误判没挂上。',
+        验证建议: `node scripts/exchange.mjs stop_orders '{"exchange":"${pending.exchange}","symbol":"${pending.symbol}","market_type":"${mt}"}'`,
+      };
+    }
+
+    // Step 1: 预览 —— 取真实持仓、推导方向、校验触发价、落盘待确认订单
+    if (!symbol) throw new Error('需要 symbol(止盈止损是给已有仓位挂保护单),例: {"exchange":"binance","symbol":"HYPE/USDT:USDT","market_type":"swap","stop_loss":63.5}');
+    const mt = market_type || 'swap';
+    if (mt === 'spot') throw new Error('set_stop 仅用于合约持仓的止盈止损。现货保护单请用 create_order 带 params。');
+    if (stop_loss == null && take_profit == null && trigger_price == null) {
+      throw new Error('至少给一个:stop_loss(止损触发价)/ take_profit(止盈触发价)/ trigger_price(单一触发价,按方向自动归类)。');
+    }
+    const ex = await getExchange(exchange, mt);
+    await ex.loadMarkets();
+    const mkt = ex.markets[symbol];
+    const positions = await ex.fetchPositions([symbol]);
+    const matching = positions.filter(p => p.symbol === symbol && Math.abs(Number(p.contracts || 0)) > 0);
+    if (!matching.length) throw new Error(`${exchange} 上没有 ${symbol} 的持仓。止盈止损是给已有仓位挂保护单;若要挂"条件入场单",用 create_order 带 params。`);
+    // 双向持仓(hedge)同一交易对可能同时有多/空两个仓 —— 选错边会把止损挂到反方向。必须指定 side。
+    const wantSide = side ? String(side).toLowerCase().replace('多', 'long').replace('空', 'short') : null;
+    let pos;
+    if (matching.length > 1) {
+      if (!wantSide) throw new Error(`${symbol} 同时持有多、空两个仓(双向持仓)。请指定 side("long"/"short")选择给哪个挂止盈止损。当前: ${matching.map(p => `${p.side} ${Math.abs(Number(p.contracts))}张`).join(' / ')}`);
+      pos = matching.find(p => p.side === wantSide);
+      if (!pos) throw new Error(`没找到 ${symbol} 的 ${wantSide} 持仓。当前持仓方向: ${matching.map(p => p.side).join(', ')}`);
+    } else {
+      pos = matching[0];
+      if (wantSide && pos.side !== wantSide) throw new Error(`你指定 side=${wantSide},但 ${symbol} 当前持仓是 ${pos.side},方向不符,已中止以防挂错边。`);
+    }
+
+    if (pos.side !== 'long' && pos.side !== 'short') throw new Error(`无法确定 ${symbol} 持仓方向(交易所未返回 side),已中止以防止盈止损挂错边。`);
+    const posSize = Math.abs(Number(pos.contracts));
+    const isLong = pos.side === 'long';
+    const closeSide = isLong ? 'sell' : 'buy';
+    const cp = closeParamsFor(exchange, mt, pos); // reduceOnly/posSide/positionSide 从真实持仓推导
+
+    // 数量:默认全仓;给了就取整到精度并 clamp 不超过持仓(reduceOnly 也会兜底,但提前 clamp 更直观)。
+    let amt = posSize;
+    let amtNote = `全仓 ${posSize}`;
+    if (amount != null) {
+      let v = Number(amount);
+      try { v = Number(ex.amountToPrecision(symbol, v)); } catch {}
+      if (!(v > 0)) throw new Error(`amount 非法: ${amount}`);
+      if (v > posSize) { v = posSize; amtNote = `给的数量超过持仓,已 clamp 到全仓 ${posSize}`; }
+      else amtNote = `部分 ${v} / 持仓 ${posSize}`;
+      amt = v;
+    }
+
+    // 当前价(用于触发价方向校验)
+    let cur = null;
+    try { cur = (await ex.fetchTicker(symbol)).last; } catch {}
+    // 拿不到现价就无法校验触发价方向(设反会瞬间触发或把止损当止盈)—— 默认中止,不靠 LLM 自觉。
+    // 确需无校验挂单,显式传 force:true 自负风险。
+    if (cur == null && !(force === true || force === 'true')) {
+      throw new Error(`拿不到 ${symbol} 当前价,无法校验止盈止损触发价方向(设反会瞬间触发或方向颠倒)。请稍后重试;确需跳过校验挂单,显式传 "force":true 自负风险。`);
+    }
+
+    // 触发价方向校验:多单止损<现价、止盈>现价;空单反之。设反会瞬间触发或把止损当止盈 → 直接报错。
+    const orders = [];
+    const checks = [];
+    const want = (px, kind) => {
+      const v = Number(px);
+      if (!isFinite(v) || v <= 0) throw new Error(`${kind}触发价非法: ${px}`);
+      if (cur != null) {
+        const okSide = kind === '止损' ? (isLong ? v < cur : v > cur) : (isLong ? v > cur : v < cur);
+        const rel = kind === '止损' ? (isLong ? '应 < 现价' : '应 > 现价') : (isLong ? '应 > 现价' : '应 < 现价');
+        if (!okSide) throw new Error(`${isLong ? '多' : '空'}单的${kind}触发价 ${v} 方向不对(${rel} ${cur})。设反了会瞬间触发或把止损当止盈,请核对。`);
+        checks.push(`${kind} ${v} ${rel} ${cur} ✓`);
+      }
+      return v;
+    };
+    if (stop_loss != null) { const v = want(stop_loss, '止损'); orders.push({ kind: '止损', trigger: v, params: { stopLossPrice: v, ...cp } }); }
+    if (take_profit != null) { const v = want(take_profit, '止盈'); orders.push({ kind: '止盈', trigger: v, params: { takeProfitPrice: v, ...cp } }); }
+    if (trigger_price != null) {
+      // 单一触发价:按它落在现价哪一侧 + 持仓方向,自动归类成止损或止盈。
+      const v = Number(trigger_price);
+      if (!isFinite(v) || v <= 0) throw new Error(`trigger_price 非法: ${trigger_price}`);
+      if (cur == null) throw new Error('拿不到当前价,无法自动归类 trigger_price。请改用 stop_loss 或 take_profit 明确指定。');
+      const kind = (isLong ? v < cur : v > cur) ? '止损' : '止盈';
+      const key = kind === '止损' ? 'stopLossPrice' : 'takeProfitPrice';
+      orders.push({ kind, trigger: v, params: { [key]: v, ...cp } });
+      checks.push(`trigger_price ${v} 按方向归类为「${kind}」(现价 ${cur})`);
+    }
+
+    const modeDesc = cp.positionSide ? `hedge / positionSide=${cp.positionSide}(币安双向,不带 reduceOnly)`
+      : cp.posSide ? `hedge / posSide=${cp.posSide} + reduceOnly`
+      : cp.positionIdx ? `hedge / positionIdx=${cp.positionIdx} + reduceOnly`
+      : 'one-way / reduceOnly';
+
+    const pending = { exchange, symbol, market_type: mt, closeSide, posSide: pos.side, amount: amt, orders, timestamp: Date.now() };
+    writeFileSync(pendingFile, JSON.stringify(pending));
+
+    return {
+      _preview: true,
+      status: '⚠️ 止盈止损未挂单',
+      持仓: { 交易对: symbol, 方向: isLong ? '多' : '空', 张数: posSize, 开仓价: pos.entryPrice, 当前价: cur, 杠杆: pos.leverage, 未实现盈亏: pos.unrealizedPnl },
+      将挂条件单: orders.map(o => ({
+        类型: o.kind, 触发价: o.trigger,
+        触发后: `市价${closeSide === 'sell' ? '卖出平多' : '买入平空'}`,
+        数量: mkt?.contractSize ? `${amt} 张` : `${amt}`,
+        平仓模式: modeDesc,
+      })),
+      数量说明: amtNote,
+      方向校验: checks.length ? checks : '(拿不到当前价,跳过触发价方向校验 —— 请你自己确认方向)',
+      风险提示: '⚠️ 条件单是交易所服务器端触发的市价单,触发时按当时市价成交,极端行情可能滑点。ccxt 跨所行为有差异,挂单后务必用 stop_orders 或交易所 APP 复核确实挂上了。',
+      操作指引: '确认无误回复「确认」执行挂单,回复「取消」放弃。',
+    };
+  },
+  // 列出条件单/算法委托(止盈止损等)。OKX 等的算法单不在普通 open_orders 里,用这个查。
+  stop_orders: async ({ exchange, symbol, market_type }) => {
+    const ex = await getExchange(exchange, market_type || 'swap');
+    let lastErr = null;
+    for (const extra of [{ trigger: true }, { stop: true }]) {
+      try { return await ex.fetchOpenOrders(symbol, undefined, undefined, extra); }
+      catch (e) { lastErr = e; }
+    }
+    throw new Error(`查询条件单失败: ${lastErr?.message || lastErr}。部分交易所的算法/条件单需在交易所 APP 的「条件委托」栏查看。`);
   },
   funding_rate: async ({ exchange, symbol, market_type }) => {
     const ex = await getExchange(exchange, market_type || 'swap', true);
