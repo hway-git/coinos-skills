@@ -26,7 +26,9 @@ export function cli(handlers) {
     }
   }
   handlers[action](params).then(r => console.log(JSON.stringify(r, null, 2))).catch(e => {
-    console.error(e.message);
+    // 运行时错误也输出结构化 JSON(与上面 dispatcher 的报错一致),agent 才能稳定解析、转述给用户;
+    // 早先只 console.error(纯文本) 会让 agent 把交易所/网络错误当成非预期输出。
+    console.log(JSON.stringify({ error: e?.message || String(e) }));
     process.exit(1);
   });
 }
