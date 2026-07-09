@@ -50,6 +50,61 @@ export type MarketSource = {
   errors: string[]
 }
 
+export type MarketNewsItem = {
+  id: string
+  title: string
+  url: string
+  source: string
+  category?: string
+  summary?: string
+  imageUrl?: string
+  publishedAt: number
+}
+
+export type MarketNewsSource = {
+  name: string
+  status: 'live' | 'partial' | 'offline'
+  fetchedAt: number
+  errors: string[]
+}
+
+export type MarketNewsSnapshot = {
+  ok: boolean
+  items: MarketNewsItem[]
+  source: MarketNewsSource
+}
+
+export type MacroDataGroup = 'rates' | 'risk' | 'inflation' | 'labor' | 'liquidity' | 'commodities'
+
+export type MacroDataPoint = {
+  id: string
+  label: string
+  shortLabel: string
+  group: MacroDataGroup
+  value: number
+  valueLabel: string
+  previous?: number
+  change?: number
+  changeLabel?: string
+  date: string
+  unit: string
+  frequency: 'daily' | 'weekly' | 'monthly'
+  source: string
+}
+
+export type MacroDataSource = {
+  name: string
+  status: 'live' | 'partial' | 'offline'
+  fetchedAt: number
+  errors: string[]
+}
+
+export type MacroSnapshot = {
+  ok: boolean
+  items: MacroDataPoint[]
+  source: MacroDataSource
+}
+
 export type MarketRangeLevel = {
   high: number
   low: number

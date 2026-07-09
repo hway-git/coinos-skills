@@ -1,599 +1,126 @@
-<div align="center">
+# Helix
 
-<pre>
- ██████╗ ██████╗ ██╗███╗   ██╗ ██████╗ ███████╗
-██╔════╝██╔═══██╗██║████╗  ██║██╔═══██╗██╔════╝
-██║     ██║   ██║██║██╔██╗ ██║██║   ██║███████╗
-██║     ██║   ██║██║██║╚██╗██║██║   ██║╚════██║
-╚██████╗╚██████╔╝██║██║ ╚████║╚██████╔╝███████║
- ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝
-</pre>
+Helix 是一个面向加密交易的 AI 交易终端与自动化交易工作台。项目目标是把实时行情监测、策略研究、回测验证、Freqtrade 执行和人工确认交易串到同一个工作流里，让 agent 能在受控边界内辅助交易决策与执行。
 
-### `> 为 AI Agent 打造的加密货币行情、交易与量化自动化_`
+当前仓库包含两层能力:
 
-<br />
+- `app/dashboard`: 交易大屏前端，用于行情、K 线、指标、新闻 / 宏观数据、持仓、订单和 agent 控制台展示。
+- `skills`: agent 可调用的账户查询、交易执行和 Freqtrade 自动化脚本。
 
-[![Version](https://img.shields.io/badge/v2.0.0-blueviolet?style=for-the-badge&logo=semver&logoColor=white)](https://github.com/aicoincom/coinos-skills/releases)
-[![JavaScript](https://img.shields.io/badge/ESM-f7df1e?style=for-the-badge&logo=javascript&logoColor=black)](https://nodejs.org/)
-[![AiCoin API](https://img.shields.io/badge/AiCoin_API-00d4aa?style=for-the-badge&logo=bitcoin&logoColor=white)](https://www.aicoin.com/opendata)
-[![License](https://img.shields.io/badge/MIT-License-f59e0b?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](./LICENSE)
-[![Skills](https://img.shields.io/badge/Skills-6_个-ff6b6b?style=for-the-badge&logo=openai&logoColor=white)](./skills/)
+## 当前范围
 
-<br />
+Helix skill 层当前只保留 3 个能力:
 
-[简体中文](./README.md) · [English](./README-EN.md)
+| Skill | 职责 |
+|---|---|
+| `helix-account` | 查询交易所余额、持仓、订单、成交历史，并引导 API key / 注册配置 |
+| `helix-trading` | 执行 CEX 现货 / 永续下单、平仓、止盈止损、杠杆和保证金模式设置 |
+| `helix-freqtrade` | 创建策略、回测、hyperopt、部署 bot、切策略 / 交易对 / 实盘，查询 daemon 盈亏 |
 
-<br />
+Skill 层只负责账户、交易执行和 Freqtrade 自动化。行情、新闻和宏观数据由 Helix 应用层服务维护。
 
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
+## 目录结构
 
-</div>
+```text
+helix/
+├── app/
+│   └── dashboard/              # 交易大屏前端
+├── skills/
+│   ├── helix-account/          # 账户查询
+│   ├── helix-trading/          # 交易执行
+│   └── helix-freqtrade/        # 策略、回测、Freqtrade daemon 控制
+├── scripts/
+│   └── validate-skills.mjs     # skill frontmatter 与共享文件校验
+├── AGENTS.md                   # Codex / agent 工作规则
+├── CLAUDE.md                   # Claude Code 工作规则
+└── README.md
+```
 
-<div align="center">
+## Agent 路由
 
-## CoinOS 是什么？
+| 用户意图 | 使用 |
+|---|---|
+| 查余额、持仓、订单、账户历史、API key 配置、注册开户 | `skills/helix-account` |
+| 下单、平仓、挂止盈止损、改杠杆 / 保证金模式 | `skills/helix-trading` |
+| 写策略、回测、hyperopt、部署 bot、切交易对、切实盘、查 Freqtrade 盈亏 / 持仓 | `skills/helix-freqtrade` |
 
-**一句话查行情。一句话下单。一句话跑回测。**
+## 安全边界
 
-</div>
+- 所有直接下单必须走 `skills/helix-trading/scripts/exchange.mjs create_order`。
+- 平仓必须走 `close_position`，不用反向单模拟平仓。
+- `create_order` / `close_position` / `set_stop` 第一次调用只展示预览，用户明确确认后才允许带 `confirmed=true` 执行。
+- 改杠杆、改保证金模式、切实盘前必须说明影响并等待确认。
+- 不读取、不打印 `.env`、`.ft_api_pass`、API secret、passphrase、私钥或助记词。
+- 不用 mock / random 数据冒充真实行情、真实交易或回测输入。
 
-<div align="center">
+## Freqtrade 对齐
 
-CoinOS 是一套 AI Skill 集合，封装 [AiCoin Open API](https://www.aicoin.com/opendata) 与 OKX Web3 DEX API — 为 AI Agent 提供实时加密货币行情、交易所交易、Freqtrade 量化策略、Hyperliquid 鲸鱼分析、链上 DEX 交易能力。
-
-支持 **Claude Code、Cursor、Codex、OpenClaw、Hermes、WorkBuddy、Windsurf、Gemini CLI** 等 AI Agent。
-
-</div>
-
-<div align="center">
-
-<table>
-<tr><td>
-
-- 无需 API Key — **内置免费 Key** 开箱即用
-- 数据来自 **AiCoin**，领先的加密货币分析平台
-- **6 个 Skill**，各自独立，可按需安装
-
-</td></tr>
-</table>
-
-<br />
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-
-## Skill 矩阵
-
-</div>
-
-<div align="center">
-<table>
-<tr>
-<td width="50%">
-
-**行情数据**
-
-| Skill | 能力 |
-|:--|:--|
-| **aicoin-market** | 价格、K线、资金费率、持仓量、大单、新闻、信号、空投、上币雷达 |
-
-</td>
-<td width="50%">
-
-**交易所交易**
-
-| Skill | 能力 |
-|:--|:--|
-| **aicoin-trading** | Binance/OKX/Bybit 等 8 大交易所买卖、自动交易策略 |
-
-</td>
-</tr>
-<tr>
-<td width="50%">
-
-**量化自动化**
-
-| Skill | 能力 |
-|:--|:--|
-| **aicoin-freqtrade** | AiCoin 指标策略创建、回测、超参优化、实盘机器人部署 |
-
-</td>
-<td width="50%">
-
-**鲸鱼分析**
-
-| Skill | 能力 |
-|:--|:--|
-| **aicoin-hyperliquid** | Hyperliquid 大户持仓追踪、清算数据、交易员盈亏分析 |
-
-</td>
-</tr>
-<tr>
-<td width="50%">
-
-**账户管理**
-
-| Skill | 能力 |
-|:--|:--|
-| **aicoin-account** | 余额与仓位查询、历史订单、API Key 管理、交易所注册返佣 |
-
-</td>
-<td width="50%">
-
-**链上 DEX**
-
-| Skill | 能力 |
-|:--|:--|
-| **aicoin-onchain** | 链上代币兑换(swap)、钱包余额/持仓、gas 估算、代币查询(OKX Web3,支持 EVM/Solana 多链) |
-
-</td>
-</tr>
-</table>
-</div>
-
-<div align="center">
-<br />
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-
-## AiCoin 独家数据
-
-**别处拿不到的数据 — 实时聚合 200+ 交易所。**
-
-</div>
-
-<div align="center">
-<table>
-<tr>
-<td width="50%">
-
-**鲸鱼与情绪数据**
-
-| 数据 | 它能告诉你什么 |
-|:--|:--|
-| **大单追踪** | 各交易所实时大额买卖单 |
-| **多空比** | 聚合市场持仓方向 — 散户在做多还是做空？ |
-| **资金费率** | 跨交易所加权费率 — 发现过度杠杆化的市场 |
-| **清算地图** | 清算集中区热力图 — 找到轧空/轧多区间 |
-| **持仓量 (OI)** | 聚合 OI 趋势 — 验证或质疑价格走势 |
-
-</td>
-<td width="50%">
-
-**新闻与 Alpha 发现**
-
-| 数据 | 它能告诉你什么 |
-|:--|:--|
-| **快讯** | 比主流媒体更快的加密新闻 |
-| **推特/X 动态** | 实时 KOL 推文、大V发现 |
-| **空投雷达** | 空投情报：团队、融资、X 粉丝、项目状态 |
-| **信号提醒** | 预设异常信号与策略信号 |
-| **机构持仓** | MicroStrategy 等机构持仓追踪 |
-
-</td>
-</tr>
-</table>
-</div>
-
-<div align="center">
-
-> 多数平台只给你价格。AiCoin 告诉你**鲸鱼在干什么、市场情绪如何、即将发生什么** — 横跨 200+ 交易所，一个 API 搞定。
-
-<br />
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-
-## 策略与回测
-
-**一句话写策略。真实数据回测。一键部署实盘。**
-
-</div>
-
-CoinOS 集成 [Freqtrade](https://github.com/freqtrade/freqtrade)，并将 **AiCoin 独家链上/情绪数据**直接注入你的策略 — 这是其他回测工具做不到的。
-
-<div align="center">
-<table>
-<tr>
-<td width="50%">
-
-**17 个内置技术指标**
-
-| 类别 | 指标 |
-|:--|:--|
-| **趋势** | EMA, SMA, ADX, Ichimoku |
-| **动量** | RSI, MACD, Stochastic/KDJ, CCI, Williams %R |
-| **波动率** | Bollinger Bands, ATR |
-| **成交量** | VWAP, OBV, Volume SMA |
-
-</td>
-<td width="50%">
-
-**5 种 AiCoin 独家数据**
-
-| 数据 | 策略用法 |
-|:--|:--|
-| **funding_rate** | 费率 > 0.1% = 多头过热，反向操作 |
-| **ls_ratio** | 比值 < 0.45 = 空头拥挤，逆向买入 |
-| **big_orders** | 鲸鱼信号为正 = 聪明钱在吸筹 |
-| **liquidation_map** | 清算集中 = 轧空/轧多机会 |
-| **open_interest** | OI 上升 + 价格下跌 = 反转信号 |
-
-</td>
-</tr>
-</table>
-</div>
-
-<div align="center">
-
-**一条命令创建。一条命令回测。一条命令部署。**
-
-</div>
+dashboard 的策略、持仓、盈亏以 Freqtrade daemon 为准。用户询问盈亏时，先读取 daemon:
 
 ```bash
-# 1. 用 AiCoin 数据 + 技术指标创建策略
-> "帮我写一个资金费率策略，加上 RSI 和布林带，15分钟周期"
-
-# 2. 用真实历史 K 线回测
-> "回测一下 BTC/USDT，2025 全年"
-
-# 3. 超参数优化
-> "跑一下 hyperopt，500 轮"
-
-# 4. 部署到实盘
-> "部署到 Binance，先跑模拟盘"
+cd skills/helix-freqtrade
+node scripts/ft.mjs profit
 ```
 
-```
-回测结果
-─────────────────────────────────────────────────
-策略:          FundingRateStrat
-时间范围:      2025-01-01 → 2025-12-31
-交易对:        BTC/USDT
-─────────────────────────────────────────────────
-总交易数:      142
-胜率:          63.4%
-总收益:        +18.7%
-最大回撤:      -8.2%
-夏普比率:      1.45
-─────────────────────────────────────────────────
-AiCoin 数据:   funding_rate（实盘/模拟盘可用）
-技术指标:      RSI, Bollinger Bands
-─────────────────────────────────────────────────
-```
+回答时同时说明:
 
-<div align="center">
+- `profit_closed_coin`: 已平仓累计盈亏
+- `profit_all_coin`: 已平仓 + 当前持仓浮动后的总盈亏
 
-> 传统回测只用价格+成交量。CoinOS 策略在实盘中还能感知**鲸鱼行为、市场情绪、清算压力** — 让你的机器人拥有纯技术分析无法比拟的优势。
-
-<br />
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-
-## 架构
-
-</div>
-
-```
-                              ┌──────────────────────┐
-                              │   AI Agent (自然语言)  │
-                              └───────────┬──────────┘
-                                          │
-                              ┌───────────▼──────────┐
-                              │     CoinOS Skills     │
-                              └───────────┬──────────┘
-                                          │
-     ┌──────────┬──────────┬─────────────┼──────────┬──────────┐
-  ┌──▼───┐ ┌────▼───┐ ┌────▼────┐ ┌──────▼──┐ ┌─────▼───┐ ┌────▼────┐
-  │market│ │trading │ │freqtrade│ │  hyper  │ │ account │ │ onchain │
-  │行情  │ │ 交易   │ │  量化   │ │ liquid  │ │  账户   │ │ 链上DEX │
-  │aicoin│ │exchange│ │ft-deploy│ │ aicoin  │ │exchange │ │  swap   │
-  │ .mjs │ │  .mjs  │ │  .mjs   │ │  .mjs   │ │  .mjs   │ │  .mjs   │
-  └──┬───┘ └───┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘
-     │         │           │           │           │           │
-     └─────────┴─────┬─────┴───────────┘           │           │
-                     │                             │           │
-          ┌──────────▼──────────┐      ┌───────────▼─────┐ ┌───▼──────────┐
-          │   AiCoin Open API   │      │    交易所 API    │ │ OKX Web3 API │
-          │    (行情数据层)      │      │ Binance/OKX/…   │ │  (链上 DEX)  │
-          └─────────────────────┘      └─────────────────┘ └──────────────┘
-```
-
-<div align="center">
-
-每个 Skill **完全独立**，拥有自己的 `SKILL.md`、`lib/` 和 `scripts/`。`aicoin-market` 和 `aicoin-hyperliquid` 各自共用一个 catalog 驱动的 v3 客户端（`scripts/aicoin.mjs` + `lib/client.mjs`），一个工具能调 AiCoin Open API v3 全部 183 个接口；`aicoin-onchain` 用独立的 OKX Web3 DEX 客户端（`lib/okx-api.mjs`）。
-
-<br />
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-
-## 快速开始
-
-</div>
+## 常用命令
 
 ```bash
-# 通过 npx 安装
-npx skills add aicoincom/coinos-skills
+# 校验 skill 配置与共享文件
+node scripts/validate-skills.mjs
 
-# 选择要安装的 skill，或用 --yes 全部安装（共 6 个）
+# 账户查询
+cd skills/helix-account
+node scripts/exchange.mjs balance '{"exchange":"okx"}'
+node scripts/exchange.mjs positions '{"exchange":"okx","market_type":"swap"}'
+node scripts/exchange.mjs closed_orders '{"exchange":"okx","symbol":"BTC/USDT","limit":20}'
+
+# 交易预览 / 执行
+cd skills/helix-trading
+node scripts/exchange.mjs create_order '{"exchange":"okx","symbol":"BTC/USDT:USDT","type":"market","side":"buy","amount":0.01,"market_type":"swap"}'
+node scripts/exchange.mjs close_position '{"exchange":"okx","symbol":"BTC/USDT:USDT","market_type":"swap"}'
+node scripts/exchange.mjs set_stop '{"exchange":"okx","symbol":"BTC/USDT:USDT","market_type":"swap","stop_loss":70000}'
+
+# Freqtrade
+cd skills/helix-freqtrade
+node scripts/ft-deploy.mjs create_strategy '{"name":"RSIStrategy","timeframe":"15m","indicators":["rsi","macd"],"direction":"long"}'
+node scripts/ft-deploy.mjs backtest '{"strategy":"RSIStrategy","timeframe":"15m","timerange":"20250101-20260301"}'
+node scripts/ft.mjs daemon_info
+node scripts/ft.mjs profit
 ```
 
-<div align="center">
+## 环境配置
 
-然后，直接和你的 AI 对话：
+交易所 API key 通过项目脚本或容器 Web UI 配置，不要在聊天、日志或 shell 历史中回显 secret。
 
-</div>
-
-```
-> "BTC 现在多少钱？"
-> "给我看一下 ETH 的 1 小时 K 线"
-> "帮我写一个资金费率策略"
-> "查一下 OKX 余额"
-> "Hyperliquid 上 BTC 大户都在做什么方向？"
-> "在链上把 0.1 ETH 换成 USDC"
-```
-
-<div align="center">
-
-行情查询无需任何配置，内置免费 API Key 开箱即用；交易/链上操作再按需配置对应的交易所或 OKX Web3 Key。
-
-<br />
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-
-## 支持的交易所
-
-| 交易所 | ID | 现货 | 合约 | |
-|:--|:--|:--:|:--:|:--|
-| **Binance** | `binance` | ✅ | ✅ | 全球最大交易量 |
-| **OKX** | `okx` | ✅ | ✅ | 高级衍生品平台 |
-| **Bybit** | `bybit` | ✅ | ✅ | 永续合约领先 |
-| **Bitget** | `bitget` | ✅ | ✅ | 跟单交易领先 |
-| **Gate.io** | `gate` | ✅ | ✅ | 1700+ 交易对 |
-| **HTX** | `htx` | ✅ | ✅ | 全球数字资产平台 |
-| **Pionex** | `pionex` | ✅ | ✅ | 网格/量化机器人交易所 |
-| **Hyperliquid** | `hyperliquid` | — | ✅ | 链上永续合约 DEX（USDC 结算） |
-
-<br />
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-
-## 使用示例
-
-</div>
-
-<details open>
-<summary><strong>行情查询</strong></summary>
-
-```
-You:     BTC 现在多少钱？
-
-CoinOS:  BTC/USDT — $84,302.50
-         24h 涨跌:   +2.34%
-         24h 最高:   $85,100.00
-         24h 最低:   $82,450.00
-         24h 成交量: $28.5B
-```
-
-</details>
-
-<details>
-<summary><strong>K线与技术分析</strong></summary>
-
-```
-You:     给我看一下 ETH 的 1 小时 K 线
-
-CoinOS:  从 OKX 获取 100 根 K 线，返回 OHLCV 数据
-         包含时间戳，可用于图表绘制或分析。
-```
+常用变量:
 
 ```bash
-# 直接调用脚本
-node skills/aicoin-market/scripts/aicoin.mjs market/klines \
-  '{"coin_key":"ethereum","market":"okx","interval":"1h","limit":100}'
-```
+OKX_API_KEY="xxx"
+OKX_API_SECRET="xxx"
+OKX_PASSWORD="xxx"
 
-</details>
-
-<details>
-<summary><strong>交易所交易</strong></summary>
-
-```
-You:     帮我在 Binance 买入 0.1 个 BTC
-
-CoinOS:  订单预览
-         ─────────────────────────────────────
-         交易所:     Binance
-         交易对:     BTC/USDT
-         方向:       买入
-         类型:       市价
-         数量:       0.1 BTC
-         预估花费:   ~$8,430.25
-         ─────────────────────────────────────
-         确认后执行。
-```
-
-</details>
-
-<details>
-<summary><strong>链上 DEX 兑换</strong></summary>
-
-```
-You:     在链上把 0.1 ETH 换成 USDC
-
-CoinOS:  Swap 报价（Ethereum）
-         ─────────────────────────────────────
-         卖出:       0.1 ETH
-         买入:       ~316.4 USDC
-         路由:       Uniswap V3
-         预估 gas:   ~$2.10
-         ─────────────────────────────────────
-         确认后广播交易。
-```
-
-</details>
-
-<details>
-<summary><strong>策略与回测</strong></summary>
-
-```
-You:     帮我写一个资金费率策略，15分钟周期
-
-CoinOS:  通过 ft-deploy.mjs 创建策略...
-         ✓ 策略 "FundingRateStrat" 已创建
-         ✓ 周期: 15m
-         ✓ AiCoin 数据: funding_rate
-         ✓ 文件: user_data/strategies/FundingRateStrat.py
-
-You:     回测一下，2025年全年
-
-CoinOS:  正在运行回测...
-         ─────────────────────────────────────
-         策略:       FundingRateStrat
-         时间范围:   2025-01-01 → 2025-12-31
-         总交易数:   142
-         胜率:       63.4%
-         总收益:     +18.7%
-         最大回撤:   -8.2%
-         夏普比率:   1.45
-```
-
-</details>
-
-<details>
-<summary><strong>Hyperliquid 鲸鱼追踪</strong></summary>
-
-```
-You:     Hyperliquid 上 BTC 大户都在做什么方向？
-
-CoinOS:  BTC 鲸鱼持仓 Top (Hyperliquid)
-         ─────────────────────────────────────
-         🐋 0x1a2b...  做多   $12.5M   +$340K 盈亏
-         🐋 0x3c4d...  做空   $8.2M    -$120K 盈亏
-         🐋 0x5e6f...  做多   $6.8M    +$89K  盈亏
-         ─────────────────────────────────────
-         整体偏向: 65% 做多
-```
-
-</details>
-
-<div align="center">
-<br />
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-
-## 环境变量
-
-</div>
-
-把 key 放进 **`~/.coinos/.env`**（推荐 —— 不管从哪个目录跑脚本都能读到）。脚本自动加载，依次查找：容器 `/workspace/.env` → `~/.coinos/.env`（规范位置）→ 当前目录 `.env` → 旧 `~/.openclaw/workspace/.env`、`~/.openclaw/.env`（向后兼容）。也可以直接在 shell 里 `export`（环境变量优先级最高）：
-
-```bash
-# AiCoin API（可选 — 内置免费 Key，有 IP 频率限制）
-AICOIN_ACCESS_KEY_ID="your-key"
-AICOIN_ACCESS_SECRET="your-secret"
-
-# 交易所交易（aicoin-trading / aicoin-account，按需配置）
 BINANCE_API_KEY="xxx"
 BINANCE_API_SECRET="xxx"
-# 支持: BINANCE, OKX, BYBIT, BITGET, GATE, HTX, PIONEX, HYPERLIQUID
-# OKX / Bitget 还需要 passphrase: OKX_PASSWORD="xxx"
 
-# 链上 DEX swap / 钱包（aicoin-onchain，OKX Web3 DEX API）
-# 注意：这是与上面 CEX 交易完全不同的另一套 Key
-OKX_WEB3_API_KEY="xxx"
-OKX_WEB3_SECRET_KEY="xxx"
-OKX_WEB3_PASSPHRASE="xxx"
+BYBIT_API_KEY="xxx"
+BYBIT_API_SECRET="xxx"
 
-# 代理（可选 — 本地网络无法直连交易所/OKX 时用，支持 socks5h）
 PROXY_URL="socks5://127.0.0.1:7890"
 ```
 
-<div align="center">
-<br />
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-</div>
+## 验证
 
-<details>
-<summary><strong>项目结构</strong></summary>
-
-<br />
-
+```bash
+node scripts/validate-skills.mjs
+node --check skills/helix-account/scripts/exchange.mjs
+node --check skills/helix-trading/scripts/exchange.mjs
+node --check skills/helix-trading/scripts/verify-order-matrix.mjs
+node --check skills/helix-freqtrade/scripts/ft.mjs
+node --check skills/helix-freqtrade/scripts/ft-deploy.mjs
+node --check skills/helix-freqtrade/lib/strategy-builder.mjs
 ```
-coinos-skills/
-├── skills/
-│   ├── aicoin-market/        # 行情、K线、新闻、信号、空投
-│   │   ├── SKILL.md
-│   │   ├── lib/
-│   │   └── scripts/
-│   │       └── aicoin.mjs        一个 CLI → 全部 183 个 AiCoin v3 接口（catalog 驱动）
-│   │
-│   ├── aicoin-trading/       # 交易所交易
-│   │   ├── SKILL.md
-│   │   ├── lib/
-│   │   └── scripts/
-│   │       ├── exchange.mjs      下单、余额、仓位
-│   │       ├── trade.mjs         下单流程封装
-│   │       ├── auto-trade.mjs    自动交易策略
-│   │       └── register.mjs      交易所注册
-│   │
-│   ├── aicoin-freqtrade/     # 量化策略
-│   │   ├── SKILL.md
-│   │   ├── lib/                  coinclaw-env / freqtrade-api / strategy-builder / aicoin_data.py
-│   │   └── scripts/
-│   │       ├── ft-deploy.mjs     创建、回测、部署机器人
-│   │       ├── ft.mjs            Freqtrade daemon 控制
-│   │       └── ft-dev.mjs        策略开发/调试辅助
-│   │
-│   ├── aicoin-hyperliquid/   # 鲸鱼分析
-│   │   ├── SKILL.md
-│   │   ├── lib/
-│   │   └── scripts/
-│   │       └── aicoin.mjs        一个 CLI → 全部 Hyperliquid v3 接口
-│   │
-│   ├── aicoin-account/       # 账户管理
-│   │   ├── SKILL.md
-│   │   ├── lib/
-│   │   └── scripts/
-│   │       ├── exchange.mjs      余额、仓位、订单
-│   │       ├── api-key-info.mjs  API Key 管理
-│   │       ├── check-tier.mjs    API 套餐查询
-│   │       └── register.mjs      交易所注册
-│   │
-│   └── aicoin-onchain/       # 链上 DEX 交易
-│       ├── SKILL.md
-│       ├── lib/
-│       │   └── okx-api.mjs       OKX Web3 DEX 客户端
-│       └── scripts/
-│           ├── swap.mjs          报价与兑换执行
-│           ├── portfolio.mjs     钱包余额/持仓
-│           ├── market.mjs        链上行情
-│           ├── token.mjs         代币搜索/信息
-│           ├── trade.mjs         交易广播
-│           └── gateway.mjs       链路/网关
-│
-├── AGENTS.md                 # AI Agent 路由指引
-├── CLAUDE.md                 # 开发说明
-└── .claude-plugin/
-    └── plugin.json           # 插件元数据
-```
-
-</details>
-
-<div align="center">
-
-<br />
-
-## License
-
-[MIT License](./LICENSE)
-
-<br />
-
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="-----" />
-
-<br />
-
-**基于** [AiCoin Open API](https://www.aicoin.com/opendata) · [OKX Web3 DEX API](https://web3.okx.com) · [CCXT](https://github.com/ccxt/ccxt) · [Freqtrade](https://github.com/freqtrade/freqtrade)
-
-<br />
-
-```
-为 AI 原生加密货币交易而生。
-```
-
-<br />
-
-<sub>Made by <a href="https://www.aicoin.com">AiCoin</a></sub>
-
-</div>

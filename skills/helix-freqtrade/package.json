@@ -1,0 +1,6 @@
+{
+  "name": "helix-freqtrade",
+  "version": "3.5.2",
+  "private": true,
+  "type": "module"
+}

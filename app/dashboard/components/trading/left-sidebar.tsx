@@ -1,12 +1,19 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Bot, LoaderCircle, Newspaper, Plus, Search, Star } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Activity, BarChart3, Bot, LoaderCircle, Newspaper, Plus, RefreshCw, Search, Star } from 'lucide-react'
 import { Sparkline } from '@/components/charts/sparkline'
-import { formatPrice, type TradingPair } from '@/lib/market-data'
+import {
+  formatPrice,
+  type MacroDataPoint,
+  type MacroSnapshot,
+  type MarketNewsItem,
+  type MarketNewsSnapshot,
+  type TradingPair,
+} from '@/lib/market-data'
 import { cn } from '@/lib/utils'
 
-type InfoTab = 'signals' | 'strategies' | 'news'
+type InfoTab = 'signals' | 'strategies' | 'news' | 'data'
 
 const INFO_PANEL_FALLBACK_HEIGHT = 236
 const INFO_PANEL_DEFAULT_RATIO = 0.5
@@ -19,6 +26,7 @@ const infoTabs: Array<{ id: InfoTab; label: string; icon: React.ElementType }> =
   { id: 'signals', label: '信号', icon: Activity },
   { id: 'strategies', label: '策略', icon: Bot },
   { id: 'news', label: '新闻', icon: Newspaper },
+  { id: 'data', label: '数据', icon: BarChart3 },
 ]
 
 function SectionTitle({ icon, title, extra }: { icon: React.ReactNode; title: string; extra?: React.ReactNode }) {
@@ -45,6 +53,48 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
 }
 
+function formatRelativeTime(timestamp: number) {
+  if (!Number.isFinite(timestamp)) return '--'
+
+  const diff = Math.max(Date.now() - timestamp, 0)
+  const minute = 60_000
+  const hour = minute * 60
+  const day = hour * 24
+
+  if (diff < minute) return '刚刚'
+  if (diff < hour) return `${Math.floor(diff / minute)}m`
+  if (diff < day) return `${Math.floor(diff / hour)}h`
+  if (diff < day * 7) return `${Math.floor(diff / day)}d`
+
+  return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit' }).format(timestamp)
+}
+
+function formatClockTime(timestamp: number) {
+  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(timestamp)
+}
+
+function macroGroupLabel(group: MacroDataPoint['group']) {
+  switch (group) {
+    case 'rates':
+      return 'Rates'
+    case 'risk':
+      return 'Risk'
+    case 'inflation':
+      return 'Inflation'
+    case 'labor':
+      return 'Labor'
+    case 'liquidity':
+      return 'Liquidity'
+    case 'commodities':
+      return 'Commodities'
+  }
+}
+
+function macroChangeClass(change?: number) {
+  if (change == null || Math.abs(change) < 1e-9) return 'text-muted-foreground'
+  return change > 0 ? 'text-[var(--chart-3)]' : 'text-[var(--chart-2)]'
+}
+
 export function LeftSidebar({
   pairs,
   activeSymbol,
@@ -64,6 +114,14 @@ export function LeftSidebar({
   const [searchResults, setSearchResults] = useState<TradingPair[]>([])
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
+  const [newsItems, setNewsItems] = useState<MarketNewsItem[]>([])
+  const [newsLoading, setNewsLoading] = useState(false)
+  const [newsError, setNewsError] = useState<string | null>(null)
+  const [newsFetchedAt, setNewsFetchedAt] = useState<number | null>(null)
+  const [macroItems, setMacroItems] = useState<MacroDataPoint[]>([])
+  const [macroLoading, setMacroLoading] = useState(false)
+  const [macroError, setMacroError] = useState<string | null>(null)
+  const [macroFetchedAt, setMacroFetchedAt] = useState<number | null>(null)
   const sidebarRef = useRef<HTMLElement>(null)
   const dragRef = useRef<{ startY: number; startHeight: number } | null>(null)
   const userResizedRef = useRef(false)
@@ -77,6 +135,88 @@ export function LeftSidebar({
     () => searchResults.filter((pair) => !knownInstruments.has(pair.instrumentId)),
     [knownInstruments, searchResults],
   )
+
+  const loadNews = useCallback(async (signal?: AbortSignal) => {
+    setNewsLoading(true)
+
+    try {
+      const response = await fetch('/api/market/news?limit=24', {
+        cache: 'no-store',
+        signal,
+      })
+      if (!response.ok) throw new Error(`新闻接口 HTTP ${response.status}`)
+
+      const payload = (await response.json()) as MarketNewsSnapshot
+      if (signal?.aborted) return
+
+      setNewsItems(payload.items ?? [])
+      setNewsFetchedAt(payload.source.fetchedAt)
+      setNewsError(
+        payload.ok
+          ? payload.source.status === 'partial'
+            ? payload.source.errors[0] ?? null
+            : null
+          : payload.source.errors[0] ?? '新闻源暂时不可用',
+      )
+    } catch (error) {
+      if (signal?.aborted) return
+      setNewsError(error instanceof Error ? error.message : '新闻源暂时不可用')
+    } finally {
+      if (!signal?.aborted) setNewsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void loadNews(controller.signal)
+    const timer = window.setInterval(() => void loadNews(), 120_000)
+
+    return () => {
+      controller.abort()
+      window.clearInterval(timer)
+    }
+  }, [loadNews])
+
+  const loadMacro = useCallback(async (signal?: AbortSignal) => {
+    setMacroLoading(true)
+
+    try {
+      const response = await fetch('/api/macro/snapshot', {
+        cache: 'no-store',
+        signal,
+      })
+      if (!response.ok) throw new Error(`宏观接口 HTTP ${response.status}`)
+
+      const payload = (await response.json()) as MacroSnapshot
+      if (signal?.aborted) return
+
+      setMacroItems(payload.items ?? [])
+      setMacroFetchedAt(payload.source.fetchedAt)
+      setMacroError(
+        payload.ok
+          ? payload.source.status === 'partial'
+            ? payload.source.errors[0] ?? null
+            : null
+          : payload.source.errors[0] ?? '宏观数据暂不可用',
+      )
+    } catch (error) {
+      if (signal?.aborted) return
+      setMacroError(error instanceof Error ? error.message : '宏观数据暂不可用')
+    } finally {
+      if (!signal?.aborted) setMacroLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void loadMacro(controller.signal)
+    const timer = window.setInterval(() => void loadMacro(), 300_000)
+
+    return () => {
+      controller.abort()
+      window.clearInterval(timer)
+    }
+  }, [loadMacro])
 
   useEffect(() => {
     const normalized = query.trim()
@@ -299,7 +439,7 @@ export function LeftSidebar({
       </button>
 
       <div className="flex shrink-0 flex-col" style={{ height: infoHeight ?? '50%' }}>
-        <div className="grid h-9 grid-cols-3 border-b border-border">
+        <div className="grid h-9 grid-cols-4 border-b border-border">
           {infoTabs.map((tab) => {
             const Icon = tab.icon
             const selected = infoTab === tab.id
@@ -337,8 +477,119 @@ export function LeftSidebar({
 
           {infoTab === 'news' && (
             <div className="h-full overflow-y-auto scrollbar-thin">
-              <SectionTitle icon={<Newspaper className="size-3.5" />} title="最近新闻" />
-              <EmptyState label="暂无真实新闻流" />
+              <SectionTitle
+                icon={<Newspaper className="size-3.5" />}
+                title="最近新闻"
+                extra={
+                  <button
+                    type="button"
+                    onClick={() => void loadNews()}
+                    disabled={newsLoading}
+                    title={newsFetchedAt ? `最后更新 ${formatClockTime(newsFetchedAt)}` : '刷新新闻'}
+                    aria-label="刷新新闻"
+                    className="inline-flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-wait disabled:opacity-70"
+                  >
+                    {newsLoading ? <LoaderCircle className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+                  </button>
+                }
+              />
+              {newsError && newsItems.length > 0 && (
+                <div className="border-y border-border/70 px-3 py-1.5 text-[10px] leading-4 text-muted-foreground">
+                  {newsError}
+                </div>
+              )}
+              {newsItems.length > 0 ? (
+                <div className="divide-y divide-border/60">
+                  {newsItems.map((item) => (
+                    <a
+                      key={item.id}
+                      href={item.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="group flex min-h-[94px] flex-col gap-1.5 overflow-hidden px-3 py-2.5 transition-colors hover:bg-muted/40"
+                    >
+                      <div className="flex h-3.5 min-w-0 items-center gap-1.5 text-[10px] uppercase leading-none tracking-wide text-muted-foreground">
+                        <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                          <span className="min-w-0 truncate">{item.source}</span>
+                          {item.category && (
+                            <>
+                              <span className="shrink-0 text-muted-foreground/50">·</span>
+                              <span className="min-w-0 truncate">{item.category}</span>
+                            </>
+                          )}
+                        </div>
+                        <span className="shrink-0 font-mono tabular-nums">
+                          {formatRelativeTime(item.publishedAt)}
+                        </span>
+                      </div>
+                      <div
+                        className="overflow-hidden text-xs font-medium leading-[18px] text-foreground transition-colors group-hover:text-primary"
+                        style={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2 }}
+                      >
+                        {item.title}
+                      </div>
+                      {item.summary && (
+                        <div
+                          className="overflow-hidden text-[11px] leading-4 text-muted-foreground"
+                          style={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2 }}
+                        >
+                          {item.summary}
+                        </div>
+                      )}
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState label={newsLoading ? '正在加载新闻流' : newsError ?? '暂无真实新闻流'} />
+              )}
+            </div>
+          )}
+
+          {infoTab === 'data' && (
+            <div className="h-full overflow-y-auto scrollbar-thin">
+              <SectionTitle
+                icon={<BarChart3 className="size-3.5" />}
+                title="宏观数据"
+                extra={
+                  <button
+                    type="button"
+                    onClick={() => void loadMacro()}
+                    disabled={macroLoading}
+                    title={macroFetchedAt ? `最后更新 ${formatClockTime(macroFetchedAt)}` : '刷新宏观数据'}
+                    aria-label="刷新宏观数据"
+                    className="inline-flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-wait disabled:opacity-70"
+                  >
+                    {macroLoading ? <LoaderCircle className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+                  </button>
+                }
+              />
+              {macroError && macroItems.length > 0 && (
+                <div className="border-y border-border/70 px-3 py-1.5 text-[10px] leading-4 text-muted-foreground">
+                  {macroError}
+                </div>
+              )}
+              {macroItems.length > 0 ? (
+                <div className="divide-y divide-border/60">
+                  {macroItems.map((item) => (
+                    <div key={item.id} className="px-3 py-2 transition-colors hover:bg-muted/40">
+                      <div className="flex min-w-0 items-center justify-between gap-2">
+                        <div className="min-w-0 truncate text-xs font-medium text-foreground">{item.shortLabel}</div>
+                        <div className="shrink-0 font-mono text-xs tabular-nums text-foreground">{item.valueLabel}</div>
+                      </div>
+                      <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] leading-none text-muted-foreground">
+                        <span className="min-w-0 truncate">{item.label}</span>
+                        <span className="shrink-0 uppercase tracking-wide">{macroGroupLabel(item.group)}</span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between gap-2 font-mono text-[10px] leading-none tabular-nums">
+                        <span className={macroChangeClass(item.change)}>{item.changeLabel ?? '--'}</span>
+                        <span className="text-muted-foreground">{item.date}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState label={macroLoading ? '正在加载宏观数据' : macroError ?? '暂无宏观数据'} />
+              )}
             </div>
           )}
         </div>

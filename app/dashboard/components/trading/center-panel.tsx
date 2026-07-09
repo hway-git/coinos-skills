@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Check, Percent, Plus } from 'lucide-react'
+import { Check, Plus } from 'lucide-react'
 import { IndicatorCard } from './indicator-card'
 import { SymbolHeader } from './symbol-header'
 import { CandlestickChart } from '@/components/charts/candlestick-chart'
@@ -25,34 +25,6 @@ function IndicatorEmptyState({ loading, message }: { loading: boolean; message: 
   return (
     <div className="flex h-full items-center justify-center px-3 text-center text-xs text-muted-foreground">
       {loading ? '正在加载指标' : message}
-    </div>
-  )
-}
-
-function fundingRateLabel(rate?: number) {
-  if (rate == null) return '--'
-  return `${(rate * 100).toFixed(4)}%`
-}
-
-function fundingTimeLabel(time?: number) {
-  if (!time) return null
-  return new Intl.DateTimeFormat('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(new Date(time))
-}
-
-function FundingRateChip({ pair }: { pair: TradingPair }) {
-  const nextFundingTime = fundingTimeLabel(pair.nextFundingTime)
-  const tone = pair.fundingRate == null ? 'text-muted-foreground' : pair.fundingRate >= 0 ? 'text-up' : 'text-down'
-
-  return (
-    <div className="hidden h-7 items-center gap-1.5 rounded border border-border bg-background/40 px-2 font-mono text-[11px] leading-none md:inline-flex [&_svg]:shrink-0">
-      <Percent className="size-3.5 text-muted-foreground" />
-      <span className="text-muted-foreground">资金</span>
-      <span className={tone}>{fundingRateLabel(pair.fundingRate)}</span>
-      {nextFundingTime && <span className="text-muted-foreground">下次 {nextFundingTime}</span>}
     </div>
   )
 }
@@ -168,8 +140,6 @@ export function CenterPanel({
               </button>
             ))}
           </div>
-
-          <FundingRateChip pair={pair} />
 
           <div className="relative ml-auto">
             <button

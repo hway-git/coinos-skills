@@ -168,7 +168,7 @@ function lintFrontmatter(fm) {
       i = res.nextLine;
       continue;
     }
-    // plain 标量（本仓库均为单行，如 name: aicoin-xxx）
+    // plain 标量（本仓库均为单行，如 name: helix-xxx）
     values[key] = trimmedLeft.replace(/\s+$/, '');
     i++;
   }
@@ -221,56 +221,31 @@ function check(dir) {
 // 任一组内（存在的）多个文件内容不一致即报错并非零退出。
 const SHARED_FILE_GROUPS = [
   {
-    name: 'group1 client.mjs',
+    name: 'group1 exchange.mjs',
     files: [
-      'skills/aicoin-market/lib/client.mjs',
-      'skills/aicoin-account/lib/client.mjs',
-      'skills/aicoin-hyperliquid/lib/client.mjs',
+      'skills/helix-trading/scripts/exchange.mjs',
+      'skills/helix-account/scripts/exchange.mjs',
     ],
   },
   {
-    name: 'group2 env-loader.mjs',
+    name: 'group2 cli.mjs',
     files: [
-      'skills/aicoin-market/lib/env-loader.mjs',
-      'skills/aicoin-account/lib/env-loader.mjs',
-      'skills/aicoin-hyperliquid/lib/env-loader.mjs',
-      'skills/aicoin-trading/lib/env-loader.mjs',
-      'skills/aicoin-onchain/lib/env-loader.mjs',
+      'skills/helix-trading/lib/cli.mjs',
+      'skills/helix-account/lib/cli.mjs',
     ],
   },
   {
-    name: 'group3 exchange.mjs',
+    name: 'group3 env-loader.mjs',
     files: [
-      'skills/aicoin-trading/scripts/exchange.mjs',
-      'skills/aicoin-account/scripts/exchange.mjs',
+      'skills/helix-trading/lib/env-loader.mjs',
+      'skills/helix-account/lib/env-loader.mjs',
     ],
   },
   {
-    name: 'group4 cli.mjs',
+    name: 'group4 register.mjs',
     files: [
-      'skills/aicoin-trading/lib/cli.mjs',
-      'skills/aicoin-account/lib/cli.mjs',
-    ],
-  },
-  {
-    name: 'group5 api-key-info.mjs',
-    files: [
-      'skills/aicoin-trading/scripts/api-key-info.mjs',
-      'skills/aicoin-account/scripts/api-key-info.mjs',
-    ],
-  },
-  {
-    name: 'group6 register.mjs',
-    files: [
-      'skills/aicoin-trading/scripts/register.mjs',
-      'skills/aicoin-account/scripts/register.mjs',
-    ],
-  },
-  {
-    name: 'group7 aicoin.mjs',
-    files: [
-      'skills/aicoin-market/scripts/aicoin.mjs',
-      'skills/aicoin-hyperliquid/scripts/aicoin.mjs',
+      'skills/helix-trading/scripts/register.mjs',
+      'skills/helix-account/scripts/register.mjs',
     ],
   },
 ];

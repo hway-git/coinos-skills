@@ -1,29 +1,28 @@
 {
-  "name": "coinos-skills",
+  "name": "helix",
   "version": "2.0.0",
-  "description": "CoinOS skills for AI coding assistants — crypto market data, exchange trading, Freqtrade strategy automation, and Hyperliquid whale analytics powered by AiCoin Open API",
+  "private": true,
+  "description": "Helix skills for AI coding assistants — exchange account access, CEX trading execution, and Freqtrade strategy automation",
   "keywords": [
     "claude-code",
     "skills",
     "crypto",
-    "aicoin",
     "trading",
     "freqtrade",
-    "hyperliquid",
-    "market-data",
-    "coinos",
+    "account",
+    "execution",
+    "helix",
     "openclaw"
   ],
   "author": {
-    "name": "AiCoin",
-    "url": "https://www.aicoin.com"
+    "name": "Helix"
   },
-  "license": "MIT",
+  "license": "UNLICENSED",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aicoincom/coinos-skills.git"
+    "url": "https://github.com/hway-git/helix.git"
   },
-  "homepage": "https://www.aicoin.com/opendata",
+  "homepage": "https://github.com/hway-git/helix",
   "files": [
     "skills/",
     "AGENTS.md",
@@ -32,9 +31,9 @@
   ],
   "scripts": {
     "validate": "node scripts/validate-skills.mjs",
-    "verify-orders": "node skills/aicoin-trading/scripts/verify-order-matrix.mjs",
+    "verify-orders": "node skills/helix-trading/scripts/verify-order-matrix.mjs",
     "prepublishOnly": "node scripts/validate-skills.mjs",
-    "postinstall": "echo '\\n  coinos-skills installed!\\n  Skills: aicoin-market, aicoin-account, aicoin-trading, aicoin-freqtrade, aicoin-hyperliquid, aicoin-onchain\\n  Docs: https://www.aicoin.com/opendata\\n'"
+    "postinstall": "echo '\\n  helix skills installed!\\n  Skills: helix-account, helix-trading, helix-freqtrade\\n  Docs: README.md\\n'"
   },
   "engines": {
     "node": ">=18"

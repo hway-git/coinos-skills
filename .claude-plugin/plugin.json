@@ -1,5 +1,5 @@
 {
-  "name": "coinos-skills",
+  "name": "helix-skills",
   "version": "2.0.0",
   "skills": [
     "./skills/"
@@ -7,13 +7,10 @@
   "keywords": [
     "skills",
     "crypto",
-    "aicoin",
     "trading",
     "freqtrade",
-    "hyperliquid",
-    "onchain",
-    "dex",
-    "market-data",
-    "coinOS"
+    "account",
+    "execution",
+    "helix"
   ]
 }

@@ -20,10 +20,16 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'up
   )
 }
 
+function formatFundingRate(rate?: number) {
+  if (rate == null || !Number.isFinite(rate)) return '--'
+  return `${(rate * 100).toFixed(4)}%`
+}
+
 export function SymbolHeader({ pair }: { pair: TradingPair }) {
   const positive = pair.change >= 0
   const market = pair.market.toUpperCase()
   const contractLabel = pair.contractType === 'perpetual' ? '永续' : '现货'
+  const fundingTone = pair.fundingRate == null ? undefined : pair.fundingRate >= 0 ? 'up' : 'down'
 
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-3 border-b border-border bg-card/40 px-4 py-3">
@@ -59,7 +65,7 @@ export function SymbolHeader({ pair }: { pair: TradingPair }) {
         <Stat label="24h 最高" value={pair.high24h == null ? '--' : formatPrice(pair.high24h)} tone="up" />
         <Stat label="24h 最低" value={pair.low24h == null ? '--' : formatPrice(pair.low24h)} tone="down" />
         <Stat label="24h 量" value={pair.volume} />
-        <Stat label="资金费率" value="--" />
+        <Stat label="资金费率" value={formatFundingRate(pair.fundingRate)} tone={fundingTone} />
         <Stat label="数据源" value={pair.stale ? 'STALE' : market} />
       </div>
     </div>

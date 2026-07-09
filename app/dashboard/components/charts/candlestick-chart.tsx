@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { RotateCcw } from 'lucide-react'
 import {
   createChart,
   LineStyle,
@@ -17,6 +18,9 @@ import { baseChartOptions, chartColors, chartTime } from './lightweight-utils'
 
 const EMA_PERIOD = 20
 const INITIAL_VISIBLE_BARS = 96
+const CONTEXT_MENU_WIDTH = 152
+const CONTEXT_MENU_HEIGHT = 38
+const CONTEXT_MENU_MARGIN = 8
 
 type CandleReadout = Candle & {
   ema20?: number
@@ -70,6 +74,10 @@ function formatVolume(value: number) {
   return value.toLocaleString('en-US', { maximumFractionDigits: 2 })
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max)
+}
+
 function readoutToneClass(tone?: 'up' | 'down' | 'accent' | 'warning' | 'mondayLow') {
   if (tone === 'up') return 'text-up'
   if (tone === 'down') return 'text-down'
@@ -117,6 +125,7 @@ export function CandlestickChart({
   const initialRangeAppliedRef = useRef(false)
   const ema20 = useMemo(() => (showEma20 ? buildEma(candles, EMA_PERIOD) : []), [candles, showEma20])
   const [hoveredCandle, setHoveredCandle] = useState<CandleReadout | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
 
   const latestCandle = candles.at(-1)
   const latestEma = ema20.at(-1)?.value
@@ -128,6 +137,36 @@ export function CandlestickChart({
           ema20: typeof latestEma === 'number' ? latestEma : undefined,
         }
       : null)
+
+  const resetView = useCallback(() => {
+    const chart = chartRef.current
+    const series = candleSeriesRef.current
+    if (!chart || !series) return
+
+    if (candles.length > INITIAL_VISIBLE_BARS) {
+      chart.timeScale().setVisibleLogicalRange({
+        from: candles.length - INITIAL_VISIBLE_BARS,
+        to: candles.length + 4,
+      })
+    } else {
+      chart.timeScale().fitContent()
+    }
+
+    series.priceScale().applyOptions({ autoScale: true })
+    emaSeriesRef.current?.priceScale().applyOptions({ autoScale: true })
+    setContextMenu(null)
+  }, [candles.length])
+
+  const openContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const maxX = Math.max(CONTEXT_MENU_MARGIN, window.innerWidth - CONTEXT_MENU_WIDTH - CONTEXT_MENU_MARGIN)
+    const maxY = Math.max(CONTEXT_MENU_MARGIN, window.innerHeight - CONTEXT_MENU_HEIGHT - CONTEXT_MENU_MARGIN)
+
+    setContextMenu({
+      x: clamp(event.clientX, CONTEXT_MENU_MARGIN, maxX),
+      y: clamp(event.clientY, CONTEXT_MENU_MARGIN, maxY),
+    })
+  }
 
   useEffect(() => {
     const container = containerRef.current
@@ -152,6 +191,7 @@ export function CandlestickChart({
     priceLinesRef.current = []
     initialRangeAppliedRef.current = false
     setHoveredCandle(null)
+    setContextMenu(null)
 
     const onCrosshairMove = (param: MouseEventParams<Time>) => {
       if (!param.time) {
@@ -255,8 +295,29 @@ export function CandlestickChart({
     ]
   }, [levels])
 
+  useEffect(() => {
+    if (!contextMenu) return
+
+    const closeMenu = () => setContextMenu(null)
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeMenu()
+    }
+
+    window.addEventListener('click', closeMenu)
+    window.addEventListener('scroll', closeMenu, true)
+    window.addEventListener('resize', closeMenu)
+    window.addEventListener('keydown', closeOnEscape)
+
+    return () => {
+      window.removeEventListener('click', closeMenu)
+      window.removeEventListener('scroll', closeMenu, true)
+      window.removeEventListener('resize', closeMenu)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [contextMenu])
+
   return (
-    <div className="relative h-full w-full">
+    <div className="relative h-full w-full" onContextMenu={openContextMenu}>
       {displayCandle && (
         <div className="pointer-events-none absolute left-3 top-3 z-10 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-x-3 gap-y-1 rounded border border-border bg-background/90 px-2 py-1.5 font-mono text-[11px] leading-none shadow-sm backdrop-blur">
           <ReadoutItem label="T" value={formatTime(displayCandle.time)} />
@@ -281,6 +342,25 @@ export function CandlestickChart({
         </div>
       )}
       <div ref={containerRef} className="h-full w-full" aria-label="K线走势图" />
+      {contextMenu && (
+        <div
+          className="fixed z-50 w-[152px] overflow-hidden rounded-md border border-border bg-popover py-1 shadow-xl"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onContextMenu={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+          }}
+        >
+          <button
+            type="button"
+            onClick={resetView}
+            className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs leading-none text-foreground transition-colors hover:bg-muted [&_svg]:shrink-0"
+          >
+            <RotateCcw className="size-3.5 text-muted-foreground" />
+            重置视图
+          </button>
+        </div>
+      )}
     </div>
   )
 }
