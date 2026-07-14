@@ -9,7 +9,6 @@ Helix is an AI trading terminal with:
 - `app/dashboard`: frontend trading dashboard
 - `skills/helix-account`: exchange account reads
 - `skills/helix-trading`: CEX execution
-- `skills/helix-pa-strategy`: deterministic Price Action setup specifications
 - `skills/helix-freqtrade`: Freqtrade strategy, backtest, deploy, and daemon control
 
 ## Boundaries
@@ -18,24 +17,23 @@ Skill code is only responsible for:
 
 - Exchange account state
 - Order execution and position protection
-- Price Action vocabulary, setup semantics, and causal validation
 - Freqtrade lifecycle and daemon state
 
 Do not add speculative abstractions or broad rewrites. Keep changes targeted to the requested module.
 
 Dashboard servers bind to loopback by default. Remote deployments must configure a `HELIX_CONTROL_TOKEN` of at least 24 characters and preserve the control-session guard on every mutating API route.
 
-## Price Action Strategy
+## Strategy Core
 
-Use `skills/helix-pa-strategy` to formalize or review Price Action ideas before strategy implementation.
+Use `docs/PA_CORE_SPEC.md` and `docs/STRATEGY_DESIGN.md` as the implementation contract for `HelixIntradayStrategy`.
 
 Rules:
 
-- Keep the vocabulary school-neutral; do not introduce ICT or SMC concepts.
+- Use the Al Brooks market-cycle, setup, expectation, and signal-bar model; do not introduce ICT or SMC concepts.
 - Evaluate closed bars only and preserve both event time and confirmation time.
 - Never use future bars, repaint old output, or infer intrabar ordering from OHLC.
-- Keep order entry, exits, risk, leverage, and sizing out of the PA specification.
-- Hand an accepted PA specification to `helix-freqtrade` for implementation and backtesting.
+- PA context and setup must exist before EMA, MACD, or RSI evidence can arm a trade hypothesis.
+- Implement, backtest, and deploy strategy changes through `helix-freqtrade`.
 
 ## Freqtrade
 
@@ -51,7 +49,7 @@ Use:
 
 When users ask about PnL, call `ft.mjs profit` and report both `profit_closed_coin` and `profit_all_coin`.
 
-Strategy deployment, strategy switching, and dry-run / live switching must use `ft-deploy.mjs deploy`. The exact current strategy code must have matching backtest evidence; editing the strategy invalidates older evidence.
+Strategy deployment, strategy switching, and dry-run / live switching must use `ft-deploy.mjs deploy`. The exact current strategy code must have matching backtest evidence with at least one trade and positive total profit; editing the strategy invalidates older evidence.
 
 ## Trading
 

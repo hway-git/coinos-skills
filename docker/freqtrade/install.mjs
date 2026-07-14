@@ -21,7 +21,6 @@ const helixDir = resolve(homedir(), '.helix');
 const envFile = resolve(helixDir, '.env');
 const userData = resolve(homedir(), '.freqtrade', 'user_data');
 const configFile = resolve(userData, 'config.json');
-const strategyFile = resolve(userData, 'strategies', 'SampleStrategy.py');
 
 function upsertEnv(content, key, value, { preserve = false } = {}) {
   const lines = content ? content.split('\n') : [];
@@ -94,14 +93,6 @@ async function waitForApi() {
 writeRuntimeEnv();
 ensureUserData();
 compose(['pull']);
-
-if (!existsSync(strategyFile)) {
-  compose([
-    'run', '--rm', '--no-deps', 'freqtrade',
-    'new-strategy', '--strategy', 'SampleStrategy', '--template', 'minimal',
-    '--userdir', '/freqtrade/user_data',
-  ]);
-}
 
 compose(['up', '-d', 'freqtrade']);
 await waitForApi();

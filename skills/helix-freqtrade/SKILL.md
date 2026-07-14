@@ -13,10 +13,21 @@ Freqtrade strategy generation, backtesting, deployment, and daemon control.
 - In CoinClaw containers, Freqtrade is already managed by supervisord on `127.0.0.1:8888`. Do not start another process.
 - In local Docker mode, use `docker/freqtrade/compose.yaml` through `ft-deploy.mjs`; do not install or start a second host daemon.
 - Use `ft.mjs` and `ft-deploy.mjs`; do not manually edit daemon state without reloading or restarting through scripts.
-- Strategy generation is technical-indicator based. Do not inject fake external data into strategies or backtests.
-- Deploy only through `ft-deploy.mjs deploy`. It requires backtest evidence for the exact current strategy code; editing the strategy invalidates older evidence.
-- Switching live mode requires explicit confirmation.
+- `create_strategy` is only for simple indicator prototypes. Production changes to `HelixIntradayStrategy` must follow `../../docs/PA_CORE_SPEC.md` and `../../docs/STRATEGY_DESIGN.md`.
+- Deploy only through `ft-deploy.mjs deploy`. It requires backtest evidence for the exact current strategy code with at least one trade and positive total profit; editing the strategy invalidates older evidence.
+- LIVE mode requires all of: current backtest evidence, `HELIX_LIVE_TRADING_ENABLED=true`, valid exchange credentials, `max_open_trades <= 2`, and a fresh Dashboard live authorization session. Never ask the user to paste the live token in chat.
+- Do not use direct agent auto-entry. Strategy-driven entries must come from the Freqtrade daemon.
+- Use `emergency_stop` for the safety path. It force-exits all open trades before stopping the daemon and does not require a live session.
 - Answer PnL questions from `ft.mjs profit`, not from open trades alone.
+
+## Helix Strategy Contract
+
+- Brooks PA owns market context, setup, expectation, signal bar, and invalidation.
+- EMA20 describes trend location and pullback context. MACD describes momentum phase. RSI uses the 55/45 control regime.
+- EMA, MACD, RSI, and divergence may support or oppose an existing PA hypothesis; none may create an entry by itself.
+- Current executable setups are H2/L2 second entries, breakout pullbacks, and failed breakouts at range edges.
+- Evaluate closed candles only. Confirmed swings become available at their confirmation bar; never backdate them or infer intrabar event order from OHLC.
+- Every strategy edit invalidates prior backtest evidence and must pass the strategy tests before a new backtest. Zero-trade or non-profitable evidence cannot be deployed.
 
 ## Dashboard Alignment
 
@@ -40,6 +51,7 @@ node scripts/ft.mjs daemon_info
 node scripts/ft.mjs profit
 node scripts/ft.mjs trades_open
 node scripts/ft.mjs balance
+node scripts/ft.mjs locks
 node scripts/ft.mjs set_pairs '{"pairs":["BTC/USDT:USDT","ETH/USDT:USDT"]}'
 
 node scripts/ft-deploy.mjs strategy_list
@@ -77,12 +89,13 @@ node scripts/ft-deploy.mjs deploy '{"strategy":"MyStrategy"}'
 |---|---|---|
 | Switch strategy | `ft-deploy.mjs deploy {"strategy":"X","dry_run":true}` | yes |
 | Switch pairs | `ft.mjs set_pairs {"pairs":[...]}` | reload only |
-| Switch live / dry-run | `ft-deploy.mjs deploy {"strategy":"X","dry_run":false}` | yes |
+| Switch live | Dashboard live authorization + live deploy only | yes |
+| Return to dry-run | `ft-deploy.mjs deploy {"strategy":"X","dry_run":true}` | yes |
 | Reload config | `ft.mjs reload` | no |
 
 ## Manual Force Actions
 
-`force_enter`, `force_exit`, and switching live mode require a preview and explicit user confirmation.
+Do not use `force_enter` for unattended live execution. Use `emergency_stop` for urgent liquidation and use the Dashboard reconciliation action to compare LIVE bot state with exchange positions and active orders.
 
 The Freqtrade daemon's own strategy-driven entries/exits do not require per-trade confirmation after the user has intentionally deployed the strategy and mode.
 

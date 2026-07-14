@@ -93,6 +93,9 @@ function dockerCompose(args, opts = {}) {
 
 function dockerCliPath(value) {
   if (typeof value !== 'string') return value;
+  if (value === STRAT_DIR || value.startsWith(`${STRAT_DIR}/`)) {
+    return `${ENV.containerStrategyPath}${value.slice(STRAT_DIR.length)}`;
+  }
   if (value === USER_DATA || value.startsWith(`${USER_DATA}/`)) {
     return `${ENV.containerUserdir}${value.slice(USER_DATA.length)}`;
   }
@@ -171,7 +174,7 @@ function findNewBacktestResult(resultsDir, beforeFiles, strategy) {
     ?.replace('.meta.json', '') || null;
 }
 
-function recordBacktestEvidence({ strategy, strategyHash, timeframe, timerange, pairs, resultFile }) {
+function recordBacktestEvidence({ strategy, strategyHash, timeframe, timerange, pairs, resultFile, metrics }) {
   const resultsDir = dirname(BACKTEST_EVIDENCE_FILE);
   mkdirSync(resultsDir, { recursive: true });
   const record = {
@@ -182,6 +185,7 @@ function recordBacktestEvidence({ strategy, strategyHash, timeframe, timerange, 
     timerange: timerange || '',
     pairs,
     resultFile,
+    metrics,
     createdAt: new Date().toISOString(),
   };
   const payload = {
@@ -262,6 +266,30 @@ function backtestMetrics(summary) {
     winRate,
     drawdown: firstNumber(summary.max_drawdown_account, summary.max_drawdown_pct, summary.drawdown, summary.max_drawdown),
   };
+}
+
+function metricsForEvidence(evidence) {
+  if (evidence?.metrics && typeof evidence.metrics === 'object') return evidence.metrics;
+  if (!evidence?.resultFile) return {};
+  const resultsDir = dirname(BACKTEST_EVIDENCE_FILE);
+  return backtestMetrics(firstStrategySummary(
+    readBacktestPayload(resultsDir, evidence.resultFile),
+    evidence.strategy,
+  ));
+}
+
+function requireDeployableBacktestEvidence(evidence) {
+  const metrics = metricsForEvidence(evidence);
+  if (metrics.trades == null || metrics.profitPct == null) {
+    throw new Error(`Backtest evidence "${evidence.id}" has no verifiable trade/profit metrics. Run backtest again before deploy.`);
+  }
+  if (metrics.trades < 1) {
+    throw new Error(`Backtest evidence "${evidence.id}" has 0 trades and cannot be deployed.`);
+  }
+  if (metrics.profitPct <= 0) {
+    throw new Error(`Backtest evidence "${evidence.id}" is not profitable (${(metrics.profitPct * 100).toFixed(2)}%). Deployment blocked.`);
+  }
+  return { ...evidence, metrics };
 }
 
 function assertStrategyName(strategy) {
@@ -346,6 +374,34 @@ function detectExchange() {
     }
   }
   return null;
+}
+
+function requireMaxOpenTrades(value) {
+  const maxOpenTrades = Number(value);
+  if (!Number.isInteger(maxOpenTrades) || maxOpenTrades < 1 || maxOpenTrades > 2) {
+    throw new Error('Deployment requires max_open_trades between 1 and 2.');
+  }
+  return maxOpenTrades;
+}
+
+function requireLiveAuthorization(params, cfg) {
+  if (process.env.HELIX_LIVE_TRADING_ENABLED !== 'true') {
+    throw new Error('Live trading is disabled. Set HELIX_LIVE_TRADING_ENABLED=true locally before authorization.');
+  }
+  if (process.env.HELIX_LIVE_AUTHORIZED !== '1') {
+    throw new Error('Live deployment requires a fresh Dashboard live authorization session.');
+  }
+
+  requireMaxOpenTrades(params.max_open_trades ?? cfg.max_open_trades ?? 0);
+
+  const configured = detectExchange();
+  const exchange = String(cfg.exchange?.name || '').toLowerCase();
+  if (!configured || configured.name !== exchange) {
+    throw new Error(`Live deployment requires configured API credentials for ${exchange || 'the selected exchange'}.`);
+  }
+  if (exchange === 'okx' && !configured.password) {
+    throw new Error('Live deployment on OKX requires the API passphrase.');
+  }
 }
 
 // ─── coinclaw 模式: daemon 操作 ──────────────────────────────────
@@ -472,7 +528,7 @@ function generateHostConfig(exchangeInfo, apiPassword, params = {}) {
   const config = {
     trading_mode: params.trading_mode || 'futures',
     margin_mode: params.margin_mode || 'isolated',
-    max_open_trades: params.max_open_trades || 3,
+    max_open_trades: params.max_open_trades || 2,
     stake_currency: 'USDT',
     stake_amount: params.stake_amount || 'unlimited',
     tradable_balance_ratio: params.tradable_balance_ratio || 0.5,
@@ -622,19 +678,22 @@ const actions = {
     if (!existsSync(stratFile)) {
       throw new Error(`策略文件不存在: ${stratFile}. 先用 create_strategy 创建策略并完成回测。`);
     }
-    const evidence = requireCurrentBacktestEvidence(strategy);
+    const evidence = requireDeployableBacktestEvidence(requireCurrentBacktestEvidence(strategy));
 
     if (ENV) {
       const cfg = readDaemonConfig();
       const before = { strategy: cfg.strategy, dry_run: cfg.dry_run, pairs: cfg.exchange?.pair_whitelist };
+      const targetDryRun = typeof params.dry_run === 'boolean' ? params.dry_run : cfg.dry_run;
+      const maxOpenTrades = requireMaxOpenTrades(params.max_open_trades ?? cfg.max_open_trades ?? 2);
+      if (targetDryRun === false) requireLiveAuthorization({ ...params, max_open_trades: maxOpenTrades }, cfg);
       cfg.strategy = strategy;
       // 允许在 deploy 里同时改 dry_run / pairs / max_open_trades, 一次完成.
-      if (typeof params.dry_run === 'boolean') cfg.dry_run = params.dry_run;
+      cfg.dry_run = targetDryRun;
       if (Array.isArray(params.pairs) && params.pairs.length) {
         if (!cfg.exchange) cfg.exchange = {};
         cfg.exchange.pair_whitelist = params.pairs;
       }
-      if (params.max_open_trades) cfg.max_open_trades = params.max_open_trades;
+      cfg.max_open_trades = maxOpenTrades;
       writeDaemonConfig(cfg);
       const restart = restartDaemon();
       return {
@@ -648,6 +707,13 @@ const actions = {
       };
     }
     // host mode
+    const maxOpenTrades = requireMaxOpenTrades(params.max_open_trades ?? 2);
+    if (params.dry_run === false) {
+      requireLiveAuthorization({ ...params, max_open_trades: maxOpenTrades }, {
+        max_open_trades: maxOpenTrades,
+        exchange: { name: params.exchange || detectExchange()?.name || '' },
+      });
+    }
     ensureHostFreqtradeInstalled();
     let exchangeInfo = detectExchange();
     if (!exchangeInfo) {
@@ -661,7 +727,7 @@ const actions = {
     }
     mkdirSync(STRAT_DIR, { recursive: true });
     const apiPassword = randomBytes(8).toString('hex');
-    const config = generateHostConfig(exchangeInfo, apiPassword, params);
+    const config = generateHostConfig(exchangeInfo, apiPassword, { ...params, max_open_trades: maxOpenTrades });
     writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
     try { chmodSync(CONFIG_PATH, 0o600); } catch {} // config.json 含明文交易所 key/secret, 收紧权限
     const samplePath = resolve(STRAT_DIR, 'SampleStrategy.py');
@@ -876,13 +942,19 @@ const actions = {
     if (strategyFingerprint(strategy) !== strategyHash) {
       throw new Error(`Strategy "${strategy}" changed during backtest. Run the backtest again for the current code.`);
     }
+    const resultFile = findNewBacktestResult(resultsDir, previousResultFiles, strategy);
+    const metrics = backtestMetrics(firstStrategySummary(
+      resultFile ? readBacktestPayload(resultsDir, resultFile) : null,
+      strategy,
+    ));
     const evidence = recordBacktestEvidence({
       strategy,
       strategyHash,
       timeframe,
       timerange,
       pairs: pairList,
-      resultFile: findNewBacktestResult(resultsDir, previousResultFiles, strategy),
+      resultFile,
+      metrics,
     });
     const output = rawOutput
       .split('\n')
@@ -896,7 +968,7 @@ const actions = {
       timeframe,
       timerange: timerange || 'all available',
       output,
-      evidence: { id: evidence.id, resultFile: evidence.resultFile, current: true },
+      evidence: { id: evidence.id, resultFile: evidence.resultFile, metrics, current: true },
     };
   },
 
@@ -913,14 +985,19 @@ const actions = {
       );
       writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
     }
-    const timeframe = params.timeframe || '1h';
+    const timeframes = Array.isArray(params.timeframes) && params.timeframes.length
+      ? params.timeframes.map(String)
+      : [String(params.timeframe || '1h')];
     const timerange = params.timerange || '';
+    const pairs = params.pairs ? (Array.isArray(params.pairs) ? params.pairs : [params.pairs]) : [];
 
-    console.error(`Downloading data: timeframe=${timeframe}${timerange ? `, timerange=${timerange}` : ''}...`);
-    const args = ['download-data', '--config', CONFIG_PATH, '--timeframe', timeframe, '--userdir', USER_DATA];
+    console.error(`Downloading data: timeframes=${timeframes.join(',')}${timerange ? `, timerange=${timerange}` : ''}...`);
+    const args = ['download-data', '--config', CONFIG_PATH, '--timeframes', ...timeframes, '--userdir', USER_DATA];
     if (timerange) args.push('--timerange', timerange);
+    if (pairs.length) args.push('-p', ...pairs);
+    if (params.prepend === true) args.push('--prepend');
     const output = runFreqtrade(args, { timeout: 300000, env: proxyEnv() });
-    return { mode: runtimeMode(), timeframe, timerange: timerange || 'all available', output };
+    return { mode: runtimeMode(), timeframes, pairs, prepend: params.prepend === true, timerange: timerange || 'all available', output };
   },
 
   // ── hyperopt ───────────────────────────────────────────────────
@@ -1067,6 +1144,7 @@ const actions = {
         timerange: record.timerange,
         pairs: Array.isArray(record.pairs) ? record.pairs : [],
         resultFile: record.resultFile || null,
+        metrics: metricsForEvidence(record),
         createdAt: record.createdAt,
         current: Boolean(record.strategyHash && currentHashes.get(record.strategy) === record.strategyHash),
         fingerprint: typeof record.strategyHash === 'string' ? record.strategyHash.slice(0, 12) : '',

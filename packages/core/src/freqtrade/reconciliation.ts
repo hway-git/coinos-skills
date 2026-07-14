@@ -1,0 +1,113 @@
+import type { FreqtradeReconciliationResult } from '@helix/contracts/freqtrade'
+import { getAccountReconciliationState } from '../account/read-only'
+import { getFreqtradeReconciliationState } from './read-only'
+
+function positionKey(symbol: string, side: string) {
+  return `${symbol.toUpperCase()}|${side.toLowerCase()}`
+}
+
+export async function reconcileFreqtradeAccount(): Promise<FreqtradeReconciliationResult> {
+  const checkedAt = Date.now()
+  const bot = await getFreqtradeReconciliationState()
+  if (!bot.ok || !bot.data.online) {
+    return {
+      status: 'offline',
+      checkedAt,
+      botPositions: 0,
+      exchangePositions: 0,
+      mismatches: [],
+      detail: bot.ok ? 'Freqtrade daemon offline' : bot.error,
+    }
+  }
+  if (bot.data.dryRun !== false) {
+    return {
+      status: 'not_applicable',
+      checkedAt,
+      botPositions: bot.data.positions.length,
+      exchangePositions: 0,
+      mismatches: [],
+      detail: 'DRY_RUN uses simulated positions; exchange reconciliation is not applicable.',
+    }
+  }
+
+  const account = await getAccountReconciliationState()
+  if (!account.ok) {
+    return {
+      status: 'offline',
+      checkedAt,
+      botPositions: bot.data.positions.length,
+      exchangePositions: 0,
+      mismatches: [],
+      detail: account.error,
+    }
+  }
+
+  const botAmounts = new Map<string, number>()
+  const exchangeAmounts = new Map<string, number>()
+  for (const position of bot.data.positions) {
+    const key = positionKey(position.symbol, position.side)
+    botAmounts.set(key, (botAmounts.get(key) ?? 0) + position.baseAmount)
+  }
+  for (const position of account.data.positions) {
+    const key = positionKey(position.symbol, position.side)
+    exchangeAmounts.set(key, (exchangeAmounts.get(key) ?? 0) + position.baseAmount)
+  }
+
+  const mismatches: FreqtradeReconciliationResult['mismatches'] = []
+  const keys = new Set([...botAmounts.keys(), ...exchangeAmounts.keys()])
+  for (const key of keys) {
+    const [symbol, side] = key.split('|')
+    const botAmount = botAmounts.get(key) ?? 0
+    const exchangeAmount = exchangeAmounts.get(key) ?? 0
+    const tolerance = Math.max(1e-8, Math.max(botAmount, exchangeAmount) * 0.005)
+    if (Math.abs(botAmount - exchangeAmount) > tolerance) {
+      mismatches.push({
+        symbol,
+        side,
+        issue: botAmount === 0 ? 'external_position' : exchangeAmount === 0 ? 'exchange_position_missing' : 'position_size_mismatch',
+        botAmount,
+        exchangeAmount,
+      })
+    }
+  }
+
+  const botOrders = new Map(
+    bot.data.positions.flatMap((position) => (
+      position.openOrderIds.map((id) => [id, { symbol: position.symbol, side: position.side }] as const)
+    )),
+  )
+  const exchangeOrders = new Map(account.data.openOrders.map((order) => [order.id, order] as const))
+  for (const [orderId, order] of botOrders) {
+    if (!exchangeOrders.has(orderId)) {
+      mismatches.push({
+        symbol: order.symbol,
+        side: order.side,
+        orderId,
+        issue: 'bot_open_order_missing_on_exchange',
+        botAmount: 0,
+        exchangeAmount: 0,
+      })
+    }
+  }
+  for (const [orderId, order] of exchangeOrders) {
+    if (!botOrders.has(orderId)) {
+      mismatches.push({
+        symbol: order.symbol,
+        side: order.side,
+        orderId,
+        issue: 'external_open_order',
+        botAmount: 0,
+        exchangeAmount: 0,
+      })
+    }
+  }
+
+  return {
+    status: mismatches.length > 0 ? 'mismatch' : 'matched',
+    checkedAt,
+    botPositions: bot.data.positions.length,
+    exchangePositions: account.data.positions.length,
+    mismatches,
+    detail: mismatches.length > 0 ? `${mismatches.length} reconciliation mismatch(es)` : 'Positions and open orders match.',
+  }
+}

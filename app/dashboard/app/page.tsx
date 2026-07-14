@@ -17,7 +17,11 @@ import {
   type MarketSnapshot,
   type TradingPair,
 } from '@/lib/market-data'
-import { useOkxMarketStream, type OkxCandleUpdate, type OkxTickerUpdate } from '@/hooks/use-okx-market-stream'
+import {
+  useHelixMarketStream,
+  type HelixCandleUpdate,
+  type HelixTickerUpdate,
+} from '@/hooks/use-helix-market-stream'
 import { cn } from '@/lib/utils'
 
 const MARKET_FALLBACK_REFRESH_MS = 120_000
@@ -36,7 +40,7 @@ function toApiInterval(timeframe: string) {
   return timeframe.toLowerCase()
 }
 
-function mergeCandle(candles: Candle[], update: OkxCandleUpdate) {
+function mergeCandle(candles: Candle[], update: HelixCandleUpdate) {
   const nextCandle: Candle = {
     time: update.time,
     open: update.open,
@@ -56,7 +60,7 @@ function mergeCandle(candles: Candle[], update: OkxCandleUpdate) {
   return [...candles, nextCandle].sort((a, b) => a.time - b.time).slice(-MAX_CANDLES)
 }
 
-function pairWithTickerUpdate(pair: TradingPair, update: OkxTickerUpdate): TradingPair {
+function pairWithTickerUpdate(pair: TradingPair, update: HelixTickerUpdate): TradingPair {
   const price = update.price ?? pair.price
   const open24h = update.open24h
   const change = open24h == null || open24h === 0 ? pair.change : ((price - open24h) / open24h) * 100
@@ -291,7 +295,7 @@ export default function Page() {
     })
   }, [watchlistPairs])
 
-  const handleTickerUpdate = useCallback((update: OkxTickerUpdate) => {
+  const handleTickerUpdate = useCallback((update: HelixTickerUpdate) => {
     setSnapshot((current) => {
       if (!current) return current
 
@@ -316,7 +320,7 @@ export default function Page() {
     })
   }, [])
 
-  const handleCandleUpdate = useCallback((update: OkxCandleUpdate) => {
+  const handleCandleUpdate = useCallback((update: HelixCandleUpdate) => {
     setSnapshot((current) => {
       if (!current || current.activePair.instrumentId !== update.instrumentId) return current
 
@@ -349,7 +353,7 @@ export default function Page() {
     })
   }, [])
 
-  const stream = useOkxMarketStream({
+  const stream = useHelixMarketStream({
     pairs,
     activePair,
     timeframe,
@@ -435,7 +439,12 @@ export default function Page() {
           </main>
 
           <div className="hidden min-h-0 border-l border-border lg:block">
-            <AgentChat collapsed={consoleCollapsed} onCollapsedChange={setConsoleCollapsed} />
+            <AgentChat
+              symbol={activeSymbol}
+              timeframe={timeframe}
+              collapsed={consoleCollapsed}
+              onCollapsedChange={setConsoleCollapsed}
+            />
           </div>
         </div>
 

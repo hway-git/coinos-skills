@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const LOCAL_DOCKER_COMPOSE = resolve(MODULE_DIR, '../../../docker/freqtrade/compose.yaml');
+const LOCAL_DOCKER_STRATEGIES = resolve(MODULE_DIR, '../../../strategies');
 
 // 三引擎的真实 daemon 路径(--strategy-path / --userdir / --config 等都来自
 // image-*/freqtrade-launch.sh 或 image/freqtrade-wait.sh 的 exec 行).
@@ -85,12 +86,13 @@ export function dockerFreqtradeEnv() {
     workspaceRoot: resolve(home, '.freqtrade'),
     skillsRoot: resolve(MODULE_DIR, '..'),
     freqtradeUserdir: host.userdir,
-    strategyPath: host.strategyPath,
+    strategyPath: LOCAL_DOCKER_STRATEGIES,
     configPath: host.configPath,
     envFile: resolve(home, '.helix', '.env'),
     ftPassFile: resolve(home, '.helix', '.ft_api_pass'),
     composeFile: LOCAL_DOCKER_COMPOSE,
     containerUserdir: '/freqtrade/user_data',
+    containerStrategyPath: '/freqtrade/strategies',
     ftApiUser: process.env.FREQTRADE_USERNAME || 'freqtrade',
     ftApiUrl: process.env.FREQTRADE_URL || process.env.FT_API_URL || 'http://127.0.0.1:8888',
   };

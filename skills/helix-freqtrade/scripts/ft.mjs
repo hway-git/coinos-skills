@@ -51,6 +51,10 @@ ftCli({
   // 给 agent 在用户问 "freqtrade 现在跑什么?" 时单次调用就能答全.
   daemon_info: async () => {
     const cfg = await ftGet('show_config');
+    let configuredPairs = [];
+    try {
+      configuredPairs = readConfig().exchange?.pair_whitelist || [];
+    } catch {}
     const [status, version] = await Promise.all([
       ftGet('status').catch(() => []),
       ftGet('version').catch(() => ({})),
@@ -66,7 +70,11 @@ ftCli({
       max_open_trades: cfg.max_open_trades,
       stake_currency: cfg.stake_currency,
       stake_amount: cfg.stake_amount,
-      pair_whitelist: cfg.whitelist || cfg.pair_whitelist,
+      pair_whitelist: Array.isArray(cfg.whitelist) && cfg.whitelist.length > 0
+        ? cfg.whitelist
+        : Array.isArray(cfg.pair_whitelist) && cfg.pair_whitelist.length > 0
+          ? cfg.pair_whitelist
+          : configuredPairs,
       bot_name: cfg.bot_name,
       open_trades_count: Array.isArray(status) ? status.length : 0,
     };
@@ -75,7 +83,38 @@ ftCli({
   // ── daemon 状态控制 ────────────────────────────────────────
   start: () => ftPost('start'),
   stop: () => ftPost('stop'),
+  stop_entry: () => ftPost('stopentry'),
   reload: () => ftPost('reload_config'),
+
+  emergency_stop: async () => {
+    const openTrades = await ftGet('status').catch(() => []);
+    let forceExit = { result: 'No open trades.' };
+    let forceExitError = null;
+    if (Array.isArray(openTrades) && openTrades.length > 0) {
+      try {
+        forceExit = await ftPost('forceexit', { tradeid: 'all', ordertype: 'market' });
+      } catch (error) {
+        forceExitError = error.message;
+      }
+    }
+
+    let stopped = null;
+    let stopError = null;
+    try {
+      stopped = await ftPost('stop');
+    } catch (error) {
+      stopError = error.message;
+    }
+
+    return {
+      success: !forceExitError && !stopError,
+      open_trades_before: Array.isArray(openTrades) ? openTrades.length : null,
+      force_exit: forceExit,
+      force_exit_error: forceExitError,
+      stopped,
+      stop_error: stopError,
+    };
+  },
 
   // ── 配置变更 (改 config.json + reload) ────────────────────
   // 切交易对白名单. pair_whitelist 改了之后调 /reload_config 即可,
@@ -104,6 +143,7 @@ ftCli({
   trades_count: () => ftGet('count'),
   trade_by_id: ({ trade_id }) => ftGet(`trade/${trade_id}`),
   trades_history: ({ limit, offset } = {}) => ftGet('trades', { limit, offset }),
+  locks: () => ftGet('locks'),
   // 仓位 force-enter / force-exit, 注意 freqtrade REST 这两个端点是
   // 'forcebuy' / 'forcesell' (历史名) 不是 force_enter/force_exit.
   force_enter: (p) => ftPost('forcebuy', p),

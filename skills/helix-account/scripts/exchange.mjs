@@ -412,29 +412,8 @@ cli({
     assertTradingAllowed('create_order');
     const pendingFile = resolve(__dir, '..', '.pending-order.json');
 
-    // Internal calls (from auto-trade.mjs) bypass file-based confirmation
-    const isInternal = process.env.HELIX_INTERNAL_CALL === '1';
-
     // Step 2: Confirmation — only works if a pending order file exists from Step 1
     if (confirmed === 'true' || confirmed === true) {
-      if (isInternal) {
-        // Internal call: execute directly with provided params
-        const ex = await getExchange(exchange, market_type);
-        const order = await placeOrder(ex, symbol, type, side, amount, price, params, exchange, market_type);
-        if (market_type && market_type !== 'spot') {
-          try {
-            await ex.loadMarkets();
-            const mkt = ex.markets[symbol];
-            if (mkt?.contractSize) {
-              order._contractSize = mkt.contractSize;
-              order._amountInBase = amount * mkt.contractSize;
-              order._unit = `${amount} contracts × ${mkt.contractSize} ${mkt.base}/contract = ${amount * mkt.contractSize} ${mkt.base}`;
-            }
-          } catch {}
-        }
-        return order;
-      }
-
       let pending;
       try { pending = JSON.parse(readFileSync(pendingFile, 'utf8')); }
       catch { throw new Error('没有待确认的订单。请先不带 confirmed 参数调用 create_order 来预览订单，等用户确认后再重新调用并带上 confirmed=true。'); }

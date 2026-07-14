@@ -1,10 +1,9 @@
 # Helix Skills — Agent Instructions
 
-Helix skill 层当前只包含 4 个能力:
+Helix skill 层当前只包含 3 个能力:
 
 - `helix-account`: 交易所账户查询、持仓、订单历史、API key 引导、注册开户链接
 - `helix-trading`: CEX 现货 / 永续下单、平仓、止盈止损、杠杆与保证金设置
-- `helix-pa-strategy`: 将 Price Action 规则形式化为可复现、无未来函数的策略 setup 规范
 - `helix-freqtrade`: Freqtrade 策略生成、回测、部署、切策略 / 交易对 / 实盘、查询 daemon 盈亏
 
 ## 路由规则
@@ -13,7 +12,6 @@ Helix skill 层当前只包含 4 个能力:
 |---|---|
 | 查余额、持仓、订单、账户历史、API key 配置、注册开户 | `helix-account` |
 | 直接下单、平仓、挂止盈止损、改杠杆 / 保证金模式 | `helix-trading` |
-| 定义 / 审查 PA 规则、swing、结构、突破、回踩、拒绝、扫单，检查未来函数或重绘 | `helix-pa-strategy` |
 | 写策略、回测、hyperopt、部署 bot、切策略、切交易对、查 freqtrade 盈亏 / 持仓 | `helix-freqtrade` |
 
 ## 数据准确性铁则
@@ -46,8 +44,8 @@ Helix skill 层当前只包含 4 个能力:
 - 平仓必须用 `close_position`, 禁止用 `create_order` 构建反向单。
 - 改杠杆、保证金模式、切实盘前必须明确说明影响并等待用户确认。
 - Freqtrade daemon 自己根据策略自动开平仓是 daemon 本职; 用户切实盘那一刻视为授权, 不需要 agent 对每笔策略信号再确认。
-- 策略部署、切策略和切 dry-run / live 统一走 `helix-freqtrade/scripts/ft-deploy.mjs deploy`; 当前策略代码必须先有匹配的回测指纹，修改策略后必须重新回测。
-- PA Strategy 只描述 setup 检测，不包含下单、止损、止盈、杠杆和仓位；确认规范后再交给 `helix-freqtrade` 实现与回测。
+- 策略部署、切策略和切 dry-run / live 统一走 `helix-freqtrade/scripts/ft-deploy.mjs deploy`; 当前策略代码必须先有匹配的回测指纹，且回测至少有一笔交易并为正收益；修改策略后必须重新回测。
+- `HelixIntradayStrategy` 必须遵守 `docs/PA_CORE_SPEC.md` 和 `docs/STRATEGY_DESIGN.md`：Brooks PA 决定 context/setup/expectation，EMA/MACD/RSI 只能验证或反对 hypothesis，不能独立触发交易。
 
 ## 安全规则
 
@@ -63,5 +61,4 @@ Skills 在 `skills/` 目录, 当前只应有:
 
 - `skills/helix-account`
 - `skills/helix-trading`
-- `skills/helix-pa-strategy`
 - `skills/helix-freqtrade`

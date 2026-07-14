@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     volumes:
       - ${HOME}/.freqtrade/user_data:/freqtrade/user_data
+      - ../../strategies:/freqtrade/strategies
     ports:
       - "127.0.0.1:8888:8080"
     environment:
@@ -29,3 +30,5 @@ services:
       - /freqtrade/user_data/config.json
       - --userdir
       - /freqtrade/user_data
+      - --strategy-path
+      - /freqtrade/strategies

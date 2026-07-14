@@ -3,7 +3,7 @@
   "version": "3.7.3",
   "private": true,
   "type": "module",
-  "optionalDependencies": {
+  "dependencies": {
     "ccxt": "^4.4.0"
   }
 }

@@ -1,19 +1,22 @@
 # Helix
 
-Helix is an AI trading terminal for crypto execution and strategy automation. The repository currently contains:
+Helix is an AI trading terminal for crypto execution and strategy automation. Its runtime is split into:
 
-- `app/dashboard`: trading dashboard frontend
-- `skills`: account, execution, Price Action specification, and Freqtrade automation tools for agents
+- `services/helixd`: resident backend and Agent Runtime
+- `app/dashboard`: presentation and interaction panel consuming helixd over HTTP, SSE, and WebSocket
+- `packages`: shared contracts and reusable backend capabilities
+- `skills`: account, execution, and Freqtrade automation tools for agents
+
+The Helix Agent runs inside `helixd`, never inside the Dashboard. Analyst v0 can read market facts and persist its own Market Story; it has no trading execution tools.
 
 ## Skills
 
-Only these 4 skills are part of the skill layer:
+Only these 3 skills are part of the skill layer:
 
 | Skill | Purpose |
 |---|---|
 | `helix-account` | Query exchange balances, positions, orders, trade history, and guide API key setup |
 | `helix-trading` | Execute CEX spot / perpetual orders, close positions, set stop loss / take profit, configure leverage and margin mode |
-| `helix-pa-strategy` | Define deterministic, causal, backtest-ready Price Action setups and detect lookahead or OHLC ambiguity |
 | `helix-freqtrade` | Create strategies, backtest, hyperopt, deploy bots, switch strategy / pairs / live mode, query daemon PnL |
 
 ## Agent Routing
@@ -22,7 +25,6 @@ Only these 4 skills are part of the skill layer:
 |---|---|
 | "Check my OKX balance" / "current positions" / "order history" | `skills/helix-account` |
 | "Buy BTC on OKX" / "close position" / "set stop loss" / "change leverage" | `skills/helix-trading` |
-| "Define this PA setup" / "validate swing structure" / "check this breakout rule for lookahead" | `skills/helix-pa-strategy` |
 | "Write a strategy" / "backtest" / "deploy dry-run" / "switch live" / "how much did it make" | `skills/helix-freqtrade` |
 
 ## Safety Rules
@@ -31,8 +33,11 @@ Only these 4 skills are part of the skill layer:
 - Close positions with `close_position`, not a reverse order.
 - `create_order`, `close_position`, and `set_stop` require preview first, then execution with `confirmed=true` only after explicit user confirmation.
 - Explain risk and wait for confirmation before changing leverage, margin mode, or live trading mode.
-- Use `ft-deploy.mjs deploy` for deployment, strategy changes, and dry-run / live changes. The exact current strategy code must have matching backtest evidence; edits require a new backtest.
-- PA Strategy emits setup observations only. Keep orders, stops, targets, leverage, and sizing in the later implementation or execution layer.
+- Use `ft-deploy.mjs deploy` for deployment, strategy changes, and dry-run / live changes. The exact current strategy code must have matching backtest evidence with at least one trade and positive total profit; edits require a new backtest.
+- Direct agent auto-entry is disabled. Unattended entries must come from a backtested Freqtrade strategy.
+- LIVE requires `HELIX_LIVE_TRADING_ENABLED=true`, a separate token of at least 24 characters, and a 10-minute Dashboard live session. A normal control session does not authorize live trading.
+- Emergency stop remains available without live authorization: it force-exits all trades at market before stopping the daemon. Reconciliation compares bot positions / active orders with the exchange in LIVE mode and returns `not_applicable` in dry-run.
+- `HelixIntradayStrategy` uses Brooks PA context, setup, expectation, and signal bars as its core. EMA, MACD, and RSI may only support or oppose a hypothesis; they cannot trigger a trade on their own.
 - Never read or print `.env`, `.ft_api_pass`, API secrets, passphrases, private keys, or seed phrases.
 - Never use mock or random data as real trading or backtest input.
 
@@ -58,6 +63,17 @@ pnpm freqtrade:install
 
 Runtime credentials are stored in `~/.helix/.env`, and persistent Freqtrade data is stored in `~/.freqtrade/user_data`. The installer is idempotent and preserves existing configuration and API credentials.
 
+`HelixIntradayStrategy` enforces these defaults:
+
+- `0.5%` maximum risk per trade
+- `2%` daily loss lock until the next UTC day
+- `8%` 30-day portfolio drawdown protection
+- 6-hour pause after 3 consecutive losses
+- 2 concurrent positions and `1x` maximum leverage
+- reject entry when the latest 5m candle is older than 10 minutes
+
+Dashboard control, deployment, backtest, authorization, emergency-stop, and reconciliation events persist in `~/.helix/helix.sqlite` with `0600` permissions.
+
 ## Common Commands
 
 ```bash
@@ -80,6 +96,7 @@ node scripts/ft-deploy.mjs backtest '{"strategy":"RSIStrategy","timeframe":"15m"
 node scripts/ft-deploy.mjs deploy '{"strategy":"RSIStrategy","dry_run":true}'
 node scripts/ft.mjs daemon_info
 node scripts/ft.mjs profit
+node scripts/ft.mjs locks
 ```
 
 ## Environment
@@ -101,9 +118,18 @@ BINANCE_API_SECRET="xxx"
 BYBIT_API_KEY="xxx"
 BYBIT_API_SECRET="xxx"
 
+FRED_API_KEY="xxx"
+
+HELIX_OPENAI_API_KEY="provider-api-key"
+HELIX_OPENAI_BASE_URL="https://provider.example.com/v1"
+HELIX_OPENAI_API_MODE="chat"
+HELIX_OPENAI_MODEL="provider-model-name"
+
 PROXY_URL="socks5://127.0.0.1:7890"
 
 HELIX_CONTROL_TOKEN="generate-a-random-value-with-at-least-32-chars"
+HELIX_LIVE_TRADING_ENABLED="false"
+HELIX_LIVE_TRADING_TOKEN="generate-a-separate-random-value-with-at-least-32-chars"
 
 FREQTRADE_URL="http://127.0.0.1:8888"
 ```
@@ -117,8 +143,9 @@ helix/
 ├── skills/
 │   ├── helix-account/
 │   ├── helix-trading/
-│   ├── helix-pa-strategy/
 │   └── helix-freqtrade/
+├── strategies/
+│   └── HelixIntradayStrategy.py
 ├── AGENTS.md
 ├── CLAUDE.md
 ├── README.md

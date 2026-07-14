@@ -40,6 +40,20 @@ async function runDaemonInfo(baseUrl) {
   });
 }
 
+async function runFtAction(baseUrl, action, params) {
+  const args = ['scripts/ft.mjs', action];
+  if (params) args.push(JSON.stringify(params));
+  return execFileAsync(process.execPath, args, {
+    cwd: SKILL_DIR,
+    env: {
+      ...process.env,
+      FREQTRADE_URL: baseUrl,
+      FREQTRADE_USERNAME: 'freqtrade',
+      FREQTRADE_PASSWORD: 'test-only',
+    },
+  });
+}
+
 test('daemon_info reports online after show_config succeeds', async (t) => {
   const mock = await listen((request, response) => {
     response.setHeader('Content-Type', 'application/json');
@@ -131,4 +145,199 @@ test('backtest evidence becomes stale after strategy code changes', async (t) =>
       return true;
     },
   );
+});
+
+test('deploy rejects empty or non-profitable backtest evidence', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'helix-quality-gate-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const userData = join(home, '.freqtrade', 'user_data');
+  const strategyDir = join(userData, 'strategies');
+  const resultsDir = join(userData, 'backtest_results');
+  const code = 'class TestStrategy:\n    pass\n';
+
+  await mkdir(strategyDir, { recursive: true });
+  await mkdir(resultsDir, { recursive: true });
+  await writeFile(join(strategyDir, 'TestStrategy.py'), code);
+
+  const deploy = () => execFileAsync(process.execPath, [
+    'scripts/ft-deploy.mjs',
+    'deploy',
+    '{"strategy":"TestStrategy","dry_run":true}',
+  ], {
+    cwd: SKILL_DIR,
+    env: { ...process.env, HOME: home, HELIX_FREQTRADE_RUNTIME: '' },
+  });
+  const writeEvidence = (metrics) => writeFile(join(resultsDir, '.helix-evidence.json'), JSON.stringify({
+    version: 1,
+    records: [{
+      id: 'quality-gate-evidence',
+      strategy: 'TestStrategy',
+      strategyHash: createHash('sha256').update(code).digest('hex'),
+      timeframe: '5m',
+      timerange: '20260101-20260201',
+      pairs: ['BTC/USDT:USDT'],
+      resultFile: null,
+      metrics,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }],
+  }));
+
+  await writeEvidence({ trades: 0, profitPct: 0 });
+  await assert.rejects(deploy(), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /has 0 trades/);
+    return true;
+  });
+
+  await writeEvidence({ trades: 4, profitPct: -0.0084 });
+  await assert.rejects(deploy(), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /is not profitable \(-0\.84%\)/);
+    return true;
+  });
+});
+
+test('live deploy enforces every authorization and risk gate', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'helix-live-gate-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const userData = join(home, '.freqtrade', 'user_data');
+  const strategyDir = join(userData, 'strategies');
+  const resultsDir = join(userData, 'backtest_results');
+  const strategyFile = join(strategyDir, 'TestStrategy.py');
+  const code = 'class TestStrategy:\n    pass\n';
+
+  await mkdir(strategyDir, { recursive: true });
+  await mkdir(resultsDir, { recursive: true });
+  await writeFile(strategyFile, code);
+  await writeFile(join(resultsDir, '.helix-evidence.json'), JSON.stringify({
+    version: 1,
+    records: [{
+      id: 'live-gate-evidence',
+      strategy: 'TestStrategy',
+      strategyHash: createHash('sha256').update(code).digest('hex'),
+      timeframe: '5m',
+      timerange: '20260101-20260201',
+      pairs: ['BTC/USDT:USDT'],
+      resultFile: null,
+      metrics: { trades: 20, profitPct: 1.5 },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }],
+  }));
+
+  const deploy = (params, env = {}) => execFileAsync(process.execPath, [
+    'scripts/ft-deploy.mjs',
+    'deploy',
+    JSON.stringify({ strategy: 'TestStrategy', dry_run: false, max_open_trades: 2, exchange: 'okx', ...params }),
+  ], {
+    cwd: SKILL_DIR,
+    env: {
+      ...process.env,
+      HOME: home,
+      HELIX_FREQTRADE_RUNTIME: '',
+      HELIX_LIVE_TRADING_ENABLED: '',
+      HELIX_LIVE_AUTHORIZED: '',
+      OKX_API_KEY: '',
+      OKX_API_SECRET: '',
+      OKX_PASSWORD: '',
+      ...env,
+    },
+  });
+
+  await assert.rejects(
+    deploy({}, { HELIX_LIVE_TRADING_ENABLED: 'false', HELIX_LIVE_AUTHORIZED: '1' }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /Live trading is disabled/);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    deploy({}, { HELIX_LIVE_TRADING_ENABLED: 'true' }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /fresh Dashboard live authorization session/);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    deploy({}, { HELIX_LIVE_TRADING_ENABLED: 'true', HELIX_LIVE_AUTHORIZED: '1' }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /configured API credentials/);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    deploy({}, {
+      HELIX_LIVE_TRADING_ENABLED: 'true',
+      HELIX_LIVE_AUTHORIZED: '1',
+      OKX_API_KEY: 'test-key',
+      OKX_API_SECRET: 'test-secret',
+    }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /requires the API passphrase/);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    deploy({ max_open_trades: 3 }, {
+      HELIX_LIVE_TRADING_ENABLED: 'true',
+      HELIX_LIVE_AUTHORIZED: '1',
+      OKX_API_KEY: 'test-key',
+      OKX_API_SECRET: 'test-secret',
+      OKX_PASSWORD: 'test-passphrase',
+    }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /max_open_trades between 1 and 2/);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    deploy({ dry_run: true, max_open_trades: 3 }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /max_open_trades between 1 and 2/);
+      return true;
+    },
+  );
+});
+
+test('emergency stop force-exits all trades before stopping the daemon', async (t) => {
+  const calls = [];
+  const mock = await listen(async (request, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    if (request.method === 'GET' && request.url === '/api/v1/status') {
+      calls.push('status');
+      response.end(JSON.stringify([{ trade_id: 1 }]));
+      return;
+    }
+    if (request.method === 'POST' && request.url === '/api/v1/forceexit') {
+      let body = '';
+      for await (const chunk of request) body += chunk;
+      calls.push(`forceexit:${body}`);
+      response.end(JSON.stringify({ result: 'Created exit orders for all open trades.' }));
+      return;
+    }
+    if (request.method === 'POST' && request.url === '/api/v1/stop') {
+      calls.push('stop');
+      response.end(JSON.stringify({ status: 'stopping trader ...' }));
+      return;
+    }
+    response.statusCode = 404;
+    response.end('{}');
+  });
+  t.after(mock.close);
+
+  const { stdout } = await runFtAction(mock.url, 'emergency_stop');
+  const result = JSON.parse(stdout);
+  assert.equal(result.success, true);
+  assert.deepEqual(calls.map((call) => call.split(':')[0]), ['status', 'forceexit', 'stop']);
+  assert.deepEqual(JSON.parse(calls[1].slice('forceexit:'.length)), { tradeid: 'all', ordertype: 'market' });
 });

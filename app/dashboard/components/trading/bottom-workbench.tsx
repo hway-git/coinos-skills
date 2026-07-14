@@ -12,8 +12,10 @@ import {
   Lock,
   PanelBottomClose,
   PanelBottomOpen,
+  RefreshCw,
   Rocket,
   ShieldCheck,
+  Siren,
   Unlock,
   Wallet,
   X,
@@ -22,6 +24,9 @@ import type { AccountSnapshot, AccountTableRow } from '@/lib/account-data'
 import type {
   FreqtradeBacktestResult,
   FreqtradeDryRunDeployResult,
+  FreqtradeEmergencyStopResult,
+  FreqtradeLiveDeployResult,
+  FreqtradeReconciliationResult,
   FreqtradeSnapshot,
   FreqtradeTableRow,
 } from '@/lib/freqtrade-data'
@@ -44,6 +49,13 @@ type ControlSession = {
   authorized: boolean
   mode: 'local' | 'token' | 'disabled' | 'misconfigured'
   tokenConfigured: boolean
+  expiresAt: number | null
+}
+type LiveSession = {
+  authorized: boolean
+  enabled: boolean
+  tokenConfigured: boolean
+  mode: 'authorized' | 'locked' | 'disabled' | 'misconfigured'
   expiresAt: number | null
 }
 
@@ -169,7 +181,11 @@ function automationReadinessRows(
     .some((row) => row.strategy === daemon?.strategy && row.verification === '已回测')
 
   return [
-    { rule: 'live_trade_lock', value: 'LIVE_LOCKED', state: '锁定' },
+    {
+      rule: 'live_trade_lock',
+      value: daemon?.dryRun === false ? 'LIVE' : 'LIVE_LOCKED',
+      state: daemon?.dryRun === false ? '实盘' : '锁定',
+    },
     {
       rule: 'account_key',
       value: accountAuth?.label ?? 'ACCOUNT_OFFLINE',
@@ -301,6 +317,67 @@ async function requestControlSession(method: 'GET' | 'POST' | 'DELETE', token?: 
   return payload.session
 }
 
+async function requestLiveSession(method: 'GET' | 'POST' | 'DELETE', token?: string) {
+  const response = await fetch('/api/freqtrade/live/session', {
+    method,
+    cache: 'no-store',
+    headers: method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
+    body: method === 'POST' ? JSON.stringify({ token }) : undefined,
+  })
+  const payload = (await response.json().catch(() => null)) as {
+    ok?: boolean
+    error?: string
+    session?: LiveSession
+  } | null
+  if (!response.ok || !payload?.ok || !payload.session) {
+    throw new Error(payload?.error ?? `实盘授权 HTTP ${response.status}`)
+  }
+  return payload.session
+}
+
+async function postLiveDeploy(strategy: string, pairs: string, maxOpenTrades: string) {
+  const maxOpen = Number(maxOpenTrades)
+  const response = await fetch('/api/freqtrade/live/deploy', {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      strategy,
+      pairs: pairs.split(',').map((pair) => pair.trim()).filter(Boolean),
+      maxOpenTrades: Number.isInteger(maxOpen) ? maxOpen : 2,
+    }),
+  })
+  const payload = (await response.json().catch(() => null)) as {
+    ok?: boolean
+    error?: string
+    result?: FreqtradeLiveDeployResult
+  } | null
+  if (!response.ok || !payload?.ok || !payload.result) throw new Error(payload?.error ?? `实盘部署 HTTP ${response.status}`)
+  return payload.result
+}
+
+async function postEmergencyStop() {
+  const response = await fetch('/api/freqtrade/emergency-stop', { method: 'POST', cache: 'no-store' })
+  const payload = (await response.json().catch(() => null)) as {
+    ok?: boolean
+    error?: string
+    result?: FreqtradeEmergencyStopResult
+  } | null
+  if (!response.ok || !payload?.result) throw new Error(payload?.error ?? `急停 HTTP ${response.status}`)
+  return payload.result
+}
+
+async function postReconciliation() {
+  const response = await fetch('/api/freqtrade/reconcile', { method: 'POST', cache: 'no-store' })
+  const payload = (await response.json().catch(() => null)) as {
+    ok?: boolean
+    error?: string
+    result?: FreqtradeReconciliationResult
+  } | null
+  if (!response.ok || !payload?.result) throw new Error(payload?.error ?? `对账 HTTP ${response.status}`)
+  return payload.result
+}
+
 function controlStatusLabel(session: ControlSession | null, loading: boolean) {
   if (loading) return 'CONTROL_CHECK'
   if (session?.mode === 'local' && session.authorized) return 'CONTROL_LOCAL'
@@ -330,6 +407,240 @@ function backtestStrategies(snapshot: FreqtradeSnapshot | null) {
   return Array.from(new Set(names))
 }
 
+function LiveDeployControls({
+  strategy,
+  pairs,
+  maxOpenTrades,
+  blocked,
+  requireControl,
+  onRefresh,
+}: {
+  strategy: string
+  pairs: string
+  maxOpenTrades: string
+  blocked: boolean
+  requireControl: () => boolean
+  onRefresh: () => Promise<void>
+}) {
+  const [session, setSession] = useState<LiveSession | null>(null)
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [output, setOutput] = useState<FreqtradeLiveDeployResult | null>(null)
+
+  useEffect(() => {
+    void requestLiveSession('GET')
+      .then(setSession)
+      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : '实盘授权状态不可用'))
+  }, [])
+
+  const unlock = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!requireControl()) return
+    setBusy(true)
+    setError(null)
+    try {
+      setSession(await requestLiveSession('POST', token))
+      setToken('')
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : '实盘授权失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const revoke = async () => {
+    if (!requireControl()) return
+    setBusy(true)
+    setError(null)
+    try {
+      setSession(await requestLiveSession('DELETE'))
+      setOutput(null)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : '实盘授权撤销失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const deploy = async () => {
+    if (!requireControl()) return
+    setBusy(true)
+    setError(null)
+    setOutput(null)
+    try {
+      setOutput(await postLiveDeploy(strategy, pairs, maxOpenTrades))
+      await onRefresh()
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : '实盘部署失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const label = session?.authorized
+    ? 'LIVE_AUTHORIZED'
+    : session?.mode === 'disabled'
+      ? 'LIVE_DISABLED'
+      : session?.mode === 'misconfigured'
+        ? 'LIVE_CONFIG_ERROR'
+        : 'LIVE_LOCKED'
+
+  return (
+    <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background/20 px-3 py-1.5">
+      <span className={cn('font-mono text-[10px]', session?.authorized ? 'text-down' : 'text-muted-foreground')}>
+        {label}
+      </span>
+      {session?.enabled && !session.authorized && session.mode !== 'misconfigured' && (
+        <form onSubmit={unlock} className="flex items-center gap-1.5">
+          <input
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+            type="password"
+            autoComplete="off"
+            placeholder="Live token"
+            className="h-7 w-36 rounded border border-border bg-background/60 px-2 font-mono text-[10px] outline-none focus:border-ring"
+          />
+          <button
+            type="submit"
+            disabled={busy || !token}
+            className="inline-flex h-7 items-center gap-1 rounded border border-border px-2 text-[10px] text-muted-foreground hover:bg-muted disabled:opacity-40"
+          >
+            {busy ? <LoaderCircle className="size-3 animate-spin" /> : <Unlock className="size-3" />}
+            解锁
+          </button>
+        </form>
+      )}
+      {session?.authorized && (
+        <>
+          <button
+            type="button"
+            disabled={busy || blocked || !strategy}
+            onClick={() => void deploy()}
+            className="inline-flex h-7 items-center gap-1 rounded border border-down/60 px-2 text-[10px] text-down hover:bg-down/10 disabled:opacity-40"
+          >
+            {busy ? <LoaderCircle className="size-3 animate-spin" /> : <Rocket className="size-3" />}
+            实盘部署
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void revoke()}
+            className="inline-flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-muted disabled:opacity-40"
+            aria-label="撤销实盘授权"
+            title="撤销实盘授权"
+          >
+            <Lock className="size-3.5" />
+          </button>
+        </>
+      )}
+      <span className={cn('min-w-0 flex-1 truncate font-mono text-[10px]', error ? 'text-down' : 'text-muted-foreground')}>
+        {error ?? (output ? `${output.strategy} · LIVE · max ${output.maxOpenTrades}` : '')}
+      </span>
+    </div>
+  )
+}
+
+function RiskPanel({
+  rows,
+  loading,
+  detail,
+  requireControl,
+  onRefresh,
+}: {
+  rows: TableRow[]
+  loading: boolean
+  detail?: string | null
+  requireControl: () => boolean
+  onRefresh: () => Promise<void>
+}) {
+  const [reconciling, setReconciling] = useState(false)
+  const [emergencyBusy, setEmergencyBusy] = useState(false)
+  const [emergencyArmed, setEmergencyArmed] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!emergencyArmed) return
+    const timer = window.setTimeout(() => setEmergencyArmed(false), 6_000)
+    return () => window.clearTimeout(timer)
+  }, [emergencyArmed])
+
+  const reconcile = async () => {
+    if (!requireControl()) return
+    setReconciling(true)
+    setError(null)
+    try {
+      const result = await postReconciliation()
+      setMessage(`${result.status} · bot ${result.botPositions} · exchange ${result.exchangePositions} · mismatch ${result.mismatches.length}`)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : '对账失败')
+    } finally {
+      setReconciling(false)
+    }
+  }
+
+  const emergencyStop = async () => {
+    if (!requireControl()) return
+    if (!emergencyArmed) {
+      setEmergencyArmed(true)
+      setMessage('再次点击确认急停')
+      return
+    }
+    setEmergencyArmed(false)
+    setEmergencyBusy(true)
+    setError(null)
+    try {
+      const result = await postEmergencyStop()
+      setMessage(`急停完成 · open ${result.openTradesBefore ?? '--'} · force ${result.forceExitError ? 'failed' : 'ok'} · stop ${result.stopError ? 'failed' : 'ok'}`)
+      await onRefresh()
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : '急停失败')
+    } finally {
+      setEmergencyBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
+        <button
+          type="button"
+          disabled={reconciling || emergencyBusy}
+          onClick={() => void reconcile()}
+          className="inline-flex h-7 items-center gap-1 rounded border border-border px-2 text-[10px] text-muted-foreground hover:bg-muted disabled:opacity-40"
+        >
+          <RefreshCw className={cn('size-3', reconciling && 'animate-spin')} />
+          对账
+        </button>
+        <button
+          type="button"
+          disabled={emergencyBusy || reconciling}
+          onClick={() => void emergencyStop()}
+          className={cn(
+            'inline-flex h-7 items-center gap-1 rounded border px-2 text-[10px] disabled:opacity-40',
+            emergencyArmed ? 'border-down bg-down/10 text-down' : 'border-border text-muted-foreground hover:bg-muted',
+          )}
+        >
+          {emergencyBusy ? <LoaderCircle className="size-3 animate-spin" /> : <Siren className="size-3" />}
+          {emergencyArmed ? '确认急停' : '急停'}
+        </button>
+        <span className={cn('min-w-0 flex-1 truncate font-mono text-[10px]', error ? 'text-down' : 'text-muted-foreground')}>
+          {error ?? message ?? ''}
+        </span>
+      </div>
+      <div className="min-h-0 flex-1">
+        <DataTable
+          columns={['rule', 'value', 'state']}
+          rows={rows}
+          emptyLabel={loading ? '正在同步风控状态' : '暂无真实风控状态'}
+          detail={detail}
+        />
+      </div>
+    </div>
+  )
+}
+
 function AutomationPanel({
   rows,
   loading,
@@ -344,6 +655,8 @@ function AutomationPanel({
   onDeployPairsChange,
   onDeployMaxOpenTradesChange,
   onDeploySubmit,
+  requireControl,
+  onRefresh,
 }: {
   rows: TableRow[]
   loading: boolean
@@ -358,6 +671,8 @@ function AutomationPanel({
   onDeployPairsChange: (pairs: string) => void
   onDeployMaxOpenTradesChange: (value: string) => void
   onDeploySubmit: (event: React.FormEvent<HTMLFormElement>) => void
+  requireControl: () => boolean
+  onRefresh: () => Promise<void>
 }) {
   const strategyOptions = rows
     .map((row) => String(row.strategy ?? ''))
@@ -432,6 +747,14 @@ function AutomationPanel({
           ) : null}
         </div>
       )}
+      <LiveDeployControls
+        strategy={deployStrategy}
+        pairs={deployPairs}
+        maxOpenTrades={deployMaxOpenTrades}
+        blocked={deployBlocked}
+        requireControl={requireControl}
+        onRefresh={onRefresh}
+      />
       <div className="min-h-0 flex-1">
         <DataTable
           columns={['strategy', 'status', 'timeframe', 'mode', 'verification']}
@@ -602,6 +925,8 @@ function renderPanel({
   backtestDefaults,
   onBacktestFormChange,
   onBacktestSubmit,
+  requireControl,
+  onRefresh,
 }: {
   active: TabId
   accountSnapshot: AccountSnapshot | null
@@ -629,6 +954,8 @@ function renderPanel({
   backtestDefaults: Partial<BacktestForm>
   onBacktestFormChange: (patch: Partial<BacktestForm>) => void
   onBacktestSubmit: (event: React.FormEvent<HTMLFormElement>) => void
+  requireControl: () => boolean
+  onRefresh: () => Promise<void>
 }) {
   const accountErrorDetail = accountDetail(accountSnapshot, accountError)
   const freqtradeErrorDetail = freqtradeDetail(freqtradeSnapshot, freqtradeError)
@@ -697,6 +1024,8 @@ function renderPanel({
         onDeployPairsChange={onDeployPairsChange}
         onDeployMaxOpenTradesChange={onDeployMaxOpenTradesChange}
         onDeploySubmit={onDeploySubmit}
+        requireControl={requireControl}
+        onRefresh={onRefresh}
       />
     )
   }
@@ -722,14 +1051,15 @@ function renderPanel({
       .filter((row) => !['mode', 'strategy'].includes(String(row.rule)))
 
     return (
-      <DataTable
-        columns={['rule', 'value', 'state']}
+      <RiskPanel
         rows={[
           ...automationReadinessRows(accountSnapshot, freqtradeSnapshot),
           ...runtimeRiskRows,
         ]}
-        emptyLabel={freqtradeLoading ? '正在同步风控状态' : '暂无真实风控状态'}
+        loading={freqtradeLoading}
         detail={freqtradeErrorDetail}
+        requireControl={requireControl}
+        onRefresh={onRefresh}
       />
     )
   }
@@ -1138,6 +1468,8 @@ export function BottomWorkbench() {
               setBacktestForm((form) => ({ ...form, ...patch }))
             },
             onBacktestSubmit: submitBacktest,
+            requireControl,
+            onRefresh: () => loadFreqtrade(true, true),
           })}
         </div>
       )}
