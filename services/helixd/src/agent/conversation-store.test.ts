@@ -119,4 +119,32 @@ test('migrates scoped history into one ordered scene-aware conversation', async 
   const updated = readAgentConversation()
   assert.deepEqual(updated.map(text), ['BTC 继续。', '仍在等待。', '切到 ETH。', '这个级别呢？'])
   assert.deepEqual(scene(updated[0]), { symbol: 'BTC/USDT', timeframe: '15m' })
+
+  const archiveBatch = Array.from({ length: 96 }, (_, index): UIMessage => ({
+    id: `archive-${index}`,
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    parts: [{ type: 'text', text: `归档消息 ${index}` }],
+  }))
+  writeAgentConversation(DEFAULT_AGENT_CONVERSATION_ID, { symbol: 'BTC/USDT', timeframe: '15m' }, archiveBatch)
+  const {
+    commitAgentConversationCompaction,
+    filterArchivedAgentMessages,
+    readAgentConversationArchive,
+    readAgentConversationCompactionCandidate,
+    readVisibleAgentConversation,
+  } = await import('./conversation-store')
+  const candidate = readAgentConversationCompactionCandidate()!
+  assert.equal(candidate.messages.length, 40)
+  assert.equal(commitAgentConversationCompaction(candidate, '压缩后的历史摘要。'), 40)
+  assert.equal(readAgentConversation().length, 60)
+  assert.equal(readVisibleAgentConversation().length, 60)
+  assert.equal(readAgentConversationArchive(), '压缩后的历史摘要。')
+  assert.deepEqual(filterArchivedAgentMessages(DEFAULT_AGENT_CONVERSATION_ID, [candidate.messages[0].message]), [])
+
+  writeAgentConversation(
+    DEFAULT_AGENT_CONVERSATION_ID,
+    { symbol: 'BTC/USDT', timeframe: '15m' },
+    candidate.messages.map((item) => item.message),
+  )
+  assert.equal(readAgentConversation().length, 60)
 })

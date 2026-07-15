@@ -41,12 +41,20 @@ function hasOnePrimary(value: { scenarios: Array<{ role: 'primary' | 'alternativ
   return value.scenarios.filter((scenario) => scenario.role === 'primary').length === 1
 }
 
+function hasUniqueScenarioIds(value: { scenarios: Array<{ id?: string }> }) {
+  const ids = value.scenarios.flatMap((scenario) => scenario.id ? [scenario.id] : [])
+  return new Set(ids).size === ids.length
+}
+
 export const marketStoryToolUpdateSchema = z.object({
   summary: z.string().trim().min(1).max(1000),
   changeSummary: z.string().trim().min(1).max(600),
   scenarios: z.array(scenarioUpdateSchema).min(1).max(3),
 }).refine(hasOnePrimary, {
   message: 'Market Story 必须且只能包含一个 primary scenario',
+  path: ['scenarios'],
+}).refine(hasUniqueScenarioIds, {
+  message: 'Market Story scenario id 不得重复',
   path: ['scenarios'],
 })
 
@@ -59,6 +67,13 @@ export const marketStoryUpdateSchema = z.object({
 }).refine(hasOnePrimary, {
   message: 'Market Story 必须且只能包含一个 primary scenario',
   path: ['scenarios'],
+}).refine(hasUniqueScenarioIds, {
+  message: 'Market Story scenario id 不得重复',
+  path: ['scenarios'],
+})
+
+export const agentStoryHistoryQuerySchema = agentScopeSchema.extend({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
 })
 
 export const marketStorySchema = z.object({

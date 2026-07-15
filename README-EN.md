@@ -107,6 +107,8 @@ Dashboard `dev` / `start` binds to `127.0.0.1` by default. When exposing it thro
 
 The local Freqtrade REST daemon listens on `http://127.0.0.1:8888` by default. Dashboard and skill clients use the same address.
 
+Agent, memory, and scheduler settings can be passed through the process environment or stored in `~/.helix/.env`. Chat and Market Story continue to work when Mem0 is not configured; only long-term user memory is disabled.
+
 ```bash
 OKX_API_KEY="xxx"
 OKX_API_SECRET="xxx"
@@ -124,6 +126,20 @@ HELIX_OPENAI_API_KEY="provider-api-key"
 HELIX_OPENAI_BASE_URL="https://provider.example.com/v1"
 HELIX_OPENAI_API_MODE="chat"
 HELIX_OPENAI_MODEL="provider-model-name"
+
+# Mem0 Cloud uses an API key; a self-hosted service can use BASE_URL only
+HELIX_MEM0_API_KEY="mem0-api-key"
+HELIX_MEM0_BASE_URL="https://api.mem0.ai"
+HELIX_MEM0_USER_ID="helix-local-user"
+
+# Enabled by default when the model is configured
+HELIX_AGENT_SCHEDULER_ENABLED="true"
+HELIX_AGENT_SCHEDULER_POLL_MS="60000"
+HELIX_AGENT_DAILY_HOUR="8"
+HELIX_AGENT_TIME_ZONE="Asia/Shanghai"
+HELIX_AGENT_MAX_ATTEMPTS="3"
+
+HELIX_DATABASE_PATH="/absolute/path/to/helix.sqlite"
 
 PROXY_URL="socks5://127.0.0.1:7890"
 

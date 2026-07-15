@@ -1,5 +1,9 @@
 import type { AgentScope } from '@helix/contracts/agent'
-import type { IntradaySignalSnapshot, IntradaySignalTimeframe } from '@helix/contracts/market'
+import {
+  INTRADAY_STRATEGY_VERSION,
+  type IntradaySignalSnapshot,
+  type IntradaySignalTimeframe,
+} from '@helix/contracts/market'
 import { getIntradaySignalSnapshot } from '@helix/core/signals/snapshot'
 
 const TIMEFRAMES: IntradaySignalTimeframe[] = ['1h', '15m', '5m']
@@ -27,6 +31,13 @@ function add(evidence: MarketEvidence[], ref: string, value: unknown) {
 
 export function marketEvidenceFromSnapshot(snapshot: IntradaySignalSnapshot): MarketEvidence[] {
   const evidence: MarketEvidence[] = []
+  const strategy = snapshot.strategy
+  add(evidence, 'strategy.version', strategy?.version)
+  add(evidence, 'strategy.context', strategy?.context)
+  for (const setup of strategy?.setups ?? []) {
+    add(evidence, `strategy.setup.${setup.timeframe}`, setup)
+  }
+  add(evidence, 'strategy.selectedTimeframe', strategy?.selectedTimeframe)
   add(evidence, 'signal.status', snapshot.signal.status)
   add(evidence, 'signal.side', snapshot.signal.side)
   add(evidence, 'signal.bias', snapshot.signal.bias)
@@ -70,7 +81,7 @@ export async function getAgentMarketContext(scope: AgentScope): Promise<AgentMar
     generatedAt: snapshot.generatedAt,
     source: snapshot.source,
     analysisSource: 'helix-intraday-signal',
-    strategyVersion: 'helix-intraday-signal/v1',
+    strategyVersion: snapshot.strategy?.version ?? INTRADAY_STRATEGY_VERSION,
     canPersistStory: persistenceBlockReason == null,
     persistenceBlockReason,
     evidence: marketEvidenceFromSnapshot(snapshot),

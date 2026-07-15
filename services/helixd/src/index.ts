@@ -9,6 +9,7 @@ import { controlRoutes } from './routes/control'
 import { freqtradeRoutes } from './routes/freqtrade'
 import { macroRoutes } from './routes/macro'
 import { marketRoutes } from './routes/market'
+import { startAgentScheduler } from './agent/scheduler'
 
 const DEFAULT_PORT = 8787
 const configuredPort = Number.parseInt(process.env.HELIX_PORT ?? '', 10)
@@ -48,8 +49,10 @@ const server = serve({ fetch: app.fetch, hostname, port }, (info) => {
   console.log(`helixd listening on http://${info.address}:${info.port}`)
 })
 const webSocketServer = attachMarketWebSocket(server as Server)
+const agentScheduler = startAgentScheduler()
 
 function shutdown() {
+  agentScheduler.stop()
   webSocketServer.close()
   server.close(() => process.exit(0))
 }

@@ -3,7 +3,14 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AgentScope, MarketScenario, MarketStory } from '@helix/contracts/agent'
+import type {
+  AgentScope,
+  MarketScenario,
+  MarketStory,
+  MarketStoryEvent,
+  MarketStoryState,
+  MarketStoryTransition,
+} from '@helix/contracts/agent'
 import {
   agentScopeKey,
   marketStorySchema,
@@ -16,6 +23,15 @@ const DEFAULT_DATABASE_PATH = resolve(homedir(), '.helix', 'helix.sqlite')
 
 type AgentDatabaseGlobal = typeof globalThis & {
   __helixAgentDatabase?: DatabaseSync
+}
+
+const TERMINAL_STATES = new Set<MarketStoryState>(['rejected', 'expired'])
+const ALLOWED_TRANSITIONS: Record<MarketStoryState, ReadonlySet<MarketStoryState>> = {
+  watching: new Set(['watching', 'armed', 'confirmed', 'rejected', 'expired']),
+  armed: new Set(['watching', 'armed', 'confirmed', 'rejected', 'expired']),
+  confirmed: new Set(['confirmed', 'rejected', 'expired']),
+  rejected: new Set(['rejected']),
+  expired: new Set(['expired']),
 }
 
 function databasePath() {
@@ -67,23 +83,86 @@ export function readMarketStory(input: AgentScope): MarketStory | null {
   return marketStorySchema.parse(JSON.parse(row.story_json))
 }
 
+export function listMarketStoryScopes(limit = 20): AgentScope[] {
+  return agentDatabase().prepare(`
+    SELECT symbol, timeframe FROM agent_market_stories
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(Math.max(1, Math.min(100, Math.trunc(limit)))) as AgentScope[]
+}
+
+export function readMarketStoryEvents(input: AgentScope, requestedLimit = 50): MarketStoryEvent[] {
+  const scope = normalizeAgentScope(input)
+  const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit)))
+  const rows = agentDatabase().prepare(`
+    SELECT id, revision, event_type, payload_json, occurred_at
+    FROM agent_story_events
+    WHERE scope_key = ?
+    ORDER BY revision DESC, id DESC
+    LIMIT ?
+  `).all(agentScopeKey(scope), limit) as Array<{
+    id: number
+    revision: number
+    event_type: MarketStoryEvent['eventType']
+    payload_json: string
+    occurred_at: number
+  }>
+
+  return rows.map((row) => {
+    const payload = JSON.parse(row.payload_json) as {
+      changeSummary: string
+      transitions: MarketStoryTransition[]
+    }
+    return {
+      ...scope,
+      id: row.id,
+      revision: row.revision,
+      eventType: row.event_type,
+      changeSummary: payload.changeSummary,
+      transitions: payload.transitions,
+      occurredAt: row.occurred_at,
+    }
+  })
+}
+
+function assertScenarioTransition(previous: MarketScenario | undefined, next: MarketScenario) {
+  if (!previous) {
+    if (TERMINAL_STATES.has(next.state)) {
+      throw new Error(`NEW_SCENARIO_TERMINAL_STATE:${next.state}`)
+    }
+    return
+  }
+  if (!ALLOWED_TRANSITIONS[previous.state].has(next.state)) {
+    throw new Error(`INVALID_SCENARIO_TRANSITION:${previous.state}->${next.state}`)
+  }
+}
+
 function nextScenarios(previous: MarketStory | null, update: MarketStoryUpdate, now: number): MarketScenario[] {
   const previousById = new Map(previous?.scenarios.map((scenario) => [scenario.id, scenario]) ?? [])
 
-  return update.scenarios.map((scenario) => {
-    const existing = scenario.id ? previousById.get(scenario.id) : undefined
-    if (scenario.id && !existing) throw new Error(`UNKNOWN_SCENARIO_ID:${scenario.id}`)
+  const next = update.scenarios.map((scenario) => {
+    const existing = previous && scenario.id ? previousById.get(scenario.id) : undefined
+    if (previous && scenario.id && !existing) throw new Error(`UNKNOWN_SCENARIO_ID:${scenario.id}`)
     if (existing && existing.thesis !== scenario.thesis) {
       throw new Error(`SCENARIO_THESIS_IMMUTABLE:${scenario.id}`)
     }
 
-    return {
+    const result = {
       ...scenario,
       id: existing?.id ?? randomUUID(),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     }
+    assertScenarioTransition(existing, result)
+    return result
   })
+
+  const nextIds = new Set(next.map((scenario) => scenario.id))
+  const omittedActive = previous?.scenarios.find((scenario) => (
+    !TERMINAL_STATES.has(scenario.state) && !nextIds.has(scenario.id)
+  ))
+  if (omittedActive) throw new Error(`ACTIVE_SCENARIO_OMITTED:${omittedActive.id}`)
+  return next
 }
 
 export function writeMarketStory(input: AgentScope, rawUpdate: MarketStoryUpdate): MarketStory {

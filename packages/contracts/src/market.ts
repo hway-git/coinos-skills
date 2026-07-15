@@ -181,6 +181,46 @@ export type IntradaySignalTimeframe = '5m' | '15m' | '1h'
 export type IntradaySignalDirection = 'long' | 'short' | 'neutral'
 export type IntradaySignalStatus = 'actionable' | 'watch' | 'insufficient-data'
 export type IntradayConfidenceLevel = 'low' | 'medium' | 'high' | 'very-high'
+export type IntradayMarketCycle = 'trend' | 'channel' | 'trading-range' | 'breakout-mode'
+export type IntradaySetupType = 'second-entry' | 'breakout-pullback' | 'failed-breakout'
+export type IntradayExpectation = 'second-leg' | 'continuation' | 'range-rotation'
+export type IntradayHypothesisState = 'watching' | 'armed' | 'confirmed'
+export type IntradaySignalBarQuality = 'acceptable' | 'good'
+
+export const INTRADAY_STRATEGY_VERSION = 'helix-pa-expectation/v1'
+
+export type IntradayStrategyContext = {
+  cycle: IntradayMarketCycle
+  direction: IntradaySignalDirection
+  alwaysIn: IntradaySignalDirection
+  confidence: number
+  logic: string[]
+}
+
+export type IntradayStrategySetup = {
+  timeframe: Exclude<IntradaySignalTimeframe, '1h'>
+  type: IntradaySetupType
+  direction: Exclude<IntradaySignalDirection, 'neutral'>
+  expectation: IntradayExpectation
+  state: IntradayHypothesisState
+  signalBar: Candle & {
+    quality: IntradaySignalBarQuality
+  }
+  invalidation: {
+    price: number
+    basis: 'pa-hypothesis'
+  }
+  confidence: number
+  logic: string[]
+  warnings: string[]
+}
+
+export type IntradayStrategyAnalysis = {
+  version: typeof INTRADAY_STRATEGY_VERSION
+  context: IntradayStrategyContext
+  setups: IntradayStrategySetup[]
+  selectedTimeframe?: Exclude<IntradaySignalTimeframe, '1h'>
+}
 
 export type IntradayTimeframeAnalysis = {
   timeframe: IntradaySignalTimeframe
@@ -260,6 +300,7 @@ export type IntradaySignalSnapshot = {
   activeSymbol: string
   generatedAt: number
   signal: IntradayTradeSignal
+  strategy?: IntradayStrategyAnalysis
   timeframes: Partial<Record<IntradaySignalTimeframe, IntradayTimeframeAnalysis>>
   source: {
     name: string

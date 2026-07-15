@@ -1,11 +1,18 @@
 import type {
   Candle,
+  IntradayExpectation,
   IntradayConfidenceLevel,
+  IntradayMarketCycle,
   IntradaySignalDirection,
+  IntradayStrategyAnalysis,
+  IntradayStrategyContext,
+  IntradayStrategySetup,
+  IntradaySetupType,
   IntradaySignalTimeframe,
   IntradayTimeframeAnalysis,
   IntradayTradeSignal,
 } from '@helix/contracts/market'
+import { INTRADAY_STRATEGY_VERSION } from '@helix/contracts/market'
 import {
   calculateAtrSeries,
   calculateMacdSeries,
@@ -44,18 +51,10 @@ type PriceActionEvent = {
   index: number
   level?: number
 }
-type MarketCycle = 'trend' | 'channel' | 'trading-range' | 'breakout-mode'
-type MarketContext = {
-  cycle: MarketCycle
-  direction: IntradaySignalDirection
-  confidence: number
-  logic: string[]
-}
-type PaSetupType = 'second-entry' | 'breakout-pullback' | 'failed-breakout'
-type PaExpectation = 'second-leg' | 'continuation' | 'range-rotation'
+type MarketContext = IntradayStrategyContext
 type PaSetup = {
-  type: PaSetupType
-  expectation: PaExpectation
+  type: IntradaySetupType
+  expectation: IntradayExpectation
   direction: Exclude<IntradaySignalDirection, 'neutral'>
   index: number
   quality: 1 | 2
@@ -80,6 +79,7 @@ export type IntradaySignalInput = {
 
 export type IntradaySignalResult = {
   signal: IntradayTradeSignal
+  strategy?: IntradayStrategyAnalysis
   timeframes: Partial<Record<IntradaySignalTimeframe, IntradayTimeframeAnalysis>>
 }
 
@@ -445,7 +445,7 @@ function buildMarketContext(
         : 'neutral'
     : 'neutral'
   const contraction = atrBaseline > 0 && atr <= atrBaseline * 0.75 && overlap >= 0.55
-  let cycle: MarketCycle
+  let cycle: IntradayMarketCycle
   if (breakoutDirection !== 'neutral') {
     cycle = 'trend'
     direction = breakoutDirection
@@ -461,7 +461,7 @@ function buildMarketContext(
     if (Math.abs(progress) < 0.75) direction = 'neutral'
   }
 
-  const cycleLabel: Record<MarketCycle, string> = {
+  const cycleLabel: Record<IntradayMarketCycle, string> = {
     trend: '趋势',
     channel: '通道',
     'trading-range': '交易区间',
@@ -477,6 +477,7 @@ function buildMarketContext(
   return {
     cycle,
     direction,
+    alwaysIn: direction,
     confidence: direction === 'neutral' ? 0 : cycle === 'trend' ? 85 : cycle === 'channel' ? 70 : 50,
     logic: [`1h 市场状态：${cycleLabel[cycle]} · ${directionLabel}`, structureLogic],
   }
@@ -758,6 +759,35 @@ function confidenceLevel(score: number): IntradayConfidenceLevel {
   return 'low'
 }
 
+function strategySetup(
+  evaluation: SetupEvaluation,
+  candles: Candle[],
+): IntradayStrategySetup {
+  const { setup } = evaluation
+  return {
+    timeframe: evaluation.timeframe,
+    type: setup.type,
+    direction: setup.direction,
+    expectation: setup.expectation,
+    state: evaluation.armed && evaluation.triggered
+      ? 'confirmed'
+      : evaluation.armed
+        ? 'armed'
+        : 'watching',
+    signalBar: {
+      ...candles[setup.index],
+      quality: setup.quality === 2 ? 'good' : 'acceptable',
+    },
+    invalidation: {
+      price: setup.invalidation,
+      basis: 'pa-hypothesis',
+    },
+    confidence: evaluation.confidence,
+    logic: evaluation.logic,
+    warnings: evaluation.warnings,
+  }
+}
+
 function roundToTick(value: number, tickSize: number, mode: 'nearest' | 'down' | 'up' = 'nearest') {
   const scaled = value / tickSize
   const rounded = mode === 'down' ? Math.floor(scaled) : mode === 'up' ? Math.ceil(scaled) : Math.round(scaled)
@@ -875,6 +905,15 @@ export function buildIntradaySignal(input: IntradaySignalInput): IntradaySignalR
 
   return {
     timeframes,
+    strategy: {
+      version: INTRADAY_STRATEGY_VERSION,
+      context,
+      setups: evaluations.map((evaluation) => strategySetup(
+        evaluation,
+        input.candles[evaluation.timeframe],
+      )),
+      selectedTimeframe: selected?.timeframe,
+    },
     signal: {
       status: actionable ? 'actionable' : 'watch',
       side: actionable ? selected.setup.direction : 'neutral',

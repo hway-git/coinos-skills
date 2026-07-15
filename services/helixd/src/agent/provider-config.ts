@@ -1,7 +1,4 @@
-import { readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { resolve } from 'node:path'
-import { parseEnv } from 'node:util'
+import { agentConfigValue, readHelixEnvFile } from './config-env'
 
 export const DEFAULT_AGENT_MODEL = 'gpt-5.6-terra'
 
@@ -15,18 +12,6 @@ export type AgentProviderConfig = {
   configured: boolean
   customBaseURL: boolean
   error: string | null
-}
-
-function localEnv() {
-  try {
-    return parseEnv(readFileSync(resolve(homedir(), '.helix', '.env'), 'utf8'))
-  } catch {
-    return {}
-  }
-}
-
-function value(name: string, environment: NodeJS.ProcessEnv, file: Record<string, string | undefined>) {
-  return (environment[name] || file[name] || '').trim()
 }
 
 function validateBaseURL(value: string) {
@@ -43,13 +28,13 @@ function validateBaseURL(value: string) {
 
 export function resolveAgentProviderConfig(
   environment: NodeJS.ProcessEnv = process.env,
-  file: Record<string, string | undefined> = localEnv(),
+  file: Record<string, string | undefined> = readHelixEnvFile(),
 ): AgentProviderConfig {
-  const apiKey = value('HELIX_OPENAI_API_KEY', environment, file)
-    || value('OPENAI_API_KEY', environment, file)
-  const baseURL = value('HELIX_OPENAI_BASE_URL', environment, file)
-    || value('OPENAI_BASE_URL', environment, file)
-  const requestedMode = value('HELIX_OPENAI_API_MODE', environment, file).toLowerCase()
+  const apiKey = agentConfigValue('HELIX_OPENAI_API_KEY', environment, file)
+    || agentConfigValue('OPENAI_API_KEY', environment, file)
+  const baseURL = agentConfigValue('HELIX_OPENAI_BASE_URL', environment, file)
+    || agentConfigValue('OPENAI_BASE_URL', environment, file)
+  const requestedMode = agentConfigValue('HELIX_OPENAI_API_MODE', environment, file).toLowerCase()
   const modeError = requestedMode && requestedMode !== 'chat' && requestedMode !== 'responses'
     ? 'HELIX_OPENAI_API_MODE 只能是 chat 或 responses'
     : null
@@ -64,7 +49,7 @@ export function resolveAgentProviderConfig(
     apiKey,
     baseURL: baseURL || undefined,
     apiMode,
-    model: value('HELIX_OPENAI_MODEL', environment, file) || DEFAULT_AGENT_MODEL,
+    model: agentConfigValue('HELIX_OPENAI_MODEL', environment, file) || DEFAULT_AGENT_MODEL,
     configured: Boolean(apiKey) && error == null,
     customBaseURL: Boolean(baseURL),
     error,

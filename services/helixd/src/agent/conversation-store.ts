@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { AgentScope } from '@helix/contracts/agent'
-import { DEFAULT_AGENT_CONVERSATION_ID } from '@helix/contracts/agent'
+import {
+  AGENT_RECENT_MESSAGE_LIMIT,
+  AGENT_VISIBLE_MESSAGE_LIMIT,
+  DEFAULT_AGENT_CONVERSATION_ID,
+} from '@helix/contracts/agent'
 import type { UIMessage } from 'ai'
 import { normalizeAgentScope } from './schemas'
 import { agentDatabase } from './story-store'
@@ -17,6 +21,13 @@ type LegacyMessageRow = StoredMessageRow & {
   timeframe: string
   created_at: number
   updated_at: number
+}
+
+export type AgentConversationCompactionCandidate = {
+  conversationId: string
+  previousSummary: string | null
+  messages: Array<{ messageOrder: number; message: UIMessage }>
+  throughOrder: number
 }
 
 let schemaReady = false
@@ -154,6 +165,23 @@ function database() {
       id TEXT PRIMARY KEY,
       applied_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS agent_conversation_archive_state (
+      conversation_id TEXT PRIMARY KEY,
+      summary TEXT NOT NULL,
+      through_order INTEGER NOT NULL,
+      archived_message_count INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_archived_session_messages (
+      conversation_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      message_order INTEGER NOT NULL,
+      message_json TEXT NOT NULL,
+      archived_at INTEGER NOT NULL,
+      PRIMARY KEY (conversation_id, message_id)
+    );
+    CREATE INDEX IF NOT EXISTS agent_archived_session_messages_order
+      ON agent_archived_session_messages (conversation_id, message_order ASC);
   `)
   const now = Date.now()
   db.prepare(`
@@ -177,6 +205,118 @@ export function readAgentConversation<MESSAGE extends UIMessage = UIMessage>(
     .all(conversationId) as Array<{ message_json: string }>
 
   return rows.map((row) => parseStoredMessage(row.message_json) as MESSAGE)
+}
+
+export function readVisibleAgentConversation<MESSAGE extends UIMessage = UIMessage>(
+  conversationId = DEFAULT_AGENT_CONVERSATION_ID,
+  requestedLimit = AGENT_VISIBLE_MESSAGE_LIMIT,
+): MESSAGE[] {
+  const limit = Math.max(1, Math.min(AGENT_VISIBLE_MESSAGE_LIMIT, Math.trunc(requestedLimit)))
+  const rows = database().prepare(`
+    SELECT message_json FROM (
+      SELECT message_order, message_json
+      FROM agent_session_messages
+      WHERE conversation_id = ?
+      ORDER BY message_order DESC
+      LIMIT ?
+    ) ORDER BY message_order ASC
+  `).all(conversationId, limit) as Array<{ message_json: string }>
+  return rows.map((row) => parseStoredMessage(row.message_json) as MESSAGE)
+}
+
+export function readAgentConversationArchive(conversationId = DEFAULT_AGENT_CONVERSATION_ID) {
+  const row = database().prepare(`
+    SELECT summary FROM agent_conversation_archive_state WHERE conversation_id = ?
+  `).get(conversationId) as { summary: string } | undefined
+  return row?.summary ?? null
+}
+
+export function readAgentConversationCompactionCandidate(
+  conversationId = DEFAULT_AGENT_CONVERSATION_ID,
+): AgentConversationCompactionCandidate | null {
+  const count = Number((database().prepare(`
+    SELECT COUNT(*) AS count FROM agent_session_messages WHERE conversation_id = ?
+  `).get(conversationId) as { count: number }).count)
+  if (count < AGENT_RECENT_MESSAGE_LIMIT) return null
+  const archiveCount = count - AGENT_VISIBLE_MESSAGE_LIMIT
+  if (archiveCount <= 0) return null
+  const rows = database().prepare(`
+    SELECT message_order, message_json
+    FROM agent_session_messages
+    WHERE conversation_id = ?
+    ORDER BY message_order ASC
+    LIMIT ?
+  `).all(conversationId, archiveCount) as StoredMessageRow[]
+  if (rows.length === 0) return null
+  return {
+    conversationId,
+    previousSummary: readAgentConversationArchive(conversationId),
+    messages: rows.map((row) => ({
+      messageOrder: row.message_order,
+      message: parseStoredMessage(row.message_json),
+    })),
+    throughOrder: rows.at(-1)!.message_order,
+  }
+}
+
+export function commitAgentConversationCompaction(
+  candidate: AgentConversationCompactionCandidate,
+  summary: string,
+) {
+  const db = database()
+  const now = Date.now()
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const archived = db.prepare(`
+      INSERT OR IGNORE INTO agent_archived_session_messages (
+        conversation_id, message_id, message_order, message_json, archived_at
+      )
+      SELECT conversation_id, message_id, message_order, message_json, ?
+      FROM agent_session_messages
+      WHERE conversation_id = ? AND message_order <= ?
+    `).run(now, candidate.conversationId, candidate.throughOrder)
+    db.prepare(`
+      INSERT INTO agent_conversation_archive_state (
+        conversation_id, summary, through_order, archived_message_count, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_id) DO UPDATE SET
+        summary = excluded.summary,
+        through_order = excluded.through_order,
+        archived_message_count = agent_conversation_archive_state.archived_message_count
+          + excluded.archived_message_count,
+        updated_at = excluded.updated_at
+    `).run(candidate.conversationId, summary, candidate.throughOrder, Number(archived.changes), now)
+    db.prepare(`
+      DELETE FROM agent_session_messages
+      WHERE conversation_id = ? AND message_order <= ?
+    `).run(candidate.conversationId, candidate.throughOrder)
+    db.exec('COMMIT')
+    return Number(archived.changes)
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+export function filterArchivedAgentMessages<MESSAGE extends UIMessage>(
+  conversationId: string,
+  messages: MESSAGE[],
+) {
+  const archived = database().prepare(`
+    SELECT 1 FROM agent_archived_session_messages
+    WHERE conversation_id = ? AND message_id = ?
+  `)
+  return messages.filter((message) => !archived.get(conversationId, message.id))
+}
+
+export function listRecentAgentConversationScopes(limit = 20): AgentScope[] {
+  return database().prepare(`
+    SELECT symbol, timeframe, MAX(updated_at) AS last_seen
+    FROM agent_session_messages
+    GROUP BY symbol, timeframe
+    ORDER BY last_seen DESC
+    LIMIT ?
+  `).all(Math.max(1, Math.min(100, Math.trunc(limit)))) as AgentScope[]
 }
 
 export function contextualizeAgentMessages<MESSAGE extends UIMessage>(
@@ -231,6 +371,10 @@ export function writeAgentConversation(
     FROM agent_session_messages
     WHERE conversation_id = ? AND message_id = ?
   `)
+  const isArchived = db.prepare(`
+    SELECT 1 FROM agent_archived_session_messages
+    WHERE conversation_id = ? AND message_id = ?
+  `)
   const upsert = db.prepare(`
     INSERT INTO agent_session_messages (
       conversation_id, message_id, symbol, timeframe, role, message_order,
@@ -247,6 +391,7 @@ export function writeAgentConversation(
     let nextOrder = Number((readMaxOrder.get(conversationId) as { max_order: number }).max_order)
     for (const rawMessage of messages) {
       const messageId = rawMessage.id.trim()
+      if (messageId && isArchived.get(conversationId, messageId)) continue
       const existing = messageId
         ? findExisting.get(conversationId, messageId) as StoredMessageRow | undefined
         : undefined
