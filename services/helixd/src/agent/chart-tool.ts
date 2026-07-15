@@ -32,17 +32,30 @@ function finite(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-function markerCoordinate(value: Record<string, unknown>): {
+function evidenceTimeframe(ref: string) {
+  return /^strategy\.setup\.([^.]+)$/.exec(ref)?.[1]
+    ?? /^timeframes\.([^.]+)\./.exec(ref)?.[1]
+}
+
+function markerDirection(value: Record<string, unknown>): 'long' | 'short' | 'neutral' {
+  if (value.direction === 'long' || value.direction === 'short') return value.direction
+  if (value.divergence === 'bullish') return 'long'
+  if (value.divergence === 'bearish') return 'short'
+  if (value.momentum === 'bullish') return 'long'
+  if (value.momentum === 'bearish') return 'short'
+  if (typeof value.event === 'string' && value.event.startsWith('bullish-')) return 'long'
+  if (typeof value.event === 'string' && value.event.startsWith('bearish-')) return 'short'
+  return 'neutral'
+}
+
+function markerCoordinate(value: Record<string, unknown>, fallbackTime: number | null = null): {
   time: number
   direction: 'long' | 'short' | 'neutral'
 } | null {
   const signalBar = record(value.signalBar)
   const close = record(value.close)
-  const time = finite(signalBar.time) ?? finite(value.closedAt) ?? finite(close.closedAt)
-  const direction = value.direction === 'long' || value.direction === 'short'
-    ? value.direction
-    : 'neutral'
-  return time == null ? null : { time, direction }
+  const time = finite(signalBar.time) ?? finite(value.closedAt) ?? finite(close.closedAt) ?? fallbackTime
+  return time == null ? null : { time, direction: markerDirection(value) }
 }
 
 function priceCoordinate(value: Record<string, unknown>, field: Extract<ChartAnnotationRequest, { type: 'price-line' }>['value']) {
@@ -62,8 +75,8 @@ export function resolveChartAnnotations(
   return requests.map((request) => {
     const item = evidenceByRef.get(request.evidenceRef)
     if (!item) throw new Error(`UNKNOWN_EVIDENCE_REF:${request.evidenceRef}`)
-    const setupTimeframe = /^strategy\.setup\.(.+)$/.exec(request.evidenceRef)?.[1]
-    if (setupTimeframe && setupTimeframe !== timeframe) {
+    const annotationTimeframe = evidenceTimeframe(request.evidenceRef)
+    if (annotationTimeframe && annotationTimeframe !== timeframe) {
       throw new Error(`CHART_EVIDENCE_TIMEFRAME_MISMATCH:${request.evidenceRef}`)
     }
     const value = parsedEvidence(item)
@@ -72,7 +85,13 @@ export function resolveChartAnnotations(
       if (price == null) throw new Error(`EVIDENCE_PRICE_UNAVAILABLE:${request.evidenceRef}`)
       return { type: request.type, evidenceRef: request.evidenceRef, text: request.text, price }
     }
-    const coordinate = markerCoordinate(value)
+    const companionClose = annotationTimeframe
+      ? evidenceByRef.get(`timeframes.${annotationTimeframe}.close`)
+      : undefined
+    const companionTime = companionClose
+      ? markerCoordinate(parsedEvidence(companionClose))?.time ?? null
+      : null
+    const coordinate = markerCoordinate(value, companionTime)
     if (!coordinate) throw new Error(`EVIDENCE_TIME_UNAVAILABLE:${request.evidenceRef}`)
     return { type: request.type, evidenceRef: request.evidenceRef, text: request.text, ...coordinate }
   })
