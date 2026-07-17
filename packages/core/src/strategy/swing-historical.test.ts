@@ -144,6 +144,114 @@ function location(overrides: Partial<SwingLocationCandidate> = {}): SwingLocatio
   }
 }
 
+function primeSwingPosition(evaluator: SwingHistoricalEvaluator, side: 'LONG' | 'SHORT') {
+  const candidate = createSwingTradeThesis({
+    id: `thesis-${side.toLowerCase()}`,
+    symbol: 'BTC/USDT:USDT',
+    type: 'STRUCTURAL_REVERSAL',
+    direction: side,
+    contextId: 'context-1',
+    locationId: 'source-location',
+    score: 80,
+    invalidation: {
+      policyId: 'thesis_invalidation_v1',
+      type: side === 'LONG' ? 'H4_CLOSE_BELOW_LEVEL' : 'H4_CLOSE_ABOVE_LEVEL',
+      timeframe: '4h',
+      level: side === 'LONG' ? 95 : 105,
+    },
+    expectedMove: { targetLocationId: 'target-location', target: side === 'LONG' ? 110 : 90 },
+    createdAt: 0,
+    expiresAt: 100 * fifteenMinutes,
+    reasonCodes: ['THESIS_CREATED'],
+  })
+  const active = transitionSwingTradeThesis(candidate, {
+    toState: 'ACTIVE', occurredAt: fifteenMinutes, reasonCodes: ['THESIS_ACTIVATED'],
+  }).thesis
+  const eligible = transitionSwingTradeThesis(active, {
+    toState: 'ENTRY_ELIGIBLE', occurredAt: 2 * fifteenMinutes, reasonCodes: ['ENTRY_ELIGIBLE'],
+  }).thesis
+  const triggered = transitionSwingTradeThesis(eligible, {
+    toState: 'TRIGGERED', occurredAt: 3 * fifteenMinutes, reasonCodes: ['EXECUTION_TRIGGERED'],
+  }).thesis
+  const internal = evaluator as unknown as {
+    thesis?: SwingTradeThesis
+    thesisLocation?: SwingLocationCandidate
+    position?: {
+      thesis: SwingTradeThesis
+      location: SwingLocationCandidate
+      stage: 'EARLY'
+      side: 'LONG' | 'SHORT'
+      entryPrice: number
+      stop: number
+      target: number
+      riskR: number
+    }
+    attempts: number
+    thesisRiskUsedR: number
+  }
+  const source = location({ direction: side })
+  internal.thesis = triggered
+  internal.thesisLocation = source
+  internal.position = {
+    thesis: triggered,
+    location: source,
+    stage: 'EARLY',
+    side,
+    entryPrice: 100,
+    stop: side === 'LONG' ? 95 : 105,
+    target: side === 'LONG' ? 110 : 90,
+    riskR: 0.25,
+  }
+  internal.attempts = 1
+  internal.thesisRiskUsedR = 0.25
+}
+
+function evaluateSwingPosition(evaluator: SwingHistoricalEvaluator, candle: Candle) {
+  return evaluator.evaluate({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '15m',
+    decisionTime: 4 * fifteenMinutes,
+    sourceCandle: candle,
+    candles: { '15m': [candle], '1h': [], '4h': [], '1d': [] },
+  })
+}
+
+test('exits a Swing when a closed execution candle wick touches its Target', () => {
+  const cases: readonly { side: 'LONG' | 'SHORT'; candle: Candle }[] = [
+    {
+      side: 'LONG',
+      candle: { time: 3 * fifteenMinutes, open: 100, high: 111, low: 99, close: 100, volume: 100 },
+    },
+    {
+      side: 'SHORT',
+      candle: { time: 3 * fifteenMinutes, open: 100, high: 101, low: 89, close: 100, volume: 100 },
+    },
+  ]
+  for (const { side, candle } of cases) {
+    const evaluator = new SwingHistoricalEvaluator(config)
+    primeSwingPosition(evaluator, side)
+    assert.deepEqual(evaluateSwingPosition(evaluator, candle)[0]?.reasonCodes, ['TARGET_HIT'])
+  }
+})
+
+test('records STOP_HIT first when one Swing candle touches both boundaries', () => {
+  const cases: readonly { side: 'LONG' | 'SHORT'; candle: Candle }[] = [
+    {
+      side: 'LONG',
+      candle: { time: 3 * fifteenMinutes, open: 100, high: 111, low: 94, close: 100, volume: 100 },
+    },
+    {
+      side: 'SHORT',
+      candle: { time: 3 * fifteenMinutes, open: 100, high: 106, low: 89, close: 100, volume: 100 },
+    },
+  ]
+  for (const { side, candle } of cases) {
+    const evaluator = new SwingHistoricalEvaluator(config)
+    primeSwingPosition(evaluator, side)
+    assert.deepEqual(evaluateSwingPosition(evaluator, candle)[0]?.reasonCodes, ['STOP_HIT'])
+  }
+})
+
 test('freezes the nearest opposing structural Location as Expected Move', () => {
   const source = location()
   assert.deepEqual(selectSwingStructuralTarget(source, [

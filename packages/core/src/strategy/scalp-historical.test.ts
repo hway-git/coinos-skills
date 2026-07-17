@@ -144,6 +144,98 @@ function zone(overrides: Partial<ScalpHuntingZone> = {}): ScalpHuntingZone {
   }
 }
 
+function primeScalpPosition(evaluator: ScalpHistoricalEvaluator, side: 'LONG' | 'SHORT') {
+  const event: ScalpPriceEvent = {
+    id: `event-${side.toLowerCase()}`,
+    symbol: 'BTC/USDT:USDT',
+    regimeId: 'regime-1',
+    zoneId: 'source-zone',
+    detectorId: 'momentum_burst_v1',
+    type: 'MOMENTUM_BURST',
+    direction: side,
+    state: 'TRIGGERED',
+    score: 90,
+    detectedAt: 0,
+    expiresAt: 60 * minute,
+    updatedAt: 2 * minute,
+    reasonCodes: ['EXECUTION_TRIGGERED'],
+  }
+  const internal = evaluator as unknown as {
+    position?: {
+      event: ScalpPriceEvent
+      zone: ScalpHuntingZone
+      side: 'LONG' | 'SHORT'
+      entryPrice: number
+      stop: number
+      target: number
+      riskDistance: number
+      riskR: number
+      triggeredAt: number
+      responseState: 'EXPECTED_RESPONSE_WINDOW'
+    }
+  }
+  internal.position = {
+    event,
+    zone: zone(),
+    side,
+    entryPrice: 100,
+    stop: side === 'LONG' ? 95 : 105,
+    target: side === 'LONG' ? 110 : 90,
+    riskDistance: 5,
+    riskR: 0.25,
+    triggeredAt: 2 * minute,
+    responseState: 'EXPECTED_RESPONSE_WINDOW',
+  }
+}
+
+function evaluateScalpPosition(evaluator: ScalpHistoricalEvaluator, candle: Candle) {
+  return evaluator.evaluate({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '1m',
+    decisionTime: 3 * minute,
+    sourceCandle: candle,
+    candles: { '1m': [candle], '5m': [], '15m': [], '1h': [] },
+  })
+}
+
+test('exits a Scalp when a closed execution candle wick touches its Target', () => {
+  const cases: readonly { side: 'LONG' | 'SHORT'; candle: Candle }[] = [
+    {
+      side: 'LONG',
+      candle: { time: 2 * minute, open: 100, high: 111, low: 99, close: 100, volume: 100 },
+    },
+    {
+      side: 'SHORT',
+      candle: { time: 2 * minute, open: 100, high: 101, low: 89, close: 100, volume: 100 },
+    },
+  ]
+  for (const { side, candle } of cases) {
+    const evaluator = new ScalpHistoricalEvaluator(config)
+    primeScalpPosition(evaluator, side)
+    assert.deepEqual(evaluateScalpPosition(evaluator, candle)[0]?.reasonCodes, ['TARGET_HIT'])
+  }
+})
+
+test('records STOP_HIT first and full loss risk when one Scalp candle touches both boundaries', () => {
+  const cases: readonly { side: 'LONG' | 'SHORT'; candle: Candle }[] = [
+    {
+      side: 'LONG',
+      candle: { time: 2 * minute, open: 100, high: 111, low: 94, close: 100, volume: 100 },
+    },
+    {
+      side: 'SHORT',
+      candle: { time: 2 * minute, open: 100, high: 106, low: 89, close: 100, volume: 100 },
+    },
+  ]
+  for (const { side, candle } of cases) {
+    const evaluator = new ScalpHistoricalEvaluator(config)
+    primeScalpPosition(evaluator, side)
+    assert.deepEqual(evaluateScalpPosition(evaluator, candle)[0]?.reasonCodes, ['STOP_HIT'])
+    assert.equal(evaluator.checkpoint().dailyLossUsedR, 0.25)
+    assert.equal(evaluator.checkpoint().consecutiveLosses, 1)
+  }
+})
+
 test('selects the nearest eligible structural target without synthesizing minimum RR', () => {
   const target = selectScalpStructuralTarget({
     zones: [

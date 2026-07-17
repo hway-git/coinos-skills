@@ -394,8 +394,8 @@ export class ScalpHistoricalEvaluator {
     if (position.responseState === 'EXPECTED_RESPONSE_WINDOW' && favorableR >= 0.5) {
       position.responseState = 'RESPONSE_OK'
     }
-    const stopped = position.side === 'LONG' ? candle.close <= position.stop : candle.close >= position.stop
-    const targeted = position.side === 'LONG' ? candle.close >= position.target : candle.close <= position.target
+    const stopped = position.side === 'LONG' ? candle.low <= position.stop : candle.high >= position.stop
+    const targeted = position.side === 'LONG' ? candle.high >= position.target : candle.low <= position.target
     const time = evaluateScalpTimePolicy(this.config.time, {
       eventType: position.event.type,
       triggeredAt: position.triggeredAt,
@@ -410,7 +410,7 @@ export class ScalpHistoricalEvaluator {
     }
     if (!reasonCode) return null
 
-    const pnlR = favorableR
+    const pnlR = reasonCode === 'STOP_HIT' ? -1 : reasonCode === 'TARGET_HIT' ? 1 : favorableR
     if (pnlR < 0) {
       this.dailyLossUsedR += position.riskR * Math.min(1, Math.abs(pnlR))
       this.consecutiveLosses += 1

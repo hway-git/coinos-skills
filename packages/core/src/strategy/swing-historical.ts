@@ -543,8 +543,8 @@ export class SwingHistoricalEvaluator {
     const position = this.position
     const candle = latest(fifteenMinute)
     if (!position || !this.thesis || !candle) return null
-    const stopped = position.side === 'LONG' ? candle.close <= position.stop : candle.close >= position.stop
-    const targeted = position.side === 'LONG' ? candle.close >= position.target : candle.close <= position.target
+    const stopped = position.side === 'LONG' ? candle.low <= position.stop : candle.high >= position.stop
+    const targeted = position.side === 'LONG' ? candle.high >= position.target : candle.low <= position.target
     if (!stopped && !targeted) return null
     const reasonCode = stopped ? 'STOP_HIT' : 'TARGET_HIT'
     const retryable = stopped && this.attempts < this.config.execution.maxAttemptsPerThesis
