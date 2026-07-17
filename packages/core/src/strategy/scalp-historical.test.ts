@@ -236,6 +236,54 @@ test('records STOP_HIT first and full loss risk when one Scalp candle touches bo
   }
 })
 
+test('keeps a consecutive-loss pause until a later closed 1H Regime re-evaluation', () => {
+  const evaluator = new ScalpHistoricalEvaluator({
+    ...config,
+    risk: { ...config.risk, maxConsecutiveLosses: 3 },
+  })
+  const hourly = Array.from({ length: 51 }, (_, index): Candle => ({
+    time: index * 60 * minute,
+    open: 100 + index * 0.1,
+    high: 101 + index * 0.1,
+    low: 99 + index * 0.1,
+    close: 100.5 + index * 0.1,
+    volume: 100,
+  }))
+  const internal = evaluator as unknown as {
+    consecutiveLosses: number
+    lastRegimeCandleTime: number
+  }
+  internal.consecutiveLosses = 3
+  internal.lastRegimeCandleTime = hourly.at(-1)!.time
+  const evaluate = (candles: Candle[]) => {
+    const decisionTime = candles.at(-1)!.time + 60 * minute
+    const current: Candle = {
+      time: decisionTime - minute,
+      open: 105,
+      high: 106,
+      low: 104,
+      close: 105,
+      volume: 100,
+    }
+    evaluator.evaluate({
+      symbol: 'BTC/USDT:USDT',
+      baseTimeframe: '1m',
+      decisionTime,
+      sourceCandle: current,
+      candles: { '1m': [current], '5m': [], '15m': [], '1h': candles },
+    })
+  }
+
+  evaluate(hourly)
+  assert.equal(evaluator.checkpoint().consecutiveLosses, 3)
+
+  evaluate([...hourly, {
+    ...hourly.at(-1)!,
+    time: hourly.at(-1)!.time + 60 * minute,
+  }])
+  assert.equal(evaluator.checkpoint().consecutiveLosses, 0)
+})
+
 test('selects the nearest eligible structural target without synthesizing minimum RR', () => {
   const target = selectScalpStructuralTarget({
     zones: [

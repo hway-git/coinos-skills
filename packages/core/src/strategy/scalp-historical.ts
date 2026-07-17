@@ -332,12 +332,14 @@ export class ScalpHistoricalEvaluator {
     const latestHour = latest(hourly)
     const regimeMinimum = Math.max(this.config.marketRegime.slowWindowBars + 1, this.config.marketRegime.emaPeriod + 1)
     if (latestHour && latestHour.time !== this.lastRegimeCandleTime && hourly.length >= regimeMinimum) {
+      const pausedForConsecutiveLosses = this.consecutiveLosses >= this.config.risk.maxConsecutiveLosses
       this.regime = classifyScalpMarketRegime(this.config.marketRegime, {
         id: `${context.symbol}:1h:${latestHour.time + HOUR_MS}`,
         symbol: context.symbol,
         candles: [...hourly],
       })
       this.lastRegimeCandleTime = latestHour.time
+      if (pausedForConsecutiveLosses) this.consecutiveLosses = 0
     }
 
     const latestFifteen = latest(fifteenMinute)
