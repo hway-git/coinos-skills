@@ -26,22 +26,34 @@ export type FreqtradeStrategyCreateResult = {
 }
 
 export type FreqtradeDryRunDeployRequest = {
-  strategy: string
+  strategy?: string
+  signalArtifactHash?: string
+  walkForwardReportFile?: string
   pairs?: string[]
   maxOpenTrades?: number
 }
 
 export type FreqtradeDryRunDeployResult = {
   strategy: string
+  signalArtifactHash?: string
+  walkForwardReportHash?: string
   mode: string
   dryRun: true
   pairs: string[]
   maxOpenTrades?: number
+  forwardRuntime?: {
+    deploymentHash: string
+    activatedAt: number
+    workerPid: number
+    state: string
+  }
   note: string
 }
 
 export type FreqtradeLiveDeployResult = {
   strategy: string
+  signalArtifactHash?: string
+  walkForwardReportHash?: string
   mode: string
   dryRun: false
   pairs: string[]
@@ -51,9 +63,58 @@ export type FreqtradeLiveDeployResult = {
 
 export type FreqtradeEmergencyStopResult = {
   success: boolean
+  operationError: string | null
   openTradesBefore: number | null
+  openTradesAfter: number | null
   forceExitError: string | null
   stopError: string | null
+  reconciliationStatus: FreqtradeReconciliationResult['status'] | null
+  reconciliationError: string | null
+  reconciliationMismatches: FreqtradeReconciliationResult['mismatches']
+}
+
+export type FreqtradeDeploymentBlocker =
+  | 'EVIDENCE_STALE_OR_INVALID'
+  | 'NO_TRADES'
+  | 'NON_POSITIVE_PROFIT'
+  | 'WALK_FORWARD_REPORT_MISSING'
+  | 'LIFECYCLE_NOT_DRY_RUN'
+  | 'LIFECYCLE_NOT_LIVE'
+  | 'FORWARD_LIVE_UNAVAILABLE'
+
+export type FreqtradeDeploymentGate = {
+  allowed: boolean
+  blockers: FreqtradeDeploymentBlocker[]
+}
+
+export type FreqtradeDeploymentCandidate = {
+  key: string
+  strategy: string
+  evidenceId: string
+  createdAt: string
+  current: boolean
+  signalArtifact: {
+    artifactHash: string
+    strategyId: string
+    strategyVersion: string
+    lifecycle: string
+    symbol: string
+    baseTimeframe: string
+  } | null
+  walkForwardReport: {
+    reportHash: string
+    reportFile: string
+  } | null
+  pairs: string[]
+  metrics: {
+    trades: number | null
+    profitRatio: number | null
+    profitAbs: number | null
+    winRate: number | null
+    drawdownRatio: number | null
+  }
+  dryRun: FreqtradeDeploymentGate
+  live: FreqtradeDeploymentGate
 }
 
 export type FreqtradeReconciliationResult = {
@@ -92,6 +153,7 @@ export type FreqtradeSnapshot = {
     maxOpenTrades: number | string
     stakeCurrency: string
     pairs: string[]
+    signalArtifactHash: string | null
     version: string
   }
   profit: {
@@ -100,6 +162,18 @@ export type FreqtradeSnapshot = {
     floating: string
     closedTrades: number | string
   }
+  forwardRuntime: {
+    deploymentHash: string | null
+    pid: number | null
+    running: boolean
+    state: string
+    heartbeatAgeMs: number | null
+    lastDecisionTime: number | null
+    lastMarketSnapshotId: string | null
+    lastBatchHash: string | null
+    batches: number
+    error: string | null
+  } | null
   tables: {
     positions: FreqtradeTableRow[]
     history: FreqtradeTableRow[]
@@ -108,6 +182,7 @@ export type FreqtradeSnapshot = {
     risk: FreqtradeTableRow[]
     audit: FreqtradeTableRow[]
   }
+  deployments: FreqtradeDeploymentCandidate[]
   source: {
     name: 'Freqtrade'
     status: FreqtradeSourceStatus

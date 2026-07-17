@@ -60,3 +60,53 @@ test('rejects history pages that stop moving backward', async () => {
     fetchImpl,
   }), /pagination did not move backward/)
 })
+
+test('aligns each timeframe independently and includes only candles closed by the execution cutoff', async () => {
+  const hourlyRows = [
+    ['3600000', '101', '102', '100', '101.5', '10', '1000', '1000', '1'],
+    ['0', '100', '101', '99', '100.5', '10', '1000', '1000', '1'],
+  ]
+  const fetchImpl = async () => new Response(JSON.stringify({ code: '0', data: hourlyRows }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const dataset = await fetchOkxHistoricalDataset({
+    instrumentId: 'BTC-USDT-SWAP',
+    symbol: 'BTC/USDT:USDT',
+    timeframes: ['1h'],
+    startTime: 30 * minute,
+    endTime: 90 * minute,
+    fetchImpl,
+  })
+
+  assert.deepEqual(dataset.timeframes['1h']!.map((candle) => candle.time), [0])
+  assert.equal(dataset.capturedThrough, 90 * minute)
+})
+
+test('rejects a non-empty OKX response that does not cover both requested boundaries', async () => {
+  const fetchFrom = (source: string[][]) => async (input: string | URL) => {
+    const cursor = Number(new URL(input).searchParams.get('after'))
+    const page = source.filter((candidate) => Number(candidate[0]) < cursor).slice(0, 300)
+    return new Response(JSON.stringify({ code: '0', data: page }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+  const complete = Array.from({ length: 6 }, (_, index) => row(index)).reverse()
+  const options = {
+    instrumentId: 'BTC-USDT-SWAP',
+    symbol: 'BTC/USDT:USDT',
+    timeframes: ['1m'],
+    startTime: 0,
+    endTime: 6 * minute,
+  }
+
+  await assert.rejects(
+    fetchOkxHistoricalDataset({ ...options, fetchImpl: fetchFrom(complete.filter((item) => item[0] !== '0')) }),
+    /does not cover the requested start/,
+  )
+  await assert.rejects(
+    fetchOkxHistoricalDataset({ ...options, fetchImpl: fetchFrom(complete.filter((item) => item[0] !== String(5 * minute))) }),
+    /does not cover the requested end/,
+  )
+})

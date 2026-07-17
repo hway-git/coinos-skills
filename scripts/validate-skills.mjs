@@ -248,6 +248,13 @@ const SHARED_FILE_GROUPS = [
       'skills/helix-account/scripts/register.mjs',
     ],
   },
+  {
+    name: 'group5 conditional-orders.mjs',
+    files: [
+      'skills/helix-trading/lib/conditional-orders.mjs',
+      'skills/helix-account/lib/conditional-orders.mjs',
+    ],
+  },
 ];
 
 // 返回 true 表示全部组一致（或文件不足无法比对），false 表示有漂移。

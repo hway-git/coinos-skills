@@ -1,4 +1,5 @@
 import type { Candle } from '@helix/contracts/market'
+import type { StrategyHistoricalScalpRiskTraceEntry } from '@helix/contracts/strategy'
 import type {
   BreakoutFailureConfig,
   LiquiditySweepConfig,
@@ -80,6 +81,45 @@ type AcceptedScalpEvent = {
   decision: ScalpDetectorDecision
 }
 
+export const SCALP_HISTORICAL_CHECKPOINT_SCHEMA_VERSION = 'helix.scalp-evaluator-checkpoint/v1' as const
+
+export type ScalpHistoricalEvaluatorCheckpoint = Readonly<{
+  schemaVersion: typeof SCALP_HISTORICAL_CHECKPOINT_SCHEMA_VERSION
+  regime: ScalpMarketRegimeDecision | null
+  zones: readonly ScalpHuntingZone[]
+  event: ScalpPriceEvent | null
+  eventZone: ScalpHuntingZone | null
+  eventRegime: StrategyHistoricalScalpRiskTraceEntry['scalp']['regime'] | null
+  position: OpenScalpPosition | null
+  pendingBreach: PendingScalpBreach | null
+  lastRegimeCandleTime: number
+  lastZoneCandleTime: number
+  lastEventCandleTime: number
+  riskDay: number
+  dailyLossUsedR: number
+  consecutiveLosses: number
+  detectedEvents: number
+  enteredTrades: number
+  exitedTrades: number
+  expiredEvents: number
+  detectedByType: Readonly<Record<ScalpPriceEvent['type'], number>>
+  eventRejections: readonly Readonly<{ eventId: string; reasonCodes: readonly string[] }>[]
+}>
+
+function checkpointInteger(value: unknown, name: string, minimum = 0) {
+  if (!Number.isSafeInteger(value) || Number(value) < minimum) {
+    throw new Error(`${name} must be a safe integer >= ${minimum}`)
+  }
+  return Number(value)
+}
+
+function checkpointNumber(value: unknown, name: string) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative finite number`)
+  }
+  return value
+}
+
 function latest(series: readonly Candle[] | undefined) {
   return series?.at(-1)
 }
@@ -156,6 +196,7 @@ export class ScalpHistoricalEvaluator {
   private zones: ScalpHuntingZone[] = []
   private event?: ScalpPriceEvent
   private eventZone?: ScalpHuntingZone
+  private eventRegime?: StrategyHistoricalScalpRiskTraceEntry['scalp']['regime']
   private position?: OpenScalpPosition
   private pendingBreach?: PendingScalpBreach
   private lastRegimeCandleTime = -1
@@ -175,7 +216,92 @@ export class ScalpHistoricalEvaluator {
   }
   private readonly eventRejections = new Map<string, Set<string>>()
 
-  constructor(private readonly config: ScalpHistoricalEvaluatorConfig) {}
+  constructor(
+    private readonly config: ScalpHistoricalEvaluatorConfig,
+    private readonly recordHistoricalRiskEntry?: (entry: StrategyHistoricalScalpRiskTraceEntry) => void,
+    checkpoint?: ScalpHistoricalEvaluatorCheckpoint,
+  ) {
+    if (checkpoint) this.restore(checkpoint)
+  }
+
+  checkpoint(): ScalpHistoricalEvaluatorCheckpoint {
+    return structuredClone({
+      schemaVersion: SCALP_HISTORICAL_CHECKPOINT_SCHEMA_VERSION,
+      regime: this.regime ?? null,
+      zones: this.zones,
+      event: this.event ?? null,
+      eventZone: this.eventZone ?? null,
+      eventRegime: this.eventRegime ?? null,
+      position: this.position ?? null,
+      pendingBreach: this.pendingBreach ?? null,
+      lastRegimeCandleTime: this.lastRegimeCandleTime,
+      lastZoneCandleTime: this.lastZoneCandleTime,
+      lastEventCandleTime: this.lastEventCandleTime,
+      riskDay: this.riskDay,
+      dailyLossUsedR: this.dailyLossUsedR,
+      consecutiveLosses: this.consecutiveLosses,
+      detectedEvents: this.detectedEvents,
+      enteredTrades: this.enteredTrades,
+      exitedTrades: this.exitedTrades,
+      expiredEvents: this.expiredEvents,
+      detectedByType: this.detectedByType,
+      eventRejections: [...this.eventRejections.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([eventId, reasonCodes]) => ({ eventId, reasonCodes: [...reasonCodes].sort() })),
+    })
+  }
+
+  private restore(checkpoint: ScalpHistoricalEvaluatorCheckpoint) {
+    if (!checkpoint || checkpoint.schemaVersion !== SCALP_HISTORICAL_CHECKPOINT_SCHEMA_VERSION) {
+      throw new Error('unsupported Scalp evaluator checkpoint')
+    }
+    if (!Array.isArray(checkpoint.zones) || !Array.isArray(checkpoint.eventRejections)) {
+      throw new Error('Scalp evaluator checkpoint arrays are invalid')
+    }
+    const detectedByType = checkpoint.detectedByType
+    if (!detectedByType || typeof detectedByType !== 'object'
+      || Object.keys(detectedByType).sort().join(',') !== 'BREAKOUT_FAILURE,LIQUIDITY_SWEEP,MOMENTUM_BURST') {
+      throw new Error('Scalp evaluator checkpoint detectedByType is invalid')
+    }
+    const rejections = new Map<string, Set<string>>()
+    for (const entry of checkpoint.eventRejections) {
+      if (!entry || typeof entry.eventId !== 'string' || !entry.eventId.trim()
+        || !Array.isArray(entry.reasonCodes)
+        || entry.reasonCodes.some((reason: string) => typeof reason !== 'string' || !reason.trim())) {
+        throw new Error('Scalp evaluator checkpoint rejection entry is invalid')
+      }
+      if (rejections.has(entry.eventId)) throw new Error('Scalp evaluator checkpoint has duplicate rejection entries')
+      rejections.set(entry.eventId, new Set(entry.reasonCodes))
+    }
+    if (checkpoint.position && (!checkpoint.event || !checkpoint.eventZone || !checkpoint.eventRegime)) {
+      throw new Error('Scalp evaluator checkpoint position is missing its frozen Event state')
+    }
+    if (checkpoint.event && !checkpoint.eventRegime) {
+      throw new Error('Scalp evaluator checkpoint Event is missing its frozen Regime')
+    }
+    this.regime = structuredClone(checkpoint.regime ?? undefined)
+    this.zones = structuredClone([...checkpoint.zones])
+    this.event = structuredClone(checkpoint.event ?? undefined)
+    this.eventZone = structuredClone(checkpoint.eventZone ?? undefined)
+    this.eventRegime = structuredClone(checkpoint.eventRegime ?? undefined)
+    this.position = structuredClone(checkpoint.position ?? undefined)
+    this.pendingBreach = structuredClone(checkpoint.pendingBreach ?? undefined)
+    this.lastRegimeCandleTime = checkpointInteger(checkpoint.lastRegimeCandleTime, 'lastRegimeCandleTime', -1)
+    this.lastZoneCandleTime = checkpointInteger(checkpoint.lastZoneCandleTime, 'lastZoneCandleTime', -1)
+    this.lastEventCandleTime = checkpointInteger(checkpoint.lastEventCandleTime, 'lastEventCandleTime', -1)
+    this.riskDay = checkpointInteger(checkpoint.riskDay, 'riskDay', -1)
+    this.dailyLossUsedR = checkpointNumber(checkpoint.dailyLossUsedR, 'dailyLossUsedR')
+    this.consecutiveLosses = checkpointInteger(checkpoint.consecutiveLosses, 'consecutiveLosses')
+    this.detectedEvents = checkpointInteger(checkpoint.detectedEvents, 'detectedEvents')
+    this.enteredTrades = checkpointInteger(checkpoint.enteredTrades, 'enteredTrades')
+    this.exitedTrades = checkpointInteger(checkpoint.exitedTrades, 'exitedTrades')
+    this.expiredEvents = checkpointInteger(checkpoint.expiredEvents, 'expiredEvents')
+    for (const type of Object.keys(this.detectedByType) as ScalpPriceEvent['type'][]) {
+      this.detectedByType[type] = checkpointInteger(detectedByType[type], `detectedByType.${type}`)
+    }
+    this.eventRejections.clear()
+    for (const [eventId, reasons] of rejections) this.eventRejections.set(eventId, reasons)
+  }
 
   statistics() {
     return {
@@ -241,6 +367,7 @@ export class ScalpHistoricalEvaluator {
       this.expiredEvents += 1
       this.event = undefined
       this.eventZone = undefined
+      this.eventRegime = undefined
     }
 
     const entry = this.evaluateArmedEvent(context, oneMinute)
@@ -306,6 +433,7 @@ export class ScalpHistoricalEvaluator {
     this.position = undefined
     this.event = undefined
     this.eventZone = undefined
+    this.eventRegime = undefined
     this.exitedTrades += 1
     return decision
   }
@@ -370,6 +498,28 @@ export class ScalpHistoricalEvaluator {
       reasonCodes: ['EXECUTION_TRIGGERED'],
       featureSnapshot: execution.featureSnapshot,
     }).event
+    const signalId = `${triggered.id}:entry:${context.decisionTime}`
+    if (this.recordHistoricalRiskEntry) {
+      if (!this.eventRegime || this.eventRegime.id !== triggered.regimeId) {
+        throw new Error(`Scalp Event ${triggered.id} is missing its frozen arm-time Regime`)
+      }
+      this.recordHistoricalRiskEntry({
+        entrySignalId: signalId,
+        family: 'scalp',
+        object: { model: 'PRICE_EVENT', id: triggered.id },
+        side,
+        entryPrice: { source: 'DECISION_CANDLE_CLOSE', price: entryPrice },
+        initialStop: stop,
+        initialTarget: structuralTarget.price,
+        riskDistance,
+        riskR: risk.riskR,
+        scalp: {
+          eventType: triggered.type,
+          grade,
+          regime: { ...this.eventRegime },
+        },
+      })
+    }
     this.event = triggered
     this.eventRejections.delete(triggered.id)
     this.position = {
@@ -386,7 +536,7 @@ export class ScalpHistoricalEvaluator {
     }
     this.enteredTrades += 1
     return {
-      signalId: `${triggered.id}:entry:${context.decisionTime}`,
+      signalId,
       decisionId: `${triggered.id}:decision:entry:${context.decisionTime}`,
       object: { model: 'PRICE_EVENT', id: triggered.id },
       action: 'ENTER',
@@ -521,6 +671,10 @@ export class ScalpHistoricalEvaluator {
       featureSnapshot: accepted.decision.featureSnapshot,
     }).event
     this.eventZone = zone
+    this.eventRegime = {
+      id: this.regime.regime.id,
+      type: this.regime.regime.type,
+    }
     this.pendingBreach = undefined
     this.detectedEvents += 1
     this.detectedByType[accepted.type] += 1

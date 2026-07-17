@@ -51,9 +51,7 @@ async function fetchTimeframe(options: {
   const bar = OKX_BARS[options.timeframe]
   if (!bar) throw new Error(`unsupported OKX historical timeframe ${options.timeframe}`)
   const { duration } = strategyTimeframeMilliseconds(options.timeframe)
-  if (options.startTime % duration !== 0 || options.endTime % duration !== 0) {
-    throw new Error(`${options.timeframe} history boundaries must align to the timeframe`)
-  }
+  const alignedStartTime = Math.floor(options.startTime / duration) * duration
   const byTime = new Map<number, Candle>()
   let cursor = options.endTime
   let priorOldest = Number.POSITIVE_INFINITY
@@ -78,12 +76,12 @@ async function fetchTimeframe(options: {
       const candle = normalizeRow(row, options.timeframe)
       if (!candle) continue
       oldest = Math.min(oldest, candle.time)
-      if (candle.time >= options.startTime && candle.time + duration <= options.endTime) {
+      if (candle.time >= alignedStartTime && candle.time + duration <= options.endTime) {
         byTime.set(candle.time, candle)
       }
     }
     if (!Number.isFinite(oldest)) throw new Error(`OKX historical ${options.timeframe} page contained no closed candles`)
-    if (oldest <= options.startTime) break
+    if (oldest <= alignedStartTime) break
     if (oldest >= priorOldest) throw new Error(`OKX historical ${options.timeframe} pagination did not move backward`)
     priorOldest = oldest
     cursor = oldest
@@ -91,6 +89,13 @@ async function fetchTimeframe(options: {
 
   const candles = [...byTime.values()].sort((left, right) => left.time - right.time)
   if (candles.length === 0) throw new Error(`OKX returned no closed ${options.timeframe} candles in the requested window`)
+  const expectedLastOpenTime = Math.floor(options.endTime / duration) * duration - duration
+  if (candles[0]!.time !== alignedStartTime) {
+    throw new Error(`OKX historical ${options.timeframe} does not cover the requested start`)
+  }
+  if (candles.at(-1)!.time !== expectedLastOpenTime) {
+    throw new Error(`OKX historical ${options.timeframe} does not cover the requested end`)
+  }
   return candles
 }
 

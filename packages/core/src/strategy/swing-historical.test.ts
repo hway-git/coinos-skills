@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Candle } from '@helix/contracts/market'
+import type { StrategyHistoricalSwingRiskTraceEntry } from '@helix/contracts/strategy'
 import type {
   SwingDailyMarketContextDecision,
   SwingLocationCandidate,
@@ -85,7 +86,8 @@ test('produces deterministic Swing trades and permits repeated entries only unde
     },
   })
   const run = () => {
-    const evaluator = new SwingHistoricalEvaluator(config)
+    const riskEntries: StrategyHistoricalSwingRiskTraceEntry[] = []
+    const evaluator = new SwingHistoricalEvaluator(config, (entry) => riskEntries.push(entry))
     const artifact = runHistoricalStrategy({
       dataset,
       identity: {
@@ -100,11 +102,15 @@ test('produces deterministic Swing trades and permits repeated entries only unde
       registeredReasonCodes: ['EXECUTION_TRIGGERED', 'STOP_HIT', 'TARGET_HIT', 'THESIS_INVALIDATED'],
       evaluate: evaluator.evaluate,
     })
-    return { artifact, statistics: evaluator.statistics() }
+    return { artifact, riskEntries, statistics: evaluator.statistics() }
   }
   const first = run()
   const second = run()
   assert.ok(first.artifact.signals.length >= 2, JSON.stringify(first.statistics))
+  assert.equal(
+    first.riskEntries.length,
+    first.artifact.signals.filter((signal) => signal.action === 'ENTER').length,
+  )
   assert.deepEqual(first, second)
   const openByThesis = new Map<string, number>()
   const activeTheses = new Set<string>()
@@ -187,10 +193,14 @@ test('invalidates an active Thesis on its closed 4H condition before any positio
     expiresAt: 14 * 24 * 60 * 60 * 1000,
     reasonCodes: ['THESIS_CREATED'],
   })
-  const state = evaluator as unknown as { thesis?: SwingTradeThesis }
+  const state = evaluator as unknown as {
+    thesis?: SwingTradeThesis
+    thesisContext?: StrategyHistoricalSwingRiskTraceEntry['swing']['context']
+  }
   state.thesis = transitionSwingTradeThesis(candidate, {
     toState: 'ACTIVE', occurredAt: 0, reasonCodes: ['THESIS_ACTIVATED'],
   }).thesis
+  state.thesisContext = { id: 'context-1', state: 'RANGE', bias: 'NEUTRAL' }
   const fifteenMinute: Candle = {
     time: 4 * 60 * 60 * 1000 - fifteenMinutes,
     open: 96,
@@ -211,6 +221,7 @@ test('invalidates an active Thesis on its closed 4H condition before any positio
 
   assert.deepEqual(decisions, [])
   assert.equal(state.thesis?.state, 'INVALIDATED')
+  assert.equal(state.thesisContext, undefined)
   assert.equal(evaluator.statistics().invalidatedBeforeFirstEntry, 1)
 })
 
@@ -314,4 +325,110 @@ test('deduplicates evaluated entry gate reasons by Thesis and counts pre-entry e
     candles: { '15m': [fifteenMinute[0]!], '1h': [], '4h': [], '1d': [] },
   })
   assert.equal(expiringEvaluator.statistics().expiredBeforeFirstEntry, 1)
+})
+
+test('freezes creation-time Context through ENTER and clears it when the Thesis closes', () => {
+  const riskEntries: StrategyHistoricalSwingRiskTraceEntry[] = []
+  const evaluator = new SwingHistoricalEvaluator(config, (entry) => riskEntries.push(entry))
+  const source = location({ score: 100 })
+  const target = location({
+    id: 'target-location',
+    direction: 'SHORT',
+    boundaries: { lower: 110, upper: 111 },
+  })
+  const internal = evaluator as unknown as {
+    context?: SwingDailyMarketContextDecision
+    locations: SwingLocationCandidate[]
+    thesis?: SwingTradeThesis
+    thesisContext?: StrategyHistoricalSwingRiskTraceEntry['swing']['context']
+    createThesis(decision: HistoricalDecisionContext, candles: readonly Candle[]): void
+  }
+  internal.context = {
+    context: {
+      id: 'context-at-creation', symbol: 'BTC/USDT:USDT', daily: 'RANGE', h4: 'RANGE',
+      reasonCodes: ['DAILY_CONTEXT_RANGE'], observedAt: 0,
+    },
+    state: 'RANGE',
+    bias: 'NEUTRAL',
+    score: 70,
+    reasonCodes: ['DAILY_CONTEXT_RANGE'],
+    featureSnapshot: {},
+  }
+  internal.locations = [source, target]
+  const fourHourly = baseCandles(config.location.atrPeriod + 1)
+  const createdAt = fourHourly.at(-1)!.time + fifteenMinutes
+  internal.createThesis({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '15m',
+    decisionTime: createdAt,
+    sourceCandle: fourHourly.at(-1)!,
+    candles: { '15m': [], '1h': [], '4h': fourHourly, '1d': [] },
+  }, fourHourly)
+  assert.ok(internal.thesis)
+  const withEvidence = appendSwingEvidence(internal.thesis, {
+    id: `${internal.thesis.id}:evidence:entry`,
+    thesisId: internal.thesis.id,
+    type: 'DIRECTIONAL_PROGRESS',
+    time: createdAt,
+    direction: 'LONG',
+    effect: 'SUPPORTING',
+    scoreDelta: 10,
+    reasonCodes: ['EVIDENCE_STRENGTHENED'],
+    featureSnapshot: {},
+  })
+  internal.thesis = transitionSwingTradeThesis(withEvidence, {
+    toState: 'ENTRY_ELIGIBLE', occurredAt: createdAt, reasonCodes: ['ENTRY_ELIGIBLE'],
+  }).thesis
+
+  internal.context = {
+    context: {
+      id: 'context-after-creation', symbol: 'BTC/USDT:USDT', daily: 'UP', h4: 'UP',
+      reasonCodes: ['DAILY_CONTEXT_BULLISH_TREND'], observedAt: createdAt,
+    },
+    state: 'BULLISH_TREND',
+    bias: 'BULLISH',
+    score: 95,
+    reasonCodes: ['DAILY_CONTEXT_BULLISH_TREND'],
+    featureSnapshot: {},
+  }
+  const fifteenMinute = Array.from({ length: 15 }, (_, index): Candle => ({
+    time: createdAt - (14 - index) * fifteenMinutes,
+    open: 100.5,
+    high: 100.7,
+    low: 100.3,
+    close: 100.5,
+    volume: 100,
+  }))
+  fifteenMinute[14] = {
+    time: createdAt, open: 100.5, high: 101.3, low: 100.2, close: 101.2, volume: 100,
+  }
+  const entryDecisionTime = createdAt + fifteenMinutes
+  const entryDecisions = evaluator.evaluate({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '15m',
+    decisionTime: entryDecisionTime,
+    sourceCandle: fifteenMinute.at(-1)!,
+    candles: { '15m': fifteenMinute, '1h': [], '4h': [], '1d': [] },
+  })
+
+  assert.equal(entryDecisions[0]?.action, 'ENTER')
+  assert.equal(riskEntries.length, 1)
+  assert.deepEqual(riskEntries[0]!.swing.context, {
+    id: 'context-at-creation', state: 'RANGE', bias: 'NEUTRAL',
+  })
+  assert.equal(riskEntries[0]!.swing.stage, 'CONFIRMED')
+
+  const exitCandle: Candle = {
+    time: entryDecisionTime, open: 101.2, high: 111.2, low: 101, close: 111, volume: 100,
+  }
+  const exitDecisions = evaluator.evaluate({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '15m',
+    decisionTime: entryDecisionTime + fifteenMinutes,
+    sourceCandle: exitCandle,
+    candles: { '15m': [exitCandle], '1h': [], '4h': [], '1d': [] },
+  })
+  assert.equal(exitDecisions[0]?.action, 'EXIT')
+  assert.equal(internal.thesis?.state, 'CLOSED')
+  assert.equal(internal.thesisContext, undefined)
 })

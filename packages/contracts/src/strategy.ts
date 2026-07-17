@@ -13,6 +13,36 @@ export type StrategyTimeframeIdentity = {
   timeframe: string
 }
 
+export type StrategyWalkForwardPolicy = {
+  schemaVersion: 'helix.walk-forward-policy/v1'
+  id: string
+  version: string
+  strategyId: string
+  strategyVersion: string
+  policyPath: string
+  policyHash: string
+  plan: {
+    foldCount: number
+    entryWindowMs: number
+    observationTailMs: number
+    executionScenarios: StrategyWalkForwardExecutionScenario[]
+  }
+  gates: {
+    censoredEntries: 'reject'
+    minimumTotalTrades: number
+    minimumActiveFoldRatio: number
+    minimumPositiveFoldRatio: number
+    minimumExpectancyR: number
+    minimumProfitFactor: number
+    maximumDrawdownR: number
+    segmentStability: {
+      dimensions: string[]
+      minimumTradesPerSegment: number
+      minimumStableSegmentRatio: number
+    }
+  }
+}
+
 export type StrategyManifestIdentity = {
   schemaVersion: 'helix.strategy/v1'
   id: string
@@ -27,6 +57,7 @@ export type StrategyManifestIdentity = {
   requiredEngineCapabilities: string[]
   capabilityConfigurations: Record<string, unknown>
   reasonCodes: string[]
+  walkForwardPolicy?: StrategyWalkForwardPolicy | null
 }
 
 export type EngineCapabilityIdentity = {
@@ -112,6 +143,97 @@ export type StrategySignalArtifact = StrategySignalArtifactPayload & Readonly<{
   artifactHash: string
 }>
 
+export const STRATEGY_HISTORICAL_RISK_TRACE_SCHEMA_VERSION = 'helix.historical-risk-trace/v1' as const
+
+type StrategyHistoricalRiskTraceEntryCommon = Readonly<{
+  entrySignalId: string
+  side: StrategyPositionSide
+  entryPrice: Readonly<{
+    source: 'DECISION_CANDLE_CLOSE'
+    price: number
+  }>
+  initialStop: number
+  initialTarget: number
+  riskDistance: number
+  riskR: number
+}>
+
+export type StrategyHistoricalScalpRiskTraceEntry = StrategyHistoricalRiskTraceEntryCommon & Readonly<{
+  family: 'scalp'
+  object: Readonly<{
+    model: 'PRICE_EVENT'
+    id: string
+  }>
+  scalp: Readonly<{
+    eventType: ScalpPriceEventType
+    grade: ScalpGrade
+    regime: Readonly<{
+      id: string
+      type: ScalpMarketRegimeType
+    }>
+  }>
+}>
+
+export type StrategyHistoricalSwingRiskTraceEntry = StrategyHistoricalRiskTraceEntryCommon & Readonly<{
+  family: 'swing'
+  object: Readonly<{
+    model: 'TRADE_THESIS'
+    id: string
+  }>
+  swing: Readonly<{
+    stage: SwingExecutionStage
+    context: Readonly<{
+      id: string
+      state: SwingDailyMarketState
+      bias: SwingContextBias
+    }>
+  }>
+}>
+
+export type StrategyHistoricalRiskTraceEntry =
+  | StrategyHistoricalScalpRiskTraceEntry
+  | StrategyHistoricalSwingRiskTraceEntry
+
+export type StrategyHistoricalRiskTracePayload = Readonly<{
+  schemaVersion: typeof STRATEGY_HISTORICAL_RISK_TRACE_SCHEMA_VERSION
+  signalArtifactHash: string
+  entries: readonly StrategyHistoricalRiskTraceEntry[]
+}>
+
+export type StrategyHistoricalRiskTrace = StrategyHistoricalRiskTracePayload & Readonly<{
+  traceHash: string
+}>
+
+export const STRATEGY_SIGNAL_BATCH_SCHEMA_VERSION = 'helix.signal-batch/v1' as const
+
+export type StrategySignalPosition = Readonly<{
+  object: StrategySignalObjectReference
+  side: StrategyPositionSide
+  entrySignalId: string
+}>
+
+export type StrategySignalBatchPayload = Readonly<{
+  schemaVersion: typeof STRATEGY_SIGNAL_BATCH_SCHEMA_VERSION
+  deploymentHash: string
+  batchSequence: number
+  previousBatchHash: string | null
+  previousDecisionStateHash: string | null
+  evaluatorStateHash: string
+  decisionStateHash: string
+  identity: Readonly<StrategyDecisionIdentity>
+  strategyLifecycle: StrategyLifecycle
+  objectModel: StrategyObjectModel
+  symbol: string
+  baseTimeframe: string
+  positionBefore: StrategySignalPosition | null
+  positionAfter: StrategySignalPosition | null
+  signal: StrategySignalRecord
+}>
+
+export type StrategySignalBatch = StrategySignalBatchPayload & Readonly<{
+  batchHash: string
+}>
+
 export const STRATEGY_HISTORICAL_DATASET_SCHEMA_VERSION = 'helix.market-dataset/v1' as const
 
 export type StrategyHistoricalDatasetSource = Readonly<{
@@ -166,4 +288,103 @@ export type StrategyReplayComparison = {
   code: 'MATCH' | 'NON_DETERMINISTIC_REPLAY'
   mismatches: StrategyReplayMismatch[]
 }
+
+export const STRATEGY_WALK_FORWARD_PLAN_SCHEMA_VERSION = 'helix.walk-forward-plan/v1' as const
+export const STRATEGY_WALK_FORWARD_RUN_SCHEMA_VERSION = 'helix.walk-forward-run/v1' as const
+
+export type StrategyWalkForwardFold = Readonly<{
+  sequence: number
+  entryWindowStartTime: number
+  entryWindowEndTime: number
+  observationEndTime: number
+}>
+
+export type StrategyWalkForwardExecutionScenario = Readonly<{
+  id: string
+  fee: number
+}>
+
+export type StrategyWalkForwardCandidate = Readonly<{
+  strategyId: string
+  strategyVersion: string
+  strategyRepoCommit: string
+  strategyConfigHash: string
+  engineCommit: string
+  lifecycle: StrategyLifecycle
+  objectModel: StrategyObjectModel
+}>
+
+export type StrategyWalkForwardPlanPayload = Readonly<{
+  schemaVersion: typeof STRATEGY_WALK_FORWARD_PLAN_SCHEMA_VERSION
+  mode: 'fixed_candidate'
+  candidate: StrategyWalkForwardCandidate
+  walkForwardPolicy?: Readonly<StrategyWalkForwardPolicy>
+  sourceDataset: Readonly<{
+    datasetHash: string
+    source: StrategyHistoricalDatasetSource
+    capturedThrough: number
+  }>
+  baseTimeframe: string
+  requiredTimeframes: readonly string[]
+  activationDecisionTime: number
+  warmupDurationMs: number
+  folds: readonly StrategyWalkForwardFold[]
+  executionScenarios: readonly StrategyWalkForwardExecutionScenario[]
+}>
+
+export type StrategyWalkForwardPlan = StrategyWalkForwardPlanPayload & Readonly<{
+  planHash: string
+}>
+
+export type StrategyWalkForwardCensoredEntry = Readonly<{
+  tradeId: string
+  entrySignalId: string
+  decisionId: string
+  object: StrategySignalObjectReference
+  side: StrategyPositionSide
+  sourceCandleOpenTime: number
+  decisionTime: number
+  reason: 'NO_EXIT_BY_OBSERVATION_END' | 'EXIT_AT_OBSERVATION_END'
+}>
+
+export type StrategyWalkForwardRunFold = Readonly<{
+  sequence: number
+  entryWindowStartTime: number
+  entryWindowEndTime: number
+  observationEndTime: number
+  datasetFile: string
+  datasetHash: string
+  decisionArtifactFile: string
+  decisionArtifactHash: string
+  decisionRiskTraceFile: string
+  decisionRiskTraceHash: string
+  replayArtifactFile: string
+  replayArtifactHash: string
+  executionArtifactFile: string
+  executionArtifactHash: string
+  executionRiskTraceFile: string
+  executionRiskTraceHash: string
+  tradeIds: readonly string[]
+  censoredEntries: readonly StrategyWalkForwardCensoredEntry[]
+  statistics: Readonly<{
+    decisionSignals: number
+    entriesInWindow: number
+    completedTrades: number
+    censoredEntries: number
+    evaluator: Readonly<Record<string, unknown>>
+  }>
+}>
+
+export type StrategyWalkForwardRunPayload = Readonly<{
+  schemaVersion: typeof STRATEGY_WALK_FORWARD_RUN_SCHEMA_VERSION
+  planFile: string
+  planHash: string
+  folds: readonly StrategyWalkForwardRunFold[]
+}>
+
+export type StrategyWalkForwardRun = StrategyWalkForwardRunPayload & Readonly<{
+  runHash: string
+}>
 import type { Candle } from './market'
+import type { ScalpGrade, ScalpMarketRegimeType, ScalpPriceEventType } from './scalp'
+import type { SwingContextBias, SwingDailyMarketState, SwingExecutionStage } from './swing'

@@ -4,6 +4,8 @@ import { resolve } from 'node:path'
 import type {
   FreqtradeBacktestRequest,
   FreqtradeBacktestResult,
+  FreqtradeDeploymentBlocker,
+  FreqtradeDeploymentCandidate,
   FreqtradeDryRunDeployRequest,
   FreqtradeDryRunDeployResult,
   FreqtradeEmergencyStopResult,
@@ -21,6 +23,8 @@ const DEFAULT_TIMEOUT_MS = 18_000
 const BACKTEST_TIMEOUT_MS = 10 * 60_000
 const DEPLOY_TIMEOUT_MS = 10 * 60_000
 const FREQTRADE_SKILL_DIR = resolve(HELIX_REPO_ROOT, 'skills', 'helix-freqtrade')
+const HELIX_SIGNAL_STRATEGY = 'HelixSignalStrategy'
+const SIGNAL_ARTIFACT_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/
 
 type ActionResult<T> =
   | { ok: true; data: T }
@@ -36,6 +40,7 @@ type DaemonInfo = {
   max_open_trades?: number | string
   stake_currency?: string
   pair_whitelist?: string[]
+  signal_artifact_hash?: string
   open_trades_count?: number
 }
 
@@ -84,9 +89,11 @@ type BacktestResults = {
     start?: string
     end?: string
     trades?: number | string | null
+    profitRatio?: number | string | null
     profitPct?: number | string | null
     profitAbs?: number | string | null
     winRate?: number | string | null
+    maxDrawdownRatio?: number | string | null
     drawdown?: number | string | null
   }>
   evidence?: Array<{
@@ -99,6 +106,29 @@ type BacktestResults = {
     createdAt?: string
     current?: boolean
     fingerprint?: string
+    metrics?: {
+      trades?: number | string | null
+      profitRatio?: number | string | null
+      profitPct?: number | string | null
+      profitAbs?: number | string | null
+      winRate?: number | string | null
+      maxDrawdownRatio?: number | string | null
+      drawdown?: number | string | null
+    }
+    signalArtifact?: {
+      artifactHash?: string
+      strategyLifecycle?: string
+      identity?: {
+        strategyId?: string
+        strategyVersion?: string
+      }
+      symbol?: string
+      baseTimeframe?: string
+    } | null
+    walkForwardReport?: {
+      reportHash?: string
+      reportFile?: string
+    } | null
   }>
 }
 
@@ -111,6 +141,21 @@ type BacktestOutput = {
 
 type LogsInfo = {
   logs?: string
+}
+
+type RuntimeStatusOutput = {
+  forward_runtime?: {
+    deployment_hash?: string
+    pid?: number | null
+    running?: boolean
+    state?: string
+    heartbeat_age_ms?: number | null
+    last_decision_time?: number | null
+    last_market_snapshot_id?: string | null
+    last_batch_hash?: string | null
+    batches?: number
+    error?: string | null
+  } | null
 }
 
 type StrategyCreateOutput = {
@@ -130,13 +175,32 @@ type DeployOutput = {
   max_open_trades?: number | string
   note?: string
   warning?: string | null
+  signal_artifact?: { hash?: string } | null
+  walk_forward_report?: { hash?: string; file?: string } | null
+  forward_runtime?: {
+    deployment_hash?: string
+    activated_at?: number
+    worker_pid?: number
+    state?: string
+  } | null
 }
 
 type EmergencyStopOutput = {
   success?: boolean
   open_trades_before?: number | null
+  open_trades_after?: number | null
   force_exit_error?: string | null
   stop_error?: string | null
+}
+
+type FreqtradeDeployRequestInput = Partial<Record<keyof FreqtradeDryRunDeployRequest, unknown>>
+
+export type NormalizedFreqtradeDeployRequest = {
+  strategy: string
+  signalArtifactHash?: string
+  walkForwardReportFile?: string
+  pairs?: string[]
+  maxOpenTrades?: number
 }
 
 export type FreqtradeReconciliationState = {
@@ -302,8 +366,37 @@ function normalizeStrategyCreateRequest(input: Partial<FreqtradeStrategyCreateRe
   }
 }
 
-function normalizeDryRunDeployRequest(input: Partial<FreqtradeDryRunDeployRequest>): FreqtradeDryRunDeployRequest {
-  const strategy = stringParam(input.strategy)
+export function normalizeFreqtradeDeployRequest(input: FreqtradeDeployRequestInput): NormalizedFreqtradeDeployRequest {
+  const requestedStrategy = stringParam(input.strategy)
+  let signalArtifactHash: string | undefined
+  if (input.signalArtifactHash !== undefined) {
+    if (typeof input.signalArtifactHash !== 'string'
+      || !SIGNAL_ARTIFACT_HASH_PATTERN.test(input.signalArtifactHash)) {
+      throw new Error('signalArtifactHash 必须是 sha256:<64 位小写十六进制>')
+    }
+    signalArtifactHash = input.signalArtifactHash
+  }
+
+  if (signalArtifactHash && requestedStrategy && requestedStrategy !== HELIX_SIGNAL_STRATEGY) {
+    throw new Error(`signalArtifactHash 只能用于 ${HELIX_SIGNAL_STRATEGY}`)
+  }
+  if (!signalArtifactHash && requestedStrategy === HELIX_SIGNAL_STRATEGY) {
+    throw new Error(`${HELIX_SIGNAL_STRATEGY} 部署必须选择 exact signalArtifactHash`)
+  }
+  let walkForwardReportFile: string | undefined
+  if (input.walkForwardReportFile !== undefined) {
+    if (typeof input.walkForwardReportFile !== 'string' || !input.walkForwardReportFile.trim()) {
+      throw new Error('walkForwardReportFile 必须是非空文件路径')
+    }
+    walkForwardReportFile = input.walkForwardReportFile.trim()
+  }
+  if (signalArtifactHash && !walkForwardReportFile) {
+    throw new Error(`${HELIX_SIGNAL_STRATEGY} 部署必须选择 exact walkForwardReportFile`)
+  }
+  if (!signalArtifactHash && walkForwardReportFile) {
+    throw new Error(`walkForwardReportFile 只能用于 ${HELIX_SIGNAL_STRATEGY}`)
+  }
+  const strategy = signalArtifactHash ? HELIX_SIGNAL_STRATEGY : requestedStrategy
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(strategy)) {
     throw new Error('strategy 必须是有效的策略类名')
   }
@@ -315,14 +408,128 @@ function normalizeDryRunDeployRequest(input: Partial<FreqtradeDryRunDeployReques
 
   return {
     strategy,
+    signalArtifactHash,
+    walkForwardReportFile,
     pairs: pairs.length > 0 ? pairs : undefined,
     maxOpenTrades,
+  }
+}
+
+export function buildFreqtradeDeployCliParams(
+  params: NormalizedFreqtradeDeployRequest,
+  dryRun: boolean,
+): Record<string, unknown> {
+  return {
+    strategy: params.strategy,
+    dry_run: dryRun,
+    ...(params.signalArtifactHash ? { signal_artifact_hash: params.signalArtifactHash } : {}),
+    ...(params.walkForwardReportFile ? { walk_forward_report: params.walkForwardReportFile } : {}),
+    ...(!params.signalArtifactHash && params.pairs ? { pairs: params.pairs } : {}),
+    ...(params.maxOpenTrades !== undefined ? { max_open_trades: params.maxOpenTrades } : {}),
   }
 }
 
 function numberFrom(value: unknown) {
   const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN
   return Number.isFinite(n) ? n : undefined
+}
+
+function deploymentBlockers(
+  evidence: NonNullable<BacktestResults['evidence']>[number],
+  live: boolean,
+): FreqtradeDeploymentBlocker[] {
+  const blockers: FreqtradeDeploymentBlocker[] = []
+  const trades = numberFrom(evidence.metrics?.trades)
+  const profitRatio = numberFrom(evidence.metrics?.profitRatio ?? evidence.metrics?.profitPct)
+  if (evidence.current !== true) blockers.push('EVIDENCE_STALE_OR_INVALID')
+  if (trades == null || trades < 1) blockers.push('NO_TRADES')
+  if (profitRatio == null || profitRatio <= 0) blockers.push('NON_POSITIVE_PROFIT')
+
+  const lifecycle = evidence.signalArtifact?.strategyLifecycle
+  if (evidence.signalArtifact) {
+    if (!evidence.walkForwardReport?.reportHash || !evidence.walkForwardReport?.reportFile) {
+      blockers.push('WALK_FORWARD_REPORT_MISSING')
+    }
+    const allowed = live
+      ? lifecycle === 'canary' || lifecycle === 'production'
+      : lifecycle === 'shadow' || lifecycle === 'canary' || lifecycle === 'production'
+    if (!allowed) blockers.push(live ? 'LIFECYCLE_NOT_LIVE' : 'LIFECYCLE_NOT_DRY_RUN')
+    if (live) blockers.push('FORWARD_LIVE_UNAVAILABLE')
+  }
+  return blockers
+}
+
+export function buildFreqtradeDeploymentCandidates(results: BacktestResults | null): FreqtradeDeploymentCandidate[] {
+  const candidates: FreqtradeDeploymentCandidate[] = []
+  const seen = new Set<string>()
+  for (const evidence of results?.evidence ?? []) {
+    const strategy = stringParam(evidence.strategy)
+    if (!strategy) continue
+    if (strategy === HELIX_SIGNAL_STRATEGY && !evidence.signalArtifact) continue
+    const artifactHash = evidence.signalArtifact?.artifactHash
+    if (evidence.signalArtifact && (!artifactHash || !SIGNAL_ARTIFACT_HASH_PATTERN.test(artifactHash))) continue
+    const key = artifactHash || `strategy:${strategy}`
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    const dryRunBlockers = deploymentBlockers(evidence, false)
+    const liveBlockers = deploymentBlockers(evidence, true)
+    const signalArtifact = evidence.signalArtifact && artifactHash ? {
+      artifactHash,
+      strategyId: stringParam(evidence.signalArtifact.identity?.strategyId) || '--',
+      strategyVersion: stringParam(evidence.signalArtifact.identity?.strategyVersion) || '--',
+      lifecycle: stringParam(evidence.signalArtifact.strategyLifecycle) || '--',
+      symbol: stringParam(evidence.signalArtifact.symbol) || '--',
+      baseTimeframe: stringParam(evidence.signalArtifact.baseTimeframe) || '--',
+    } : null
+    const walkForwardReport = signalArtifact
+      && typeof evidence.walkForwardReport?.reportHash === 'string'
+      && typeof evidence.walkForwardReport?.reportFile === 'string'
+      ? {
+          reportHash: evidence.walkForwardReport.reportHash,
+          reportFile: evidence.walkForwardReport.reportFile,
+        }
+      : null
+    candidates.push({
+      key,
+      strategy,
+      evidenceId: stringParam(evidence.id),
+      createdAt: stringParam(evidence.createdAt),
+      current: evidence.current === true,
+      signalArtifact,
+      walkForwardReport,
+      pairs: signalArtifact ? [signalArtifact.symbol] : normalizePairs(evidence.pairs),
+      metrics: {
+        trades: numberFrom(evidence.metrics?.trades) ?? null,
+        profitRatio: numberFrom(evidence.metrics?.profitRatio ?? evidence.metrics?.profitPct) ?? null,
+        profitAbs: numberFrom(evidence.metrics?.profitAbs) ?? null,
+        winRate: numberFrom(evidence.metrics?.winRate) ?? null,
+        drawdownRatio: numberFrom(evidence.metrics?.maxDrawdownRatio ?? evidence.metrics?.drawdown) ?? null,
+      },
+      dryRun: { allowed: dryRunBlockers.length === 0, blockers: dryRunBlockers },
+      live: { allowed: liveBlockers.length === 0, blockers: liveBlockers },
+    })
+  }
+  return candidates
+}
+
+function deploymentCandidateError(
+  results: BacktestResults,
+  params: NormalizedFreqtradeDeployRequest,
+  live: boolean,
+) {
+  const candidates = buildFreqtradeDeploymentCandidates(results)
+  const key = params.signalArtifactHash || `strategy:${params.strategy}`
+  const candidate = candidates.find((item) => item.key === key)
+  if (!candidate) return '找不到 exact deployment evidence，请重新回测后再部署'
+  if (params.signalArtifactHash && params.pairs && (
+    params.pairs.length !== candidate.pairs.length
+    || params.pairs.some((pair, index) => pair !== candidate.pairs[index])
+  )) {
+    return `Signal Artifact 的交易对固定为 ${candidate.pairs.join(', ')}`
+  }
+  const gate = live ? candidate.live : candidate.dryRun
+  return gate.allowed ? null : `部署被 evidence 阻断: ${gate.blockers.join(', ')}`
 }
 
 function formatAmount(value: unknown) {
@@ -410,7 +617,7 @@ function formatPercent(value: unknown, signed = false) {
 }
 
 function formatBacktestProfit(item: NonNullable<BacktestResults['results']>[number]) {
-  const pct = formatPercent(item.profitPct, true)
+  const pct = formatPercent(item.profitRatio ?? item.profitPct, true)
   const abs = formatAmount(item.profitAbs)
   if (pct === '--') return abs
   if (abs === '--') return pct
@@ -445,7 +652,9 @@ function strategyRows(
     status: strategy === current ? '当前' : '可用',
     timeframe: strategy === current ? timeframe || '--' : '--',
     mode: strategy === current ? formatMode(dryRun) : '--',
-    verification: backtestedStrategies.has(strategy) ? '已回测' : '待回测',
+    verification: strategy === HELIX_SIGNAL_STRATEGY
+      ? '按 Artifact'
+      : backtestedStrategies.has(strategy) ? '已回测' : '待回测',
   }))
 }
 
@@ -463,7 +672,7 @@ function backtestRows(results: BacktestResults | null): FreqtradeTableRow[] {
     trades: item.trades ?? '--',
     profit: formatBacktestProfit(item),
     win: formatPercent(item.winRate),
-    drawdown: formatPercent(item.drawdown),
+    drawdown: formatPercent(item.maxDrawdownRatio ?? item.drawdown),
     verification: evidenceByResult.get(item.file)?.current ? '当前代码' : '需重跑',
     file: item.file || '--',
   }))
@@ -471,12 +680,14 @@ function backtestRows(results: BacktestResults | null): FreqtradeTableRow[] {
 
 function riskRows({
   daemon,
+  forwardRuntime,
   profit,
   sourceStatus,
   daily,
   locks,
 }: {
   daemon: FreqtradeSnapshot['daemon']
+  forwardRuntime: FreqtradeSnapshot['forwardRuntime']
   profit: FreqtradeSnapshot['profit']
   sourceStatus: FreqtradeSnapshot['source']['status']
   daily: DailyInfo | null
@@ -485,25 +696,29 @@ function riskRows({
   const today = daily?.data?.[0]
   const lockCount = numberFrom(locks?.lock_count) ?? locks?.locks?.filter((lock) => lock.active !== false).length ?? 0
   const lockReason = locks?.locks?.find((lock) => lock.active !== false)?.reason
-  return [
+  const rows: FreqtradeTableRow[] = [
     { rule: 'daemon', value: daemon.online ? 'ONLINE' : 'OFFLINE', state: daemon.online ? '正常' : '离线' },
     { rule: 'mode', value: formatMode(daemon.dryRun), state: daemon.dryRun === false ? '实盘' : '只读' },
     { rule: 'strategy', value: daemon.strategy || '--', state: sourceStatus === 'offline' ? '离线' : '已连接' },
     { rule: 'open_trades', value: `${daemon.openTrades} / ${daemon.maxOpenTrades || '--'}`, state: '监测' },
-    { rule: 'risk_per_trade', value: '0.50%', state: '硬上限' },
-    { rule: 'leverage', value: '1x', state: '硬上限' },
     {
       rule: 'daily_loss',
       value: today ? `${formatPercent(today.rel_profit, true)} / ${formatAmount(today.abs_profit)}` : '--',
-      state: '限额 -2.00%',
+      state: '观测值',
     },
-    { rule: 'portfolio_drawdown', value: '8.00% / 30d', state: '保护已启用' },
-    { rule: 'loss_streak', value: '3 losses / 6h', state: '保护已启用' },
-    { rule: 'stale_candle', value: '10m', state: '拒绝入场' },
     { rule: 'pair_locks', value: lockCount, state: lockReason || (lockCount > 0 ? '已锁定' : '无锁') },
     { rule: 'closed_pnl', value: profit.closed, state: '已平仓' },
     { rule: 'total_pnl', value: profit.total, state: '含浮动' },
   ]
+  if (forwardRuntime) {
+    rows.splice(3, 0, {
+      rule: 'forward_worker',
+      value: `${forwardRuntime.state} · ${forwardRuntime.batches} batches`,
+      state: forwardRuntime.error
+        || (forwardRuntime.running ? `${forwardRuntime.heartbeatAgeMs ?? '--'}ms` : '已停止'),
+    })
+  }
+  return rows
 }
 
 function auditRows({
@@ -557,7 +772,7 @@ function auditRows({
 
 export async function getReadOnlyFreqtradeSnapshot(): Promise<FreqtradeSnapshot> {
   const fetchedAt = Date.now()
-  const [daemonInfo, profitInfo, openTrades, tradeHistory, strategyList, backtests, logs, daily, locks] = await Promise.all([
+  const [daemonInfo, profitInfo, openTrades, tradeHistory, strategyList, backtests, logs, daily, locks, runtimeStatus] = await Promise.all([
     runFreqtradeAction<DaemonInfo>('ft.mjs', 'daemon_info'),
     runFreqtradeAction<ProfitInfo>('ft.mjs', 'profit'),
     runFreqtradeAction<unknown[]>('ft.mjs', 'trades_open'),
@@ -567,10 +782,11 @@ export async function getReadOnlyFreqtradeSnapshot(): Promise<FreqtradeSnapshot>
     runFreqtradeAction<LogsInfo>('ft-deploy.mjs', 'logs', { lines: 12 }),
     runFreqtradeAction<DailyInfo>('ft.mjs', 'daily', { count: 2 }),
     runFreqtradeAction<LocksInfo>('ft.mjs', 'locks'),
+    runFreqtradeAction<RuntimeStatusOutput>('ft-deploy.mjs', 'status'),
   ])
 
   const errors = Array.from(new Set(
-    [daemonInfo, profitInfo, openTrades, tradeHistory, strategyList, backtests, logs, daily, locks]
+    [daemonInfo, profitInfo, openTrades, tradeHistory, strategyList, backtests, logs, daily, locks, runtimeStatus]
       .filter((result): result is { ok: false; error: string } => !result.ok)
       .map((result) => result.error),
   ))
@@ -595,6 +811,9 @@ export async function getReadOnlyFreqtradeSnapshot(): Promise<FreqtradeSnapshot>
     maxOpenTrades: daemonData.max_open_trades ?? '--',
     stakeCurrency: daemonData.stake_currency || profitData.stake_currency || 'USDT',
     pairs: normalizePairs(daemonData.pair_whitelist),
+    signalArtifactHash: typeof daemonData.signal_artifact_hash === 'string'
+      ? daemonData.signal_artifact_hash
+      : null,
     version: daemonData.version || '--',
   }
   const profit: FreqtradeSnapshot['profit'] = {
@@ -603,6 +822,21 @@ export async function getReadOnlyFreqtradeSnapshot(): Promise<FreqtradeSnapshot>
     floating: formatAmount(floating),
     closedTrades: profitData.closed_trade_count ?? '--',
   }
+  const runtimeData = runtimeStatus.ok ? runtimeStatus.data.forward_runtime : null
+  const forwardRuntime: FreqtradeSnapshot['forwardRuntime'] = runtimeData ? {
+    deploymentHash: runtimeData.deployment_hash || null,
+    pid: numberFrom(runtimeData.pid) ?? null,
+    running: runtimeData.running === true,
+    state: runtimeData.state || 'unknown',
+    heartbeatAgeMs: numberFrom(runtimeData.heartbeat_age_ms) ?? null,
+    lastDecisionTime: numberFrom(runtimeData.last_decision_time) ?? null,
+    lastMarketSnapshotId: runtimeData.last_market_snapshot_id || null,
+    lastBatchHash: runtimeData.last_batch_hash || null,
+    batches: numberFrom(runtimeData.batches) ?? 0,
+    error: runtimeData.error || null,
+  } : null
+  const forwardError = freqtradeForwardRuntimeError(daemon.strategy, forwardRuntime)
+  if (forwardError && !errors.includes(forwardError)) errors.push(forwardError)
   const sourceStatus: FreqtradeSnapshot['source']['status'] = daemonInfo.ok
     ? errors.length > 0
       ? 'partial'
@@ -616,6 +850,7 @@ export async function getReadOnlyFreqtradeSnapshot(): Promise<FreqtradeSnapshot>
     mode: 'read_only',
     daemon,
     profit,
+    forwardRuntime,
     tables: {
       positions: normalizeOpenTrades(openTrades.ok ? openTrades.data : null),
       history: normalizeTradeHistory(tradeHistory.ok ? tradeHistory.data : null),
@@ -629,6 +864,7 @@ export async function getReadOnlyFreqtradeSnapshot(): Promise<FreqtradeSnapshot>
       backtests: backtestRows(backtests.ok ? backtests.data : null),
       risk: riskRows({
         daemon,
+        forwardRuntime,
         profit,
         sourceStatus,
         daily: daily.ok ? daily.data : null,
@@ -636,6 +872,7 @@ export async function getReadOnlyFreqtradeSnapshot(): Promise<FreqtradeSnapshot>
       }),
       audit: auditRows({ daemon, sourceStatus, errors, logs: logs.ok ? logs.data : null }),
     },
+    deployments: buildFreqtradeDeploymentCandidates(backtests.ok ? backtests.data : null),
     source: {
       name: 'Freqtrade',
       status: sourceStatus,
@@ -649,12 +886,31 @@ export async function getReadOnlyFreqtradeSnapshot(): Promise<FreqtradeSnapshot>
   }
 }
 
+export function freqtradeForwardRuntimeError(
+  strategy: string,
+  runtime: FreqtradeSnapshot['forwardRuntime'],
+) {
+  if (strategy !== HELIX_SIGNAL_STRATEGY) return null
+  if (!runtime) return 'HelixSignalStrategy forward runtime is missing'
+  if (!runtime.running) return runtime.error || `HelixSignalStrategy forward runtime is ${runtime.state}`
+  if (runtime.state !== 'waiting' && runtime.state !== 'ready') {
+    return runtime.error || `HelixSignalStrategy forward runtime is ${runtime.state}`
+  }
+  return null
+}
+
 export async function runReadOnlyFreqtradeBacktest(input: Partial<FreqtradeBacktestRequest>): Promise<ActionResult<FreqtradeBacktestResult>> {
   let params: FreqtradeBacktestRequest
   try {
     params = normalizeBacktestRequest(input)
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : '回测参数不正确' }
+  }
+  if (params.strategy === HELIX_SIGNAL_STRATEGY) {
+    return {
+      ok: false,
+      error: 'HelixSignalStrategy 只能通过绑定 Signal Artifact 与 exact market dataset 的专用回测流程运行',
+    }
   }
 
   const result = await runFreqtradeAction<BacktestOutput>(
@@ -716,10 +972,10 @@ export async function createFreqtradeStrategy(input: Partial<FreqtradeStrategyCr
   }
 }
 
-export async function deployFreqtradeDryRun(input: Partial<FreqtradeDryRunDeployRequest>): Promise<ActionResult<FreqtradeDryRunDeployResult>> {
-  let params: FreqtradeDryRunDeployRequest
+export async function deployFreqtradeDryRun(input: FreqtradeDeployRequestInput): Promise<ActionResult<FreqtradeDryRunDeployResult>> {
+  let params: NormalizedFreqtradeDeployRequest
   try {
-    params = normalizeDryRunDeployRequest(input)
+    params = normalizeFreqtradeDeployRequest(input)
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : '部署参数不正确' }
   }
@@ -727,21 +983,13 @@ export async function deployFreqtradeDryRun(input: Partial<FreqtradeDryRunDeploy
   const backtests = await runFreqtradeAction<BacktestResults>('ft-deploy.mjs', 'backtest_results')
   if (!backtests.ok) return { ok: false, error: `无法确认回测结果: ${backtests.error}` }
 
-  const hasCurrentBacktest = (backtests.data.evidence ?? [])
-    .some((item) => item.strategy === params.strategy && item.current === true)
-  if (!hasCurrentBacktest) {
-    return { ok: false, error: '当前策略代码尚无有效回测，请重新回测后再进行模拟部署' }
-  }
+  const evidenceError = deploymentCandidateError(backtests.data, params, false)
+  if (evidenceError) return { ok: false, error: evidenceError }
 
   const result = await runFreqtradeAction<DeployOutput>(
     'ft-deploy.mjs',
     'deploy',
-    {
-      strategy: params.strategy,
-      dry_run: true,
-      pairs: params.pairs,
-      max_open_trades: params.maxOpenTrades,
-    },
+    buildFreqtradeDeployCliParams(params, true),
     DEPLOY_TIMEOUT_MS,
   )
 
@@ -752,19 +1000,31 @@ export async function deployFreqtradeDryRun(input: Partial<FreqtradeDryRunDeploy
     ok: true,
     data: {
       strategy: result.data.strategy || params.strategy,
+      signalArtifactHash: result.data.signal_artifact?.hash || params.signalArtifactHash,
+      walkForwardReportHash: result.data.walk_forward_report?.hash,
       mode: result.data.mode || '--',
       dryRun: true,
       pairs: result.data.pairs || params.pairs || [],
       maxOpenTrades: numberFrom(result.data.max_open_trades) ?? params.maxOpenTrades,
+      forwardRuntime: result.data.forward_runtime?.deployment_hash
+        && Number.isSafeInteger(result.data.forward_runtime.activated_at)
+        && Number.isSafeInteger(result.data.forward_runtime.worker_pid)
+        ? {
+            deploymentHash: result.data.forward_runtime.deployment_hash,
+            activatedAt: result.data.forward_runtime.activated_at!,
+            workerPid: result.data.forward_runtime.worker_pid!,
+            state: result.data.forward_runtime.state || 'unknown',
+          }
+        : undefined,
       note: result.data.note || 'DRY_RUN strategy deployed',
     },
   }
 }
 
-export async function deployFreqtradeLive(input: Partial<FreqtradeDryRunDeployRequest>): Promise<ActionResult<FreqtradeLiveDeployResult>> {
-  let params: FreqtradeDryRunDeployRequest
+export async function deployFreqtradeLive(input: FreqtradeDeployRequestInput): Promise<ActionResult<FreqtradeLiveDeployResult>> {
+  let params: NormalizedFreqtradeDeployRequest
   try {
-    params = normalizeDryRunDeployRequest(input)
+    params = normalizeFreqtradeDeployRequest(input)
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : '部署参数不正确' }
   }
@@ -772,19 +1032,13 @@ export async function deployFreqtradeLive(input: Partial<FreqtradeDryRunDeployRe
 
   const backtests = await runFreqtradeAction<BacktestResults>('ft-deploy.mjs', 'backtest_results')
   if (!backtests.ok) return { ok: false, error: `无法确认回测结果: ${backtests.error}` }
-  const hasCurrentBacktest = (backtests.data.evidence ?? [])
-    .some((item) => item.strategy === params.strategy && item.current === true)
-  if (!hasCurrentBacktest) return { ok: false, error: '当前策略代码尚无有效回测，拒绝实盘部署' }
+  const evidenceError = deploymentCandidateError(backtests.data, params, true)
+  if (evidenceError) return { ok: false, error: evidenceError }
 
   const result = await runFreqtradeAction<DeployOutput>(
     'ft-deploy.mjs',
     'deploy',
-    {
-      strategy: params.strategy,
-      dry_run: false,
-      pairs: params.pairs,
-      max_open_trades: maxOpenTrades,
-    },
+    buildFreqtradeDeployCliParams({ ...params, maxOpenTrades }, false),
     DEPLOY_TIMEOUT_MS,
     { HELIX_LIVE_AUTHORIZED: '1' },
   )
@@ -795,6 +1049,8 @@ export async function deployFreqtradeLive(input: Partial<FreqtradeDryRunDeployRe
     ok: true,
     data: {
       strategy: result.data.strategy || params.strategy,
+      signalArtifactHash: result.data.signal_artifact?.hash || params.signalArtifactHash,
+      walkForwardReportHash: result.data.walk_forward_report?.hash,
       mode: result.data.mode || '--',
       dryRun: false,
       pairs: result.data.pairs || params.pairs || [],
@@ -805,15 +1061,20 @@ export async function deployFreqtradeLive(input: Partial<FreqtradeDryRunDeployRe
 }
 
 export async function emergencyStopFreqtrade(): Promise<ActionResult<FreqtradeEmergencyStopResult>> {
-  const result = await runFreqtradeAction<EmergencyStopOutput>('ft.mjs', 'emergency_stop', undefined, 60_000)
+  const result = await runFreqtradeAction<EmergencyStopOutput>('ft.mjs', 'emergency_stop', undefined, 70_000)
   if (!result.ok) return result
   return {
     ok: true,
     data: {
       success: result.data.success === true,
+      operationError: null,
       openTradesBefore: numberFrom(result.data.open_trades_before) ?? null,
+      openTradesAfter: numberFrom(result.data.open_trades_after) ?? null,
       forceExitError: result.data.force_exit_error || null,
       stopError: result.data.stop_error || null,
+      reconciliationStatus: null,
+      reconciliationError: null,
+      reconciliationMismatches: [],
     },
   }
 }

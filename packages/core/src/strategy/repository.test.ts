@@ -24,6 +24,37 @@ reason_codes:
 documentation: {}
 `
 
+const walkForwardPolicy = `schema_version: helix.walk-forward-policy/v1
+policy:
+  id: scalp_walk_forward_v1
+  version: 1.0.0
+strategy:
+  id: helix_scalp_hunter
+  version: 1.0.0
+plan:
+  fold_count: 4
+  entry_window_ms: 604800000
+  observation_tail_ms: 86400000
+  execution_scenarios:
+    - id: base
+      fee: 0.0005
+    - id: stressed
+      fee: 0.001
+gates:
+  censored_entries: reject
+  minimum_total_trades: 20
+  minimum_active_fold_ratio: 0.75
+  minimum_positive_fold_ratio: 0.5
+  minimum_expectancy_r: 0
+  minimum_profit_factor: 1
+  maximum_drawdown_r: 8
+  segment_stability:
+    dimensions:
+      - scalp.event_type
+    minimum_trades_per_segment: 5
+    minimum_stable_segment_ratio: 0.5
+`
+
 function commitRepository(root: string) {
   execFileSync('git', ['init', '-b', 'main'], { cwd: root })
   execFileSync('git', ['config', 'user.email', 'helix-test@example.com'], { cwd: root })
@@ -70,6 +101,61 @@ test('loads V1 manifests and creates identity only from clean repositories', asy
     assert.equal(identity.strategyRepoCommit, snapshot.repository?.commit)
     assert.equal(identity.engineCommit, snapshot.engine?.commit)
     assert.equal(identity.marketDataSnapshotId, 'snapshot-001')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('loads a referenced walk-forward policy from the pinned Git tree', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'helix-strategy-policy-'))
+  const strategyRoot = resolve(root, 'strategies-repo')
+  const engineRoot = resolve(root, 'engine-repo')
+  mkdirSync(strategyRoot)
+  mkdirSync(engineRoot)
+
+  try {
+    initializeRepository(strategyRoot, {
+      'strategies/scalp/strategy.yaml': manifest.replace(
+        'documentation: {}',
+        'validation:\n  walk_forward_policy: validation/walk-forward-policy.yaml\ndocumentation: {}',
+      ),
+      'strategies/scalp/validation/walk-forward-policy.yaml': walkForwardPolicy,
+    })
+    initializeRepository(engineRoot, { 'README.md': '# Engine\n' })
+
+    const snapshot = await loadStrategyRepositorySnapshot({ strategyRepoRoot: strategyRoot, engineRepoRoot: engineRoot })
+    assert.equal(snapshot.ok, true)
+    assert.equal(snapshot.manifests[0]?.walkForwardPolicy?.id, 'scalp_walk_forward_v1')
+    assert.equal(snapshot.manifests[0]?.walkForwardPolicy?.plan.foldCount, 4)
+    assert.match(snapshot.manifests[0]?.walkForwardPolicy?.policyHash ?? '', /^sha256:[a-f0-9]{64}$/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('rejects a walk-forward policy whose strategy identity does not match its manifest', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'helix-strategy-policy-identity-'))
+  const strategyRoot = resolve(root, 'strategies-repo')
+  const engineRoot = resolve(root, 'engine-repo')
+  mkdirSync(strategyRoot)
+  mkdirSync(engineRoot)
+
+  try {
+    initializeRepository(strategyRoot, {
+      'strategies/scalp/strategy.yaml': manifest.replace(
+        'documentation: {}',
+        'validation:\n  walk_forward_policy: validation/walk-forward-policy.yaml\ndocumentation: {}',
+      ),
+      'strategies/scalp/validation/walk-forward-policy.yaml': walkForwardPolicy.replace(
+        'id: helix_scalp_hunter',
+        'id: helix_swing_hunter',
+      ),
+    })
+    initializeRepository(engineRoot, { 'README.md': '# Engine\n' })
+
+    const snapshot = await loadStrategyRepositorySnapshot({ strategyRepoRoot: strategyRoot, engineRepoRoot: engineRoot })
+    assert.equal(snapshot.ok, false)
+    assert.match(snapshot.errors[0] ?? '', /strategy identity does not match/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

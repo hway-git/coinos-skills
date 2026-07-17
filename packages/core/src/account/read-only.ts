@@ -37,6 +37,24 @@ export type AccountCredentialInput = {
   passphrase?: unknown
 }
 
+export function normalizeAccountReconciliationOrders(...payloads: unknown[]): AccountReconciliationState['openOrders'] {
+  return [...new Map(
+    payloads
+      .flatMap((payload) => Array.isArray(payload) ? payload : [])
+      .flatMap((item) => {
+        const row = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+        const id = String(row.id ?? '')
+        if (!id) return []
+        const order = {
+          id,
+          symbol: String(row.symbol ?? '--').toUpperCase(),
+          side: String(row.side ?? '--').toLowerCase(),
+        }
+        return [[`${order.symbol}|${order.id}`, order] as const]
+      }),
+  ).values()]
+}
+
 function parseJson(stdout: string) {
   try {
     return JSON.parse(stdout) as unknown
@@ -126,7 +144,7 @@ function normalizePositions(payload: unknown): AccountTableRow[] {
   })
 }
 
-function normalizeOrders(payload: unknown): AccountTableRow[] {
+function normalizeOrders(payload: unknown, family: 'regular' | 'conditional' = 'regular'): AccountTableRow[] {
   if (!Array.isArray(payload)) return []
 
   return payload.slice(0, 50).map((item) => {
@@ -134,12 +152,17 @@ function normalizeOrders(payload: unknown): AccountTableRow[] {
     return {
       id: String(row.id ?? '--'),
       symbol: String(row.symbol ?? '--'),
-      type: String(row.type ?? '--'),
+      type: family === 'conditional' ? `conditional/${String(row.type ?? '--')}` : String(row.type ?? '--'),
       side: String(row.side ?? '--'),
       price: formatPrice(row.price),
       status: String(row.status ?? '--'),
     }
   })
+}
+
+export function mergeAccountOrderRows(regular: unknown, conditional: unknown): AccountTableRow[] {
+  const rows = [...normalizeOrders(regular), ...normalizeOrders(conditional, 'conditional')]
+  return [...new Map(rows.map((row) => [`${String(row.symbol)}|${String(row.id)}`, row])).values()].slice(0, 50)
 }
 
 function normalizeHistory(payload: unknown): AccountTableRow[] {
@@ -249,12 +272,13 @@ export async function getReadOnlyAccountSnapshot(): Promise<AccountSnapshot> {
 
   if (!balance.ok) return emptySnapshot('offline', [balance.error], accountAuthFromError(balance.error))
 
-  const [positions, orders, history] = await Promise.all([
+  const [positions, orders, stopOrders, history] = await Promise.all([
     runAccountAction<unknown>('positions', params),
     runAccountAction<unknown>('open_orders', params),
+    runAccountAction<unknown>('stop_orders', params),
     runAccountAction<unknown>('my_trades', { ...params, limit: 50 }),
   ])
-  const criticalErrors = [positions, orders]
+  const criticalErrors = [positions, orders, stopOrders]
     .filter((result): result is { ok: false; error: string } => !result.ok)
     .map((result) => result.error)
   const optionalErrors = history.ok ? [] : [history.error]
@@ -266,7 +290,7 @@ export async function getReadOnlyAccountSnapshot(): Promise<AccountSnapshot> {
     mode: 'read_only',
     balances: normalizeBalances(balance.data),
     positions: positions.ok ? normalizePositions(positions.data) : [],
-    orders: orders.ok ? normalizeOrders(orders.data) : [],
+    orders: mergeAccountOrderRows(orders.ok ? orders.data : [], stopOrders.ok ? stopOrders.data : []),
     history: history.ok ? normalizeHistory(history.data) : [],
     source: {
       name: 'Helix Account',
@@ -287,12 +311,14 @@ export async function getReadOnlyAccountSnapshot(): Promise<AccountSnapshot> {
 
 export async function getAccountReconciliationState(): Promise<ActionResult<AccountReconciliationState>> {
   const params = { exchange: DEFAULT_EXCHANGE, market_type: DEFAULT_MARKET_TYPE }
-  const [positions, orders] = await Promise.all([
+  const [positions, orders, stopOrders] = await Promise.all([
     runAccountAction<unknown>('positions', params),
     runAccountAction<unknown>('open_orders', params),
+    runAccountAction<unknown>('stop_orders', params),
   ])
   if (!positions.ok) return { ok: false, error: sanitizeAccountError(positions.error) }
   if (!orders.ok) return { ok: false, error: sanitizeAccountError(orders.error) }
+  if (!stopOrders.ok) return { ok: false, error: sanitizeAccountError(stopOrders.error) }
 
   const normalizedPositions = Array.isArray(positions.data)
     ? positions.data.flatMap((item) => {
@@ -309,19 +335,7 @@ export async function getAccountReconciliationState(): Promise<ActionResult<Acco
       }]
     })
     : []
-  const openOrders = Array.isArray(orders.data)
-    ? orders.data
-      .flatMap((item) => {
-        const row = item && typeof item === 'object' ? item as Record<string, unknown> : {}
-        const id = String(row.id ?? '')
-        if (!id) return []
-        return [{
-          id,
-          symbol: String(row.symbol ?? '--').toUpperCase(),
-          side: String(row.side ?? '--').toLowerCase(),
-        }]
-      })
-    : []
+  const openOrders = normalizeAccountReconciliationOrders(orders.data, stopOrders.data)
 
   return { ok: true, data: { positions: normalizedPositions, openOrders } }
 }

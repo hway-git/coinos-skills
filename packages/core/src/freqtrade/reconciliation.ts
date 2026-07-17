@@ -6,31 +6,86 @@ function positionKey(symbol: string, side: string) {
   return `${symbol.toUpperCase()}|${side.toLowerCase()}`
 }
 
+function orderKey(symbol: string, id: string) {
+  return `${symbol.toUpperCase()}|${id}`
+}
+
 export async function reconcileFreqtradeAccount(): Promise<FreqtradeReconciliationResult> {
   const checkedAt = Date.now()
-  const bot = await getFreqtradeReconciliationState()
+  const [bot, account] = await Promise.all([
+    getFreqtradeReconciliationState(),
+    getAccountReconciliationState(),
+  ])
   if (!bot.ok || !bot.data.online) {
+    const mismatches: FreqtradeReconciliationResult['mismatches'] = account.ok
+      ? [
+        ...account.data.positions.map((position) => ({
+          symbol: position.symbol,
+          side: position.side,
+          issue: 'exchange_position_unattributed_while_bot_offline',
+          botAmount: 0,
+          exchangeAmount: position.baseAmount,
+        })),
+        ...account.data.openOrders.map((order) => ({
+          symbol: order.symbol,
+          side: order.side,
+          orderId: order.id,
+          issue: 'exchange_open_order_unattributed_while_bot_offline',
+          botAmount: 0,
+          exchangeAmount: 0,
+        })),
+      ]
+      : []
+    const botDetail = bot.ok ? 'Freqtrade daemon offline' : bot.error
     return {
       status: 'offline',
       checkedAt,
       botPositions: 0,
-      exchangePositions: 0,
-      mismatches: [],
-      detail: bot.ok ? 'Freqtrade daemon offline' : bot.error,
+      exchangePositions: account.ok ? account.data.positions.length : 0,
+      mismatches,
+      detail: account.ok ? `${botDetail}; exchange state was queried.` : `${botDetail}; exchange query failed: ${account.error}`,
     }
   }
   if (bot.data.dryRun !== false) {
+    if (!account.ok) {
+      return {
+        status: 'offline',
+        checkedAt,
+        botPositions: bot.data.positions.length,
+        exchangePositions: 0,
+        mismatches: [],
+        detail: `DRY_RUN exchange query failed: ${account.error}`,
+      }
+    }
+    const mismatches: FreqtradeReconciliationResult['mismatches'] = [
+      ...account.data.positions.map((position) => ({
+        symbol: position.symbol,
+        side: position.side,
+        issue: 'exchange_position_unattributed_in_dry_run',
+        botAmount: 0,
+        exchangeAmount: position.baseAmount,
+      })),
+      ...account.data.openOrders.map((order) => ({
+        symbol: order.symbol,
+        side: order.side,
+        orderId: order.id,
+        issue: 'exchange_open_order_unattributed_in_dry_run',
+        botAmount: 0,
+        exchangeAmount: 0,
+      })),
+    ]
     return {
-      status: 'not_applicable',
+      status: mismatches.length > 0 ? 'mismatch' : 'not_applicable',
       checkedAt,
       botPositions: bot.data.positions.length,
-      exchangePositions: 0,
-      mismatches: [],
-      detail: 'DRY_RUN uses simulated positions; exchange reconciliation is not applicable.',
+      exchangePositions: account.data.positions.length,
+      mismatches,
+      detail: mismatches.length > 0
+        ? `DRY_RUN has ${mismatches.length} unattributed live exchange position/order item(s).`
+        : 'DRY_RUN uses simulated positions; the live exchange account is flat.',
     }
   }
 
-  const account = await getAccountReconciliationState()
   if (!account.ok) {
     return {
       status: 'offline',
@@ -73,28 +128,28 @@ export async function reconcileFreqtradeAccount(): Promise<FreqtradeReconciliati
 
   const botOrders = new Map(
     bot.data.positions.flatMap((position) => (
-      position.openOrderIds.map((id) => [id, { symbol: position.symbol, side: position.side }] as const)
+      position.openOrderIds.map((id) => [orderKey(position.symbol, id), { id, symbol: position.symbol, side: position.side }] as const)
     )),
   )
-  const exchangeOrders = new Map(account.data.openOrders.map((order) => [order.id, order] as const))
-  for (const [orderId, order] of botOrders) {
-    if (!exchangeOrders.has(orderId)) {
+  const exchangeOrders = new Map(account.data.openOrders.map((order) => [orderKey(order.symbol, order.id), order] as const))
+  for (const [key, order] of botOrders) {
+    if (!exchangeOrders.has(key)) {
       mismatches.push({
         symbol: order.symbol,
         side: order.side,
-        orderId,
+        orderId: order.id,
         issue: 'bot_open_order_missing_on_exchange',
         botAmount: 0,
         exchangeAmount: 0,
       })
     }
   }
-  for (const [orderId, order] of exchangeOrders) {
-    if (!botOrders.has(orderId)) {
+  for (const [key, order] of exchangeOrders) {
+    if (!botOrders.has(key)) {
       mismatches.push({
         symbol: order.symbol,
         side: order.side,
-        orderId,
+        orderId: order.id,
         issue: 'external_open_order',
         botAmount: 0,
         exchangeAmount: 0,

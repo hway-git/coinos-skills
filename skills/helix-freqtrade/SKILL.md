@@ -13,7 +13,7 @@ Freqtrade strategy generation, backtesting, deployment, and daemon control.
 - In CoinClaw containers, Freqtrade is already managed by supervisord on `127.0.0.1:8888`. Do not start another process.
 - In local Docker mode, use `docker/freqtrade/compose.yaml` through `ft-deploy.mjs`; do not install or start a second host daemon.
 - Use `ft.mjs` and `ft-deploy.mjs`; do not manually edit daemon state without reloading or restarting through scripts.
-- `create_strategy` is only for independent indicator prototypes. New Scalp Hunter V1 and Swing Hunter V1 strategy changes belong only in the sibling `helix-strategies` repository. Their Engine decisions reach Freqtrade only through `HelixSignalStrategy` and a verified Signal Artifact.
+- `create_strategy` is only for independent indicator prototypes. New Scalp Hunter V1 and Swing Hunter V1 strategy changes belong only in the sibling `helix-strategies` repository. Their Engine decisions reach Freqtrade only through `HelixSignalStrategy` and the verified forward Signal Batch chain.
 - Deploy only through `ft-deploy.mjs deploy`. It requires backtest evidence for the exact current strategy code with at least one trade and positive total profit; editing the strategy invalidates older evidence.
 - LIVE mode requires all of: current backtest evidence, `HELIX_LIVE_TRADING_ENABLED=true`, valid exchange credentials, `max_open_trades <= 2`, and a fresh Dashboard live authorization session. Never ask the user to paste the live token in chat.
 - Do not use direct agent auto-entry. Strategy-driven entries must come from the Freqtrade daemon.
@@ -25,8 +25,12 @@ Freqtrade strategy generation, backtesting, deployment, and daemon control.
 - Treat `HelixSignalStrategy` as an execution adapter only. Never add indicators, detectors, state machines, or Scalp/Swing rules to it.
 - Read Scalp Hunter V1 and Swing Hunter V1 semantics from the exact pinned `helix-strategies` commit; do not reproduce or override those semantics here.
 - Evaluate closed candles only. Confirmed events become available at their confirmation bar; never backdate them or infer intrabar event order from OHLC.
-- Every adapter edit invalidates prior backtest evidence. Helix deployment also requires matching artifact identity, positive non-empty backtest evidence, and a deployable lifecycle (`shadow+` for dry-run, `canary+` for live).
+- Every adapter edit invalidates prior backtest evidence. Helix deployment also requires matching artifact identity, positive non-empty backtest evidence, a promotable walk-forward report for the exact candidate, and a deployable lifecycle (`shadow+` for dry-run, `canary+` for live).
 - Backtest a Signal Artifact only with its exact `helix.market-dataset/v1` file. The dataset hash, symbol, market window, provider, and base-timeframe OHLCV must match; never download or substitute exchange data for this path.
+- Treat a historical Signal Artifact as immutable backtest evidence and the seed identity for forward deployment, never as an online strategy feed. Forward dry-run appends immutable `helix.signal-batch/v1` batches, each pinned to its own market snapshot and previous batch hash.
+- Generate walk-forward plans in Core before Freqtrade execution. Plans use fixed candidate identity, contiguous half-open entry windows, a shared activation prefix, explicit observation tails, and at least base/stressed fee scenarios. Never force-close a fold to manufacture an outcome.
+- `walk_forward` rejects censored entries and produces a hash-pinned report from exact reconciled Freqtrade results. A report is promotable only when its pinned versioned policy passes every fee scenario, R-normalized aggregate gate, and strategy-native segment gate. Without a policy, treat it as research evidence only.
+- Signal deployment currently supports dry-run only. Do not attempt LIVE Signal deployment until the Engine has an explicit fill and risk feedback contract; the lifecycle and `FORWARD_LIVE_UNAVAILABLE` gates must remain closed.
 
 ## Dashboard Alignment
 
@@ -58,8 +62,13 @@ node scripts/ft-deploy.mjs create_strategy '{"name":"RSIStrategy","timeframe":"1
 node scripts/ft-deploy.mjs backtest '{"strategy":"RSIStrategy","timeframe":"15m","timerange":"20250101-20260301"}'
 node scripts/ft-deploy.mjs hyperopt '{"strategy":"RSIStrategy","timeframe":"1h","epochs":100}'
 node scripts/ft-deploy.mjs deploy '{"strategy":"RSIStrategy","dry_run":true}'
-node scripts/ft-deploy.mjs backtest '{"signal_artifact":"/path/to/artifact.json","market_dataset":"/path/to/dataset.json"}'
-node scripts/ft-deploy.mjs deploy '{"signal_artifact":"/path/to/artifact.json","dry_run":true}'
+node scripts/ft-deploy.mjs backtest '{"signal_artifact":"/path/to/artifact.json","market_dataset":"/path/to/dataset.json","fee":0.0005}'
+node scripts/ft-deploy.mjs walk_forward '{"walk_forward_run":"/path/to/walk-forward-run.json","source_dataset":"/path/to/source-dataset.json"}'
+pnpm --filter @helix/core strategy:walk-forward -- run-policy '{"dataset":"/path/to/source-dataset.json","strategyId":"helix_scalp_hunter","activationDecisionTime":"2025-01-01T00:00:00Z","outputDirectory":"/path/to/output"}'
+node scripts/ft-deploy.mjs deploy '{"signal_artifact_hash":"sha256:...","walk_forward_report":"/path/to/walk-forward-report.json","dry_run":true}'
+node scripts/ft-deploy.mjs status
+node scripts/ft-deploy.mjs stop
+node scripts/ft-deploy.mjs start
 node scripts/ft-deploy.mjs logs '{"lines":100}'
 ```
 

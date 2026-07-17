@@ -89,6 +89,8 @@ pnpm freqtrade:install
 
 `HelixSignalStrategy` 不包含指标或策略判断。Signal 回测必须同时提供原始 `helix.market-dataset/v1`，且只使用其中与 artifact 匹配的基础周期 OHLCV。回测证据会绑定 adapter 指纹、Signal Artifact hash、策略 commit、配置 hash、Engine commit、市场数据 hash、Freqtrade 版本、运行配置和结果文件；dry-run 只接受 `shadow` 及以上 lifecycle，live 只接受 `canary` 或 `production`。
 
+当策略 manifest 已引用版本化 walk-forward policy 时，使用 Core 的 `run-policy` 从 policy 自动生成 fold、observation tail 和 fee 场景。Promotable report 会从归档成交与 initial-risk trace 重建逐笔 R、跨 fold 回撤及策略原生 segment 稳定性；Helix Signal 部署必须通过 `walk_forward_report` 提供与 Artifact 候选身份完全一致的通过报告，并将 report hash 固定进 forward deployment。
+
 Dashboard 控制、部署、回测、授权、急停与对账事件持久化到 `~/.helix/helix.sqlite`，数据库和凭据文件权限均为 `0600`。
 
 ## 常用命令
@@ -126,6 +128,32 @@ node scripts/ft.mjs daemon_info
 node scripts/ft.mjs profit
 node scripts/ft.mjs locks
 ```
+
+### Helix Signal 回测与 dry-run
+
+以下链路只接受 clean 的 Engine 和 `helix-strategies` commit。示例是 Scalp；Swing 将 `strategyId` 改为 `helix_swing_hunter`，并使用 manifest 声明的 `1d`、`4h`、`1h`、`15m` 周期。
+
+```bash
+# 1. 下载并固定原始市场数据
+pnpm strategy:history -- fetch-okx '{"instrumentId":"BTC-USDT-SWAP","symbol":"BTC/USDT:USDT","timeframes":["1h","15m","5m","1m"],"start":"2026-01-01T00:00:00Z","end":"2026-03-03T00:00:00Z","output":"/absolute/path/source-dataset.json"}'
+
+# 2. 从策略仓库已提交的 policy 派生并运行 Core walk-forward
+pnpm strategy:walk-forward -- run-policy '{"dataset":"/absolute/path/source-dataset.json","strategyId":"helix_scalp_hunter","activationDecisionTime":"2026-01-04T00:00:00Z","outputDirectory":"/absolute/path/scalp-walk-forward"}'
+
+# 3. 生成同一候选身份的完整历史 Artifact
+pnpm strategy:backtest -- run '{"dataset":"/absolute/path/source-dataset.json","strategyId":"helix_scalp_hunter","firstDecisionTime":"2026-01-04T00:00:00Z","output":"/absolute/path/scalp-artifact.json"}'
+
+# 4. 用完全相同的数据、Artifact 和显式 fee 生成 Freqtrade 证据与 walk-forward report
+cd skills/helix-freqtrade
+node scripts/ft-deploy.mjs backtest '{"signal_artifact":"/absolute/path/scalp-artifact.json","market_dataset":"/absolute/path/source-dataset.json","fee":0.0005}'
+node scripts/ft-deploy.mjs walk_forward '{"walk_forward_run":"/absolute/path/scalp-walk-forward/walk-forward-run.json","source_dataset":"/absolute/path/source-dataset.json"}'
+node scripts/ft-deploy.mjs backtest_results
+
+# 5. 仅当 report gate 通过且 Artifact lifecycle 已为 shadow 或更高时部署 dry-run
+node scripts/ft-deploy.mjs deploy '{"signal_artifact_hash":"sha256:...","walk_forward_report":"/absolute/path/scalp-walk-forward/walk-forward-report-sha256-....json","dry_run":true}'
+```
+
+Lifecycle 或任一仓库 commit 改变后，旧 Artifact 与 report 都不能沿用。晋级到 `shadow` 后必须在新的 clean commits 上重跑上述链路。
 
 ## 环境配置
 

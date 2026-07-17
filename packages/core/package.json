@@ -20,6 +20,8 @@
   "scripts": {
     "strategy:history": "tsx src/strategy/history-cli.ts",
     "strategy:backtest": "tsx src/strategy/backtest-cli.ts",
+    "strategy:walk-forward": "tsx src/strategy/walk-forward-cli.ts",
+    "strategy:forward": "tsx src/strategy/forward-worker.ts",
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

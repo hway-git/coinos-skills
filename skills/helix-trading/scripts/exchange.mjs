@@ -2,6 +2,7 @@
 // CCXT Exchange Trading CLI
 // Requires: npm install ccxt
 import { cli } from '../lib/cli.mjs';
+import { fetchConditionalOrders, fetchRegularOpenOrders } from '../lib/conditional-orders.mjs';
 import { loadEnv, writeEnvPath } from '../lib/env-loader.mjs';
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, unlinkSync, mkdirSync, chmodSync } from 'node:fs';
@@ -249,25 +250,6 @@ function closeParamsFor(exchange, marketType, pos) {
   return out;
 }
 
-// 查"条件/算法单"(止盈止损/触发/追踪),合并各 ordType 再去重 —— OKX 的止盈止损是 conditional 类,
-// 与 trigger 类**分开存**,必须各类都查再合并,不能"第一次返回空就 return"(否则 OKX 的 set_stop
-// 单会被漏掉:实测 stop_orders 旧逻辑先查 trigger 返回空就 return,读不到 conditional 类的 SL/TP)。
-async function fetchConditionalOrders(ex, exchange, symbol) {
-  const variants = [{ trigger: true }, { stop: true }];
-  if (exchange === 'okx') variants.push({ ordType: 'conditional' }, { ordType: 'oco' }, { ordType: 'trigger' }, { ordType: 'move_order_stop' });
-  const seen = new Map();
-  let any = false, lastErr = null;
-  for (const extra of variants) {
-    try {
-      const os = await ex.fetchOpenOrders(symbol, undefined, undefined, extra);
-      any = true;
-      for (const o of (os || [])) if (o && o.id != null) seen.set(o.id, o);
-    } catch (e) { lastErr = e; }
-  }
-  if (!any) throw lastErr || new Error('无法查询条件单');
-  return [...seen.values()];
-}
-
 cli({
   exchanges: async () => ({
     supported: SUPPORTED.map(id => {
@@ -384,9 +366,8 @@ cli({
   },
   open_orders: async ({ exchange, symbol, market_type }) => {
     const ex = await getExchange(exchange, market_type);
-    if (symbol) return ex.fetchOpenOrders(symbol);
     try {
-      return await ex.fetchOpenOrders();
+      return await fetchRegularOpenOrders(ex, exchange, symbol);
     } catch (err) {
       if (err.message?.includes('symbol') || err.message?.includes('argument')) {
         throw new Error(`${exchange} 查询未成交订单需要指定交易对，例如: {"symbol":"BTC/USDT"}`);
@@ -802,7 +783,7 @@ cli({
   // 列出条件单/算法委托(止盈止损等)。OKX 等的算法单不在普通 open_orders 里,用这个查。
   stop_orders: async ({ exchange, symbol, market_type }) => {
     const ex = await getExchange(exchange, market_type || 'swap');
-    try { return await fetchConditionalOrders(ex, exchange, symbol); }
+    try { return await fetchConditionalOrders(ex, exchange, symbol, market_type || 'swap'); }
     catch (e) { throw new Error(`查询条件单失败: ${e?.message || e}。部分交易所的算法/条件单需在交易所 APP 的「条件委托」栏查看。`); }
   },
   cancel_order: async ({ exchange, symbol, order_id, market_type }) => {
@@ -839,7 +820,7 @@ cli({
       try { out.regular = await cancelByFetch(); } catch (e) { out.regular = { error: String(e).slice(0, 160) }; }
       // 条件单: 用合并查询(覆盖 OKX conditional 类,不漏)再逐个撤
       try {
-        const conds = await fetchConditionalOrders(ex, exchange, symbol);
+        const conds = await fetchConditionalOrders(ex, exchange, symbol, market_type || 'swap');
         const res = [];
         for (const o of conds) {
           try { await ex.cancelOrder(o.id, symbol, { stop: true }); res.push({ id: o.id, ok: true }); }

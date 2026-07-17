@@ -64,22 +64,22 @@ if (coinclaw) {
 
 const auth = 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64');
 
-export async function ftGet(path, params = {}) {
+export async function ftGet(path, params = {}, { timeoutMs = 30000 } = {}) {
   const url = new URL(`/api/v1/${path}`, BASE);
   for (const [k, v] of Object.entries(params)) {
     if (v != null) url.searchParams.set(k, String(v));
   }
-  const res = await fetch(url, { headers: { Authorization: auth }, signal: AbortSignal.timeout(30000) });
+  const res = await fetch(url, { headers: { Authorization: auth }, signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) throw new Error(`Freqtrade ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
-export async function ftPost(path, body = {}) {
+export async function ftPost(path, body = {}, { timeoutMs = 30000 } = {}) {
   const res = await fetch(new URL(`/api/v1/${path}`, BASE), {
     method: 'POST',
     headers: { Authorization: auth, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`Freqtrade ${res.status}: ${await res.text()}`);
   return res.json();

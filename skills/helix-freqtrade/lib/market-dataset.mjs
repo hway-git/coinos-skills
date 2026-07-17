@@ -155,6 +155,36 @@ export function loadMarketDataset(file) {
   }
 }
 
+export function requireMarketDatasetArtifactWindow(dataset, artifact) {
+  const timeframe = artifact?.baseTimeframe;
+  const candles = dataset?.timeframes?.[timeframe];
+  if (!Array.isArray(candles) || candles.length === 0) {
+    throw new Error(`market dataset is missing base timeframe ${String(timeframe || '')}`);
+  }
+  const duration = marketTimeframeMilliseconds(timeframe);
+  const firstOpen = artifact?.marketData?.firstCandleOpenTime;
+  const lastClose = artifact?.marketData?.lastCandleCloseTime;
+  const datasetFirstOpen = candles[0].time;
+  const datasetLastClose = candles.at(-1).time + duration;
+  const activationIndex = (firstOpen - datasetFirstOpen) / duration;
+  if (!Number.isSafeInteger(firstOpen)
+    || !Number.isInteger(activationIndex)
+    || activationIndex < 0
+    || activationIndex >= candles.length
+    || candles[activationIndex].time !== firstOpen) {
+    throw new Error('market_dataset does not contain the signal artifact activation candle');
+  }
+  if (lastClose !== datasetLastClose) {
+    throw new Error('market_dataset end does not match signal artifact marketData');
+  }
+  return {
+    warmupCandles: activationIndex,
+    firstCandleOpenTime: datasetFirstOpen,
+    activationCandleOpenTime: firstOpen,
+    lastCandleCloseTime: datasetLastClose,
+  };
+}
+
 export function freqtradeOhlcvFile(dataset, timeframe) {
   const candles = dataset.timeframes[timeframe];
   if (!candles) throw new Error(`market dataset is missing base timeframe ${timeframe}`);

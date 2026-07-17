@@ -10,6 +10,7 @@ import type {
   StrategyManifestIdentity,
   StrategyObjectModel,
   StrategyRepositorySnapshot,
+  StrategyWalkForwardPolicy,
 } from '@helix/contracts/strategy'
 import yaml from 'js-yaml'
 import { HELIX_REPO_ROOT } from '../runtime-paths'
@@ -27,6 +28,10 @@ const STRATEGY_LIFECYCLES = new Set<StrategyLifecycle>([
   'deprecated',
 ])
 const OBJECT_MODELS = new Set<StrategyObjectModel>(['PRICE_EVENT', 'TRADE_THESIS'])
+const STRATEGY_SEGMENT_DIMENSIONS: Record<string, ReadonlySet<string>> = {
+  helix_scalp_hunter: new Set(['scalp.event_type', 'scalp.grade', 'scalp.regime.type']),
+  helix_swing_hunter: new Set(['swing.stage', 'swing.context.state', 'swing.context.bias']),
+}
 
 type RepositoryOptions = {
   strategyRepoRoot?: string
@@ -41,6 +46,16 @@ function record(value: unknown, field: string): ManifestRecord {
     throw new Error(`${field} must be an object`)
   }
   return value as ManifestRecord
+}
+
+function exactRecord(value: unknown, field: string, fields: readonly string[]) {
+  const parsed = record(value, field)
+  const actual = Object.keys(parsed).sort()
+  const expected = [...fields].sort()
+  if (actual.length !== expected.length || actual.some((item, index) => item !== expected[index])) {
+    throw new Error(`${field} must contain exactly: ${fields.join(', ')}`)
+  }
+  return parsed
 }
 
 function text(value: unknown, field: string) {
@@ -79,6 +94,150 @@ function timeframes(value: unknown, field: string) {
   return parsed
 }
 
+function integer(value: unknown, field: string, minimum: number) {
+  if (!Number.isSafeInteger(value) || Number(value) < minimum) {
+    throw new Error(`${field} must be an integer greater than or equal to ${minimum}`)
+  }
+  return Number(value)
+}
+
+function finite(value: unknown, field: string, minimum?: number, maximum?: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${field} must be finite`)
+  if (minimum !== undefined && value < minimum) throw new Error(`${field} must be at least ${minimum}`)
+  if (maximum !== undefined && value > maximum) throw new Error(`${field} must be at most ${maximum}`)
+  return value
+}
+
+function parseWalkForwardPolicy(
+  content: string,
+  policyPath: string,
+  manifest: StrategyManifestIdentity,
+): StrategyWalkForwardPolicy {
+  const root = exactRecord(yaml.load(content), policyPath, ['schema_version', 'policy', 'strategy', 'plan', 'gates'])
+  if (text(root.schema_version, `${policyPath}.schema_version`) !== 'helix.walk-forward-policy/v1') {
+    throw new Error(`${policyPath} uses an unsupported walk-forward policy schema`)
+  }
+  const policy = exactRecord(root.policy, `${policyPath}.policy`, ['id', 'version'])
+  const id = text(policy.id, `${policyPath}.policy.id`)
+  const version = text(policy.version, `${policyPath}.policy.version`)
+  if (!/^[a-z][a-z0-9_]*_v[0-9]+$/.test(id)) throw new Error(`${policyPath}.policy.id is invalid`)
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error(`${policyPath}.policy.version is invalid`)
+  }
+  const strategy = exactRecord(root.strategy, `${policyPath}.strategy`, ['id', 'version'])
+  const strategyId = text(strategy.id, `${policyPath}.strategy.id`)
+  const strategyVersion = text(strategy.version, `${policyPath}.strategy.version`)
+  if (strategyId !== manifest.id || strategyVersion !== manifest.version) {
+    throw new Error(`${policyPath} strategy identity does not match ${manifest.manifestPath}`)
+  }
+  const plan = exactRecord(root.plan, `${policyPath}.plan`, [
+    'fold_count',
+    'entry_window_ms',
+    'observation_tail_ms',
+    'execution_scenarios',
+  ])
+  if (!Array.isArray(plan.execution_scenarios) || plan.execution_scenarios.length < 2) {
+    throw new Error(`${policyPath}.plan.execution_scenarios must contain at least two scenarios`)
+  }
+  const executionScenarios = plan.execution_scenarios.map((value, index) => {
+    const scenario = exactRecord(value, `${policyPath}.plan.execution_scenarios[${index}]`, ['id', 'fee'])
+    const scenarioId = text(scenario.id, `${policyPath}.plan.execution_scenarios[${index}].id`)
+    if (!/^[a-z][a-z0-9_]*$/.test(scenarioId)) {
+      throw new Error(`${policyPath}.plan.execution_scenarios[${index}].id is invalid`)
+    }
+    return {
+      id: scenarioId,
+      fee: finite(scenario.fee, `${policyPath}.plan.execution_scenarios[${index}].fee`, 0, 1),
+    }
+  })
+  if (new Set(executionScenarios.map(({ id: scenarioId }) => scenarioId)).size !== executionScenarios.length) {
+    throw new Error(`${policyPath}.plan.execution_scenarios contains duplicate ids`)
+  }
+  const minimumFee = Math.min(...executionScenarios.map(({ fee }) => fee))
+  if (!executionScenarios.some(({ fee }) => fee > minimumFee)) {
+    throw new Error(`${policyPath}.plan.execution_scenarios must include a stressed fee`)
+  }
+  const gates = exactRecord(root.gates, `${policyPath}.gates`, [
+    'censored_entries',
+    'minimum_total_trades',
+    'minimum_active_fold_ratio',
+    'minimum_positive_fold_ratio',
+    'minimum_expectancy_r',
+    'minimum_profit_factor',
+    'maximum_drawdown_r',
+    'segment_stability',
+  ])
+  if (gates.censored_entries !== 'reject') {
+    throw new Error(`${policyPath}.gates.censored_entries must be reject`)
+  }
+  const segment = exactRecord(gates.segment_stability, `${policyPath}.gates.segment_stability`, [
+    'dimensions',
+    'minimum_trades_per_segment',
+    'minimum_stable_segment_ratio',
+  ])
+  const dimensions = stringList(segment.dimensions, `${policyPath}.gates.segment_stability.dimensions`)
+  if (dimensions.length === 0 || new Set(dimensions).size !== dimensions.length) {
+    throw new Error(`${policyPath}.gates.segment_stability.dimensions must be non-empty and unique`)
+  }
+  for (const dimension of dimensions) {
+    if (!STRATEGY_SEGMENT_DIMENSIONS[manifest.id]?.has(dimension)) {
+      throw new Error(`${policyPath}.gates.segment_stability.dimensions contains invalid dimension ${dimension}`)
+    }
+  }
+  return {
+    schemaVersion: 'helix.walk-forward-policy/v1',
+    id,
+    version,
+    strategyId,
+    strategyVersion,
+    policyPath,
+    policyHash: `sha256:${createHash('sha256').update(content).digest('hex')}`,
+    plan: {
+      foldCount: integer(plan.fold_count, `${policyPath}.plan.fold_count`, 2),
+      entryWindowMs: integer(plan.entry_window_ms, `${policyPath}.plan.entry_window_ms`, 1),
+      observationTailMs: integer(plan.observation_tail_ms, `${policyPath}.plan.observation_tail_ms`, 1),
+      executionScenarios,
+    },
+    gates: {
+      censoredEntries: 'reject',
+      minimumTotalTrades: integer(gates.minimum_total_trades, `${policyPath}.gates.minimum_total_trades`, 1),
+      minimumActiveFoldRatio: finite(
+        gates.minimum_active_fold_ratio,
+        `${policyPath}.gates.minimum_active_fold_ratio`,
+        0,
+        1,
+      ),
+      minimumPositiveFoldRatio: finite(
+        gates.minimum_positive_fold_ratio,
+        `${policyPath}.gates.minimum_positive_fold_ratio`,
+        0,
+        1,
+      ),
+      minimumExpectancyR: finite(gates.minimum_expectancy_r, `${policyPath}.gates.minimum_expectancy_r`),
+      minimumProfitFactor: finite(
+        gates.minimum_profit_factor,
+        `${policyPath}.gates.minimum_profit_factor`,
+        0,
+      ),
+      maximumDrawdownR: finite(gates.maximum_drawdown_r, `${policyPath}.gates.maximum_drawdown_r`, 0),
+      segmentStability: {
+        dimensions,
+        minimumTradesPerSegment: integer(
+          segment.minimum_trades_per_segment,
+          `${policyPath}.gates.segment_stability.minimum_trades_per_segment`,
+          1,
+        ),
+        minimumStableSegmentRatio: finite(
+          segment.minimum_stable_segment_ratio,
+          `${policyPath}.gates.segment_stability.minimum_stable_segment_ratio`,
+          0,
+          1,
+        ),
+      },
+    },
+  }
+}
+
 function strategyRepoRoot(configured?: string) {
   if (configured) return resolve(configured)
   if (process.env.HELIX_STRATEGY_REPO?.trim()) return resolve(process.env.HELIX_STRATEGY_REPO.trim())
@@ -107,7 +266,7 @@ function revisionIdentity(revision: GitRevisionSnapshot): GitRevisionIdentity {
   return { commit: revision.commit, dirty: revision.dirty }
 }
 
-function parseManifest(content: string, manifestPath: string): StrategyManifestIdentity {
+function parseManifest(content: string, manifestPath: string) {
   const root = record(yaml.load(content), manifestPath)
   const strategy = record(root.strategy, `${manifestPath}.strategy`)
   const schemaVersion = text(root.schema_version, `${manifestPath}.schema_version`)
@@ -127,6 +286,17 @@ function parseManifest(content: string, manifestPath: string): StrategyManifestI
       .map((capability) => [capability.id, capability.config]),
   )
   const reasonCodes = stringList(root.reason_codes, `${manifestPath}.reason_codes`)
+  let walkForwardPolicyPath: string | null = null
+  if (root.validation !== undefined) {
+    const validation = exactRecord(root.validation, `${manifestPath}.validation`, ['walk_forward_policy'])
+    walkForwardPolicyPath = text(
+      validation.walk_forward_policy,
+      `${manifestPath}.validation.walk_forward_policy`,
+    )
+    if (!/^validation\/[a-z][a-z0-9-]*\.yaml$/.test(walkForwardPolicyPath)) {
+      throw new Error(`${manifestPath}.validation.walk_forward_policy is invalid`)
+    }
+  }
 
   if (schemaVersion !== STRATEGY_SCHEMA_VERSION) throw new Error(`${manifestPath} uses unsupported schema ${schemaVersion}`)
   if (!STRATEGY_FAMILIES.has(family)) throw new Error(`${manifestPath} has invalid family ${family}`)
@@ -145,7 +315,7 @@ function parseManifest(content: string, manifestPath: string): StrategyManifestI
     if (!/^[A-Z][A-Z0-9_]*$/.test(reasonCode)) throw new Error(`${manifestPath} has invalid reason code ${reasonCode}`)
   }
 
-  return {
+  const manifest: StrategyManifestIdentity = {
     schemaVersion: STRATEGY_SCHEMA_VERSION,
     id: text(strategy.id, `${manifestPath}.strategy.id`),
     name: text(strategy.name, `${manifestPath}.strategy.name`),
@@ -159,7 +329,9 @@ function parseManifest(content: string, manifestPath: string): StrategyManifestI
     requiredEngineCapabilities,
     capabilityConfigurations,
     reasonCodes,
+    walkForwardPolicy: null,
   }
+  return { manifest, walkForwardPolicyPath }
 }
 
 async function loadManifests(root: string, commit: string) {
@@ -191,13 +363,31 @@ async function loadManifests(root: string, commit: string) {
     }
   }
   entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0)
+  const entryByPath = new Map(treeEntries.map((entry) => [entry.path, entry]))
   const manifests = await Promise.all(entries.map(async ({ path: manifestPath }) => {
     const { stdout: content } = await execFileAsync(
       'git',
       ['-C', root, 'show', `${commit}:${manifestPath}`],
       { encoding: 'utf8' },
     )
-    return parseManifest(content, manifestPath)
+    const parsed = parseManifest(content, manifestPath)
+    if (!parsed.walkForwardPolicyPath) return parsed.manifest
+    const strategyDirectory = manifestPath.slice(0, manifestPath.lastIndexOf('/'))
+    const policyPath = `${strategyDirectory}/${parsed.walkForwardPolicyPath}`
+    const policyEntry = entryByPath.get(policyPath)
+    if (!policyEntry) throw new Error(`${policyPath} is missing from the pinned Git tree`)
+    if (policyEntry.type !== 'blob' || (policyEntry.mode !== '100644' && policyEntry.mode !== '100755')) {
+      throw new Error(`${policyPath} must be a regular tracked file`)
+    }
+    const { stdout: policyContent } = await execFileAsync(
+      'git',
+      ['-C', root, 'show', `${commit}:${policyPath}`],
+      { encoding: 'utf8' },
+    )
+    return {
+      ...parsed.manifest,
+      walkForwardPolicy: parseWalkForwardPolicy(policyContent, policyPath, parsed.manifest),
+    }
   }))
   const ids = new Set<string>()
   for (const manifest of manifests) {

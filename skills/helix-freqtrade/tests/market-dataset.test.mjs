@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   freqtradeOhlcvFile,
   marketDatasetHash,
+  requireMarketDatasetArtifactWindow,
   verifyMarketDataset,
 } from '../lib/market-dataset.mjs';
 
@@ -50,4 +51,34 @@ test('renders the exact Freqtrade futures JSON filename and OHLCV column order',
 test('matches Freqtrade 2026.6 pair filename character replacement', () => {
   const rendered = freqtradeOhlcvFile(fixture('BTC-USDT /USDT:USD.T@X$Y+Z'), '1m');
   assert.equal(rendered.relativePath, 'futures/BTC-USDT__USDT_USD_T_X_Y_Z-1m-futures.json');
+});
+
+test('accepts warm-up candles before the immutable artifact activation window', () => {
+  const minute = 60_000;
+  const dataset = fixture();
+  const artifact = {
+    baseTimeframe: '1m',
+    marketData: { firstCandleOpenTime: minute, lastCandleCloseTime: 2 * minute },
+  };
+  assert.deepEqual(requireMarketDatasetArtifactWindow(dataset, artifact), {
+    warmupCandles: 1,
+    firstCandleOpenTime: 0,
+    activationCandleOpenTime: minute,
+    lastCandleCloseTime: 2 * minute,
+  });
+
+  assert.throws(
+    () => requireMarketDatasetArtifactWindow(dataset, {
+      ...artifact,
+      marketData: { ...artifact.marketData, firstCandleOpenTime: minute / 2 },
+    }),
+    /does not contain the signal artifact activation candle/,
+  );
+  assert.throws(
+    () => requireMarketDatasetArtifactWindow(dataset, {
+      ...artifact,
+      marketData: { ...artifact.marketData, lastCandleCloseTime: minute },
+    }),
+    /end does not match signal artifact marketData/,
+  );
 });

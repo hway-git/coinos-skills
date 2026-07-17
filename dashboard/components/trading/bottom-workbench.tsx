@@ -23,6 +23,7 @@ import {
 import type { AccountSnapshot, AccountTableRow } from '@/lib/account-data'
 import type {
   FreqtradeBacktestResult,
+  FreqtradeDeploymentCandidate,
   FreqtradeDryRunDeployResult,
   FreqtradeEmergencyStopResult,
   FreqtradeLiveDeployResult,
@@ -72,6 +73,7 @@ const tabs: Array<{ id: TabId; label: string; icon: React.ElementType }> = [
 
 const ACCOUNT_REFRESH_MS = 15_000
 const FREQTRADE_REFRESH_MS = 15_000
+const HELIX_SIGNAL_STRATEGY = 'HelixSignalStrategy'
 
 function DataTable({
   columns,
@@ -275,15 +277,17 @@ async function postBacktest(form: BacktestForm) {
   return payload.result
 }
 
-async function postDryRunDeploy(strategy: string, pairs: string, maxOpenTrades: string) {
+async function postDryRunDeploy(candidate: FreqtradeDeploymentCandidate, pairs: string, maxOpenTrades: string) {
   const maxOpen = Number(maxOpenTrades)
   const response = await fetch('/api/freqtrade/deploy', {
     method: 'POST',
     cache: 'no-store',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      strategy,
-      pairs: pairs
+      strategy: candidate.strategy,
+      signalArtifactHash: candidate.signalArtifact?.artifactHash,
+      walkForwardReportFile: candidate.walkForwardReport?.reportFile,
+      pairs: candidate.signalArtifact ? undefined : pairs
         .split(',')
         .map((pair) => pair.trim())
         .filter(Boolean),
@@ -335,15 +339,19 @@ async function requestLiveSession(method: 'GET' | 'POST' | 'DELETE', token?: str
   return payload.session
 }
 
-async function postLiveDeploy(strategy: string, pairs: string, maxOpenTrades: string) {
+async function postLiveDeploy(candidate: FreqtradeDeploymentCandidate, pairs: string, maxOpenTrades: string) {
   const maxOpen = Number(maxOpenTrades)
   const response = await fetch('/api/freqtrade/live/deploy', {
     method: 'POST',
     cache: 'no-store',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      strategy,
-      pairs: pairs.split(',').map((pair) => pair.trim()).filter(Boolean),
+      strategy: candidate.strategy,
+      signalArtifactHash: candidate.signalArtifact?.artifactHash,
+      walkForwardReportFile: candidate.walkForwardReport?.reportFile,
+      pairs: candidate.signalArtifact
+        ? undefined
+        : pairs.split(',').map((pair) => pair.trim()).filter(Boolean),
       maxOpenTrades: Number.isInteger(maxOpen) ? maxOpen : 2,
     }),
   })
@@ -363,7 +371,7 @@ async function postEmergencyStop() {
     error?: string
     result?: FreqtradeEmergencyStopResult
   } | null
-  if (!response.ok || !payload?.result) throw new Error(payload?.error ?? `急停 HTTP ${response.status}`)
+  if (!payload?.result) throw new Error(payload?.error ?? `急停 HTTP ${response.status}`)
   return payload.result
 }
 
@@ -374,8 +382,19 @@ async function postReconciliation() {
     error?: string
     result?: FreqtradeReconciliationResult
   } | null
-  if (!response.ok || !payload?.result) throw new Error(payload?.error ?? `对账 HTTP ${response.status}`)
+  if (!payload?.result) throw new Error(payload?.error ?? `对账 HTTP ${response.status}`)
   return payload.result
+}
+
+function reconciliationMismatchSummary(mismatches: FreqtradeReconciliationResult['mismatches']) {
+  if (mismatches.length === 0) return ''
+  const visible = mismatches.slice(0, 3).map((item) => {
+    const amounts = item.botAmount !== 0 || item.exchangeAmount !== 0
+      ? `[bot=${item.botAmount},exchange=${item.exchangeAmount}]`
+      : ''
+    return `${item.issue}:${item.symbol}${item.orderId ? `#${item.orderId}` : ''}${amounts}`
+  })
+  return ` · ${visible.join(' · ')}${mismatches.length > visible.length ? ` · +${mismatches.length - visible.length}` : ''}`
 }
 
 function controlStatusLabel(session: ControlSession | null, loading: boolean) {
@@ -395,30 +414,58 @@ function backtestDefaults(snapshot: FreqtradeSnapshot | null): Partial<BacktestF
   if (!snapshot) return {}
 
   return {
-    strategy: validDaemonValue(snapshot.daemon.strategy) ? snapshot.daemon.strategy : undefined,
+    strategy: validDaemonValue(snapshot.daemon.strategy) && snapshot.daemon.strategy !== HELIX_SIGNAL_STRATEGY
+      ? snapshot.daemon.strategy
+      : undefined,
     timeframe: validDaemonValue(snapshot.daemon.timeframe) ? snapshot.daemon.timeframe : undefined,
     pairs: snapshot.daemon.pairs.length > 0 ? snapshot.daemon.pairs.join(', ') : undefined,
   }
 }
 
 function backtestStrategies(snapshot: FreqtradeSnapshot | null) {
-  const names = snapshot?.tables.strategies.map((row) => String(row.strategy ?? '')).filter(Boolean) ?? []
-  if (snapshot && validDaemonValue(snapshot.daemon.strategy)) names.unshift(snapshot.daemon.strategy)
+  const names = snapshot?.tables.strategies
+    .map((row) => String(row.strategy ?? ''))
+    .filter((strategy) => strategy && strategy !== HELIX_SIGNAL_STRATEGY) ?? []
+  if (
+    snapshot
+    && validDaemonValue(snapshot.daemon.strategy)
+    && snapshot.daemon.strategy !== HELIX_SIGNAL_STRATEGY
+  ) names.unshift(snapshot.daemon.strategy)
   return Array.from(new Set(names))
 }
 
+function deploymentCandidateLabel(candidate: FreqtradeDeploymentCandidate) {
+  const artifact = candidate.signalArtifact
+  if (!artifact) return candidate.strategy
+  return `${artifact.strategyId}/${artifact.strategyVersion} · ${artifact.symbol} · ${artifact.artifactHash.slice(7, 19)}`
+}
+
+function deploymentGateLabel(candidate: FreqtradeDeploymentCandidate | null, live: boolean) {
+  if (!candidate) return 'SELECT_EVIDENCE'
+  const gate = live ? candidate.live : candidate.dryRun
+  return gate.allowed ? (live ? 'LIVE_READY' : 'DRY_RUN_READY') : gate.blockers.join(' · ')
+}
+
+function deploymentCandidateSummary(candidate: FreqtradeDeploymentCandidate) {
+  const artifact = candidate.signalArtifact
+  const profit = candidate.metrics.profitRatio == null
+    ? '--'
+    : `${(candidate.metrics.profitRatio * 100).toFixed(3)}%`
+  return artifact
+    ? `${artifact.artifactHash} · ${artifact.lifecycle} · ${candidate.metrics.trades ?? '--'} trades · ${profit}`
+    : `${candidate.strategy} · ${candidate.metrics.trades ?? '--'} trades · ${profit}`
+}
+
 function LiveDeployControls({
-  strategy,
+  candidate,
   pairs,
   maxOpenTrades,
-  blocked,
   requireControl,
   onRefresh,
 }: {
-  strategy: string
+  candidate: FreqtradeDeploymentCandidate | null
   pairs: string
   maxOpenTrades: string
-  blocked: boolean
   requireControl: () => boolean
   onRefresh: () => Promise<void>
 }) {
@@ -433,6 +480,11 @@ function LiveDeployControls({
       .then(setSession)
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : '实盘授权状态不可用'))
   }, [])
+
+  useEffect(() => {
+    setError(null)
+    setOutput(null)
+  }, [candidate?.evidenceId, candidate?.key, candidate?.live.allowed])
 
   const unlock = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -469,7 +521,8 @@ function LiveDeployControls({
     setError(null)
     setOutput(null)
     try {
-      setOutput(await postLiveDeploy(strategy, pairs, maxOpenTrades))
+      if (!candidate) throw new Error('请选择 exact deployment evidence')
+      setOutput(await postLiveDeploy(candidate, pairs, maxOpenTrades))
       await onRefresh()
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '实盘部署失败')
@@ -515,7 +568,7 @@ function LiveDeployControls({
         <>
           <button
             type="button"
-            disabled={busy || blocked || !strategy}
+            disabled={busy || !candidate?.live.allowed}
             onClick={() => void deploy()}
             className="inline-flex h-7 items-center gap-1 rounded border border-down/60 px-2 text-[10px] text-down hover:bg-down/10 disabled:opacity-40"
           >
@@ -535,7 +588,9 @@ function LiveDeployControls({
         </>
       )}
       <span className={cn('min-w-0 flex-1 truncate font-mono text-[10px]', error ? 'text-down' : 'text-muted-foreground')}>
-        {error ?? (output ? `${output.strategy} · LIVE · max ${output.maxOpenTrades}` : '')}
+        {error ?? (output
+          ? `${output.strategy} · ${output.signalArtifactHash?.slice(0, 19) ?? 'no-artifact'} · LIVE · max ${output.maxOpenTrades}`
+          : deploymentGateLabel(candidate, true))}
       </span>
     </div>
   )
@@ -572,7 +627,7 @@ function RiskPanel({
     setError(null)
     try {
       const result = await postReconciliation()
-      setMessage(`${result.status} · bot ${result.botPositions} · exchange ${result.exchangePositions} · mismatch ${result.mismatches.length}`)
+      setMessage(`${result.status} · bot ${result.botPositions} · exchange ${result.exchangePositions} · mismatch ${result.mismatches.length}${reconciliationMismatchSummary(result.mismatches)}`)
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '对账失败')
     } finally {
@@ -592,8 +647,10 @@ function RiskPanel({
     setError(null)
     try {
       const result = await postEmergencyStop()
-      setMessage(`急停完成 · open ${result.openTradesBefore ?? '--'} · force ${result.forceExitError ? 'failed' : 'ok'} · stop ${result.stopError ? 'failed' : 'ok'}`)
+      const summary = `operation ${result.operationError ?? 'ok'} · open ${result.openTradesBefore ?? '--'} -> ${result.openTradesAfter ?? '--'} · force ${result.forceExitError ?? 'ok'} · stop ${result.stopError ?? 'ok'} · reconcile ${result.reconciliationError ?? result.reconciliationStatus ?? 'not-run'}${reconciliationMismatchSummary(result.reconciliationMismatches)}`
       await onRefresh()
+      if (!result.success) throw new Error(`急停未完成 · ${summary}`)
+      setMessage(`急停完成 · ${summary}`)
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '急停失败')
     } finally {
@@ -643,15 +700,16 @@ function RiskPanel({
 
 function AutomationPanel({
   rows,
+  candidates,
   loading,
   detail,
-  deployStrategy,
+  deployTargetKey,
   deployPairs,
   deployMaxOpenTrades,
   deploying,
   deployError,
   deployOutput,
-  onDeployStrategyChange,
+  onDeployTargetChange,
   onDeployPairsChange,
   onDeployMaxOpenTradesChange,
   onDeploySubmit,
@@ -659,28 +717,25 @@ function AutomationPanel({
   onRefresh,
 }: {
   rows: TableRow[]
+  candidates: FreqtradeDeploymentCandidate[]
   loading: boolean
   detail?: string | null
-  deployStrategy: string
+  deployTargetKey: string
   deployPairs: string
   deployMaxOpenTrades: string
   deploying: boolean
   deployError: string | null
   deployOutput: FreqtradeDryRunDeployResult | null
-  onDeployStrategyChange: (strategy: string) => void
+  onDeployTargetChange: (key: string) => void
   onDeployPairsChange: (pairs: string) => void
   onDeployMaxOpenTradesChange: (value: string) => void
   onDeploySubmit: (event: React.FormEvent<HTMLFormElement>) => void
   requireControl: () => boolean
   onRefresh: () => Promise<void>
 }) {
-  const strategyOptions = rows
-    .map((row) => String(row.strategy ?? ''))
-    .filter(Boolean)
-  const deployHasBacktest = deployStrategy
-    ? rows.some((row) => String(row.strategy ?? '') === deployStrategy && row.verification === '已回测')
-    : false
-  const deployBlocked = Boolean(deployStrategy && !deployHasBacktest)
+  const candidate = candidates.find((item) => item.key === deployTargetKey) ?? null
+  const deployBlocked = Boolean(candidate && !candidate.dryRun.allowed)
+  const effectivePairs = candidate?.signalArtifact ? candidate.pairs.join(', ') : deployPairs
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -688,28 +743,29 @@ function AutomationPanel({
         <label className="min-w-[200px] flex-1 space-y-1">
           <span className="flex items-center justify-between gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
             <span>Dry-run Deploy</span>
-            {deployStrategy && (
-              <span className={cn('font-mono', deployHasBacktest ? 'text-up' : 'text-[var(--chart-3)]')}>
-                {deployHasBacktest ? 'BACKTESTED' : 'NEED_BACKTEST'}
+            {candidate && (
+              <span className={cn('font-mono', candidate.dryRun.allowed ? 'text-up' : 'text-[var(--chart-3)]')}>
+                {deploymentGateLabel(candidate, false)}
               </span>
             )}
           </span>
           <select
-            value={deployStrategy}
-            onChange={(event) => onDeployStrategyChange(event.target.value)}
+            value={deployTargetKey}
+            onChange={(event) => onDeployTargetChange(event.target.value)}
             className="h-8 w-full rounded-md border border-border bg-background/60 px-2 font-mono text-xs text-foreground outline-none focus:border-ring"
           >
             <option value="">选择策略</option>
-            {strategyOptions.map((strategy) => (
-              <option key={strategy} value={strategy}>{strategy}</option>
+            {candidates.map((option) => (
+              <option key={option.key} value={option.key}>{deploymentCandidateLabel(option)}</option>
             ))}
           </select>
         </label>
         <label className="min-w-[230px] flex-1 space-y-1">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Pairs</span>
           <input
-            value={deployPairs}
+            value={effectivePairs}
             onChange={(event) => onDeployPairsChange(event.target.value)}
+            readOnly={Boolean(candidate?.signalArtifact)}
             placeholder="BTC/USDT:USDT, ETH/USDT:USDT"
             className="h-8 w-full rounded-md border border-border bg-background/60 px-2 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
           />
@@ -726,32 +782,35 @@ function AutomationPanel({
         </label>
         <button
           type="submit"
-          disabled={deploying || !deployStrategy || deployBlocked}
-          title={deployBlocked ? '请先在回测 tab 完成该策略回测' : undefined}
+          disabled={deploying || !candidate || deployBlocked}
+          title={deployBlocked ? deploymentGateLabel(candidate, false) : undefined}
           className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-border px-3 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
         >
           {deploying ? <LoaderCircle className="size-3.5 animate-spin" /> : <Rocket className="size-3.5" />}
           模拟部署
         </button>
       </form>
-      {(deployError || deployOutput || deployBlocked) && (
-        <div className="shrink-0 border-b border-border px-3 py-1.5 font-mono text-[10px] leading-4">
+      {(deployError || deployOutput || candidate) && (
+        <div className="shrink-0 break-all border-b border-border px-3 py-1.5 font-mono text-[10px] leading-4">
           {deployError ? (
             <span className="text-[var(--chart-3)]">{deployError}</span>
-          ) : deployBlocked ? (
-            <span className="text-[var(--chart-3)]">请先在回测 tab 完成 {deployStrategy} 的回测，再模拟部署</span>
+          ) : deployBlocked && candidate ? (
+            <span className="text-[var(--chart-3)]">
+              {deploymentCandidateSummary(candidate)} · {deploymentGateLabel(candidate, false)}
+            </span>
           ) : deployOutput ? (
             <span className="text-muted-foreground">
               {deployOutput.strategy} · DRY_RUN · {deployOutput.pairs.length || 'existing'} pairs · max {deployOutput.maxOpenTrades ?? '--'} · {deployOutput.note}
             </span>
+          ) : candidate ? (
+            <span className="text-muted-foreground">{deploymentCandidateSummary(candidate)}</span>
           ) : null}
         </div>
       )}
       <LiveDeployControls
-        strategy={deployStrategy}
-        pairs={deployPairs}
+        candidate={candidate}
+        pairs={effectivePairs}
         maxOpenTrades={deployMaxOpenTrades}
-        blocked={deployBlocked}
         requireControl={requireControl}
         onRefresh={onRefresh}
       />
@@ -906,7 +965,7 @@ function renderPanel({
   freqtradeSnapshot,
   freqtradeLoading,
   freqtradeError,
-  deployStrategy,
+  deployTargetKey,
   deployPairs,
   deployMaxOpenTrades,
   deploying,
@@ -917,7 +976,7 @@ function renderPanel({
   backtestRunning,
   backtestError,
   backtestOutput,
-  onDeployStrategyChange,
+  onDeployTargetChange,
   onDeployPairsChange,
   onDeployMaxOpenTradesChange,
   onDeploySubmit,
@@ -935,7 +994,7 @@ function renderPanel({
   freqtradeSnapshot: FreqtradeSnapshot | null
   freqtradeLoading: boolean
   freqtradeError: string | null
-  deployStrategy: string
+  deployTargetKey: string
   deployPairs: string
   deployMaxOpenTrades: string
   deploying: boolean
@@ -946,7 +1005,7 @@ function renderPanel({
   backtestRunning: boolean
   backtestError: string | null
   backtestOutput: FreqtradeBacktestResult | null
-  onDeployStrategyChange: (strategy: string) => void
+  onDeployTargetChange: (key: string) => void
   onDeployPairsChange: (pairs: string) => void
   onDeployMaxOpenTradesChange: (value: string) => void
   onDeploySubmit: (event: React.FormEvent<HTMLFormElement>) => void
@@ -1012,15 +1071,16 @@ function renderPanel({
     return (
       <AutomationPanel
         rows={freqtradeSnapshot?.tables.strategies ?? []}
+        candidates={freqtradeSnapshot?.deployments ?? []}
         loading={freqtradeLoading}
         detail={freqtradeErrorDetail}
-        deployStrategy={deployStrategy}
+        deployTargetKey={deployTargetKey}
         deployPairs={deployPairs}
         deployMaxOpenTrades={deployMaxOpenTrades}
         deploying={deploying}
         deployError={deployError}
         deployOutput={deployOutput}
-        onDeployStrategyChange={onDeployStrategyChange}
+        onDeployTargetChange={onDeployTargetChange}
         onDeployPairsChange={onDeployPairsChange}
         onDeployMaxOpenTradesChange={onDeployMaxOpenTradesChange}
         onDeploySubmit={onDeploySubmit}
@@ -1092,7 +1152,7 @@ export function BottomWorkbench() {
   const [credentialForm, setCredentialForm] = useState<CredentialForm>(() => emptyCredentialForm())
   const [credentialSaving, setCredentialSaving] = useState(false)
   const [credentialError, setCredentialError] = useState<string | null>(null)
-  const [deployStrategy, setDeployStrategy] = useState('')
+  const [deployTargetKey, setDeployTargetKey] = useState('')
   const [deployPairs, setDeployPairs] = useState('')
   const [deployMaxOpenTrades, setDeployMaxOpenTrades] = useState('')
   const [deploying, setDeploying] = useState(false)
@@ -1219,9 +1279,13 @@ export function BottomWorkbench() {
   }, [backtestDirty, freqtradeSnapshot])
 
   useEffect(() => {
-    if (deployStrategy || !freqtradeSnapshot || !validDaemonValue(freqtradeSnapshot.daemon.strategy)) return
-    setDeployStrategy(freqtradeSnapshot.daemon.strategy)
-  }, [deployStrategy, freqtradeSnapshot])
+    if (deployTargetKey || !freqtradeSnapshot || !validDaemonValue(freqtradeSnapshot.daemon.strategy)) return
+    const targetKey = freqtradeSnapshot.daemon.signalArtifactHash
+      || `strategy:${freqtradeSnapshot.daemon.strategy}`
+    if (freqtradeSnapshot.deployments.some((candidate) => candidate.key === targetKey)) {
+      setDeployTargetKey(targetKey)
+    }
+  }, [deployTargetKey, freqtradeSnapshot])
 
   useEffect(() => {
     if (deployPairs || !freqtradeSnapshot?.daemon.pairs.length) return
@@ -1233,6 +1297,12 @@ export function BottomWorkbench() {
     const value = Number(freqtradeSnapshot.daemon.maxOpenTrades)
     if (Number.isInteger(value) && value > 0) setDeployMaxOpenTrades(String(value))
   }, [deployMaxOpenTrades, freqtradeSnapshot])
+
+  const selectedDeployment = freqtradeSnapshot?.deployments.find((candidate) => candidate.key === deployTargetKey)
+  useEffect(() => {
+    setDeployError(null)
+    setDeployOutput(null)
+  }, [deployTargetKey, selectedDeployment?.dryRun.allowed, selectedDeployment?.evidenceId])
 
   const selectTab = (tab: TabId) => {
     if (tab === active) {
@@ -1319,7 +1389,9 @@ export function BottomWorkbench() {
     setDeployOutput(null)
 
     try {
-      const result = await postDryRunDeploy(deployStrategy, deployPairs, deployMaxOpenTrades)
+      const candidate = freqtradeSnapshot?.deployments.find((item) => item.key === deployTargetKey)
+      if (!candidate) throw new Error('请选择 exact deployment evidence')
+      const result = await postDryRunDeploy(candidate, deployPairs, deployMaxOpenTrades)
       setDeployOutput(result)
       await loadFreqtrade(true, true)
     } catch (error) {
@@ -1434,7 +1506,7 @@ export function BottomWorkbench() {
             freqtradeSnapshot,
             freqtradeLoading,
             freqtradeError,
-            deployStrategy,
+            deployTargetKey,
             deployPairs,
             deployMaxOpenTrades,
             deploying,
@@ -1445,10 +1517,14 @@ export function BottomWorkbench() {
             backtestRunning,
             backtestError,
             backtestOutput,
-            onDeployStrategyChange: (strategy) => {
+            onDeployTargetChange: (key) => {
               setDeployError(null)
               setDeployOutput(null)
-              setDeployStrategy(strategy)
+              setDeployTargetKey(key)
+              const candidate = freqtradeSnapshot?.deployments.find((item) => item.key === key)
+              setDeployPairs(candidate?.signalArtifact
+                ? candidate.pairs.join(', ')
+                : freqtradeSnapshot?.daemon.pairs.join(', ') ?? '')
             },
             onDeployPairsChange: (pairs) => {
               setDeployError(null)

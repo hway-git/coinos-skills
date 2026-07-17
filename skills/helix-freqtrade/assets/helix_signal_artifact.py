@@ -308,7 +308,11 @@ def path_fingerprint(path: str | Path) -> tuple[Any, ...]:
     if not artifact_path.exists():
         return (str(artifact_path), "missing")
     files = [artifact_path] if artifact_path.is_file() else sorted(artifact_path.glob("*.json"))
-    return tuple((str(file), file.stat().st_mtime_ns, file.stat().st_size) for file in files)
+    fingerprint = []
+    for file in files:
+        stat = file.stat()
+        fingerprint.append((str(file), stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size))
+    return tuple(fingerprint)
 
 
 def _main() -> int:

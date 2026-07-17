@@ -6,12 +6,10 @@ import type {
   StrategyHistoricalDataset,
   StrategyManifestIdentity,
 } from '@helix/contracts/strategy'
+import { assertStrategyHistoricalRiskTrace } from './historical-risk'
 import { assertStrategySignalArtifact } from './signal-artifact'
 import { assertStrategyHistoricalDataset } from './historical-dataset'
-import { runHistoricalStrategy } from './historical-runner'
-import { scalpHistoricalConfig, swingHistoricalConfig } from './historical-config'
-import { ScalpHistoricalEvaluator } from './scalp-historical'
-import { SwingHistoricalEvaluator } from './swing-historical'
+import { evaluateStrategyDataset } from './strategy-evaluator'
 import {
   createStrategyDecisionIdentityFromSnapshot,
   loadStrategyRepositorySnapshot,
@@ -27,6 +25,16 @@ function text(value: unknown, name: string) {
   return value.trim()
 }
 
+function optionalText(value: unknown, name: string) {
+  return value === undefined ? undefined : text(value, name)
+}
+
+function optionalTimestamp(value: unknown, name: string) {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${name} must be a non-negative integer timestamp`)
+  return Number(value)
+}
+
 async function writeJsonAtomic(file: string, value: unknown) {
   const destination = resolve(file)
   const temporary = `${destination}.tmp.${process.pid}`
@@ -35,57 +43,20 @@ async function writeJsonAtomic(file: string, value: unknown) {
   return destination
 }
 
-function evaluatorTimeframes(
-  manifest: StrategyManifestIdentity,
-  expected: Record<string, string>,
-) {
-  const actual = Object.fromEntries(manifest.timeframes.map(({ role, timeframe }) => [role, timeframe]))
-  const expectedRoles = Object.keys(expected).sort()
-  const actualRoles = Object.keys(actual).sort()
-  if (!isDeepStrictEqual(actualRoles, expectedRoles)
-    || expectedRoles.some((role) => actual[role] !== expected[role])) {
-    throw new Error(`${manifest.id} manifest timeframes do not match the current V1 evaluator`)
-  }
-  return {
-    baseTimeframe: expected.execution!,
-    requiredTimeframes: manifest.timeframes.map(({ timeframe }) => timeframe),
-  }
-}
-
 function evaluateHistoricalStrategy(
   manifest: StrategyManifestIdentity,
   dataset: StrategyHistoricalDataset,
   identity: StrategyDecisionIdentity,
+  firstDecisionTime?: number,
 ) {
-  if (manifest.id === 'helix_scalp_hunter') {
-    const timeframes = evaluatorTimeframes(manifest, {
-      regime: '1h', hunting_zone: '15m', price_event: '5m', execution: '1m',
-    })
-    const evaluator = new ScalpHistoricalEvaluator(scalpHistoricalConfig(manifest))
-    const artifact = runHistoricalStrategy({
-      dataset, identity, strategyLifecycle: manifest.lifecycle, objectModel: manifest.objectModel,
-      ...timeframes, registeredReasonCodes: manifest.reasonCodes, evaluate: evaluator.evaluate,
-    })
-    return { artifact, statistics: evaluator.statistics() }
-  }
-  if (manifest.id === 'helix_swing_hunter') {
-    const timeframes = evaluatorTimeframes(manifest, {
-      context: '1d', thesis: '4h', evidence: '1h', execution: '15m',
-    })
-    const evaluator = new SwingHistoricalEvaluator(swingHistoricalConfig(manifest))
-    const artifact = runHistoricalStrategy({
-      dataset, identity, strategyLifecycle: manifest.lifecycle, objectModel: manifest.objectModel,
-      ...timeframes, registeredReasonCodes: manifest.reasonCodes, evaluate: evaluator.evaluate,
-    })
-    return { artifact, statistics: evaluator.statistics() }
-  }
-  throw new Error(`historical evaluator is unavailable for ${manifest.id}`)
+  return evaluateStrategyDataset({ manifest, dataset, identity, firstDecisionTime })
 }
 
 async function run(params: Record<string, unknown>) {
   const datasetFile = resolve(text(params.dataset, 'params.dataset'))
   const dataset = assertStrategyHistoricalDataset(JSON.parse(await readFile(datasetFile, 'utf8')))
   const strategyId = text(params.strategyId, 'params.strategyId')
+  const firstDecisionTime = optionalTimestamp(params.firstDecisionTime, 'params.firstDecisionTime')
   const snapshot = await loadStrategyRepositorySnapshot()
   if (!snapshot.ok) throw new Error(snapshot.errors[0] || 'strategy repository unavailable')
   const manifest = snapshot.manifests.find((candidate) => candidate.id === strategyId)
@@ -95,8 +66,8 @@ async function run(params: Record<string, unknown>) {
     marketDataSnapshotId: dataset.datasetHash,
   })
 
-  const first = evaluateHistoricalStrategy(manifest, dataset, identity)
-  const replay = evaluateHistoricalStrategy(manifest, dataset, identity)
+  const first = evaluateHistoricalStrategy(manifest, dataset, identity, firstDecisionTime)
+  const replay = evaluateHistoricalStrategy(manifest, dataset, identity, firstDecisionTime)
   if (!isDeepStrictEqual(replay, first)) {
     throw new Error('historical strategy replay is non-deterministic')
   }
@@ -107,7 +78,14 @@ async function run(params: Record<string, unknown>) {
   if (!isDeepStrictEqual(verifiedIdentity, identity)) {
     throw new Error('strategy or Engine identity changed during historical backtest')
   }
-  const output = await writeJsonAtomic(text(params.output, 'params.output'), first.artifact)
+  const outputFile = resolve(text(params.output, 'params.output'))
+  const riskTraceFile = resolve(optionalText(params.riskTraceOutput, 'params.riskTraceOutput')
+    ?? `${outputFile}.risk-trace.json`)
+  if (riskTraceFile === outputFile) {
+    throw new Error('params.riskTraceOutput must differ from params.output')
+  }
+  const output = await writeJsonAtomic(outputFile, first.artifact)
+  const riskTraceOutput = await writeJsonAtomic(riskTraceFile, first.riskTrace)
   return {
     ok: true,
     output,
@@ -115,8 +93,15 @@ async function run(params: Record<string, unknown>) {
     identity: first.artifact.identity,
     lifecycle: first.artifact.strategyLifecycle,
     signals: first.artifact.signals.length,
+    riskTraceOutput,
+    riskTraceHash: first.riskTrace.traceHash,
+    riskEntries: first.riskTrace.entries.length,
     statistics: first.statistics,
-    replay: { ok: true, artifactHash: replay.artifact.artifactHash },
+    replay: {
+      ok: true,
+      artifactHash: replay.artifact.artifactHash,
+      riskTraceHash: replay.riskTrace.traceHash,
+    },
   }
 }
 
@@ -128,7 +113,23 @@ async function main() {
   if (action === 'verify') {
     const input = resolve(text(params.input, 'params.input'))
     const artifact = assertStrategySignalArtifact(JSON.parse(await readFile(input, 'utf8')))
-    return { ok: true, input, artifactHash: artifact.artifactHash, identity: artifact.identity, signals: artifact.signals.length }
+    const riskTraceInputValue = optionalText(params.riskTraceInput, 'params.riskTraceInput')
+    const riskTraceInput = riskTraceInputValue ? resolve(riskTraceInputValue) : undefined
+    const riskTrace = riskTraceInput
+      ? assertStrategyHistoricalRiskTrace(JSON.parse(await readFile(riskTraceInput, 'utf8')), artifact)
+      : undefined
+    return {
+      ok: true,
+      input,
+      artifactHash: artifact.artifactHash,
+      identity: artifact.identity,
+      signals: artifact.signals.length,
+      ...(riskTrace && riskTraceInput ? {
+        riskTraceInput,
+        riskTraceHash: riskTrace.traceHash,
+        riskEntries: riskTrace.entries.length,
+      } : {}),
+    }
   }
   throw new Error('Usage: backtest-cli.ts <run|verify> <json-params>')
 }

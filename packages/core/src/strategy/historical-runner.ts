@@ -73,20 +73,14 @@ function closedCandleView(source: readonly Candle[], end: number): readonly Cand
   })
 }
 
-export function runHistoricalStrategy(options: {
+export function historicalDecisionContexts(options: {
   dataset: StrategyHistoricalDataset
-  identity: StrategyDecisionIdentity
-  strategyLifecycle: StrategyLifecycle
-  objectModel: StrategyObjectModel
   baseTimeframe: string
+  firstDecisionTime?: number
+  afterDecisionTime?: number
   requiredTimeframes: readonly string[]
-  registeredReasonCodes: readonly string[]
-  evaluate: HistoricalStrategyEvaluator
-}): StrategySignalArtifact {
+}) {
   const dataset = assertStrategyHistoricalDataset(options.dataset)
-  if (options.identity.marketDataSnapshotId !== dataset.datasetHash) {
-    throw new Error('identity.marketDataSnapshotId must equal the historical dataset hash')
-  }
   if (!options.requiredTimeframes.includes(options.baseTimeframe)) {
     throw new Error('requiredTimeframes must include baseTimeframe')
   }
@@ -98,8 +92,17 @@ export function runHistoricalStrategy(options: {
   const baseCandles = dataset.timeframes[options.baseTimeframe]!
   const firstBaseOpen = baseCandles[0]!.time
   const lastBaseClose = baseCandles.at(-1)!.time + baseDuration
-  const registeredReasonCodes = new Set(options.registeredReasonCodes)
-  if (registeredReasonCodes.size === 0) throw new Error('registeredReasonCodes must not be empty')
+  const firstDecisionTime = options.firstDecisionTime ?? firstBaseOpen + baseDuration
+  if (!Number.isSafeInteger(firstDecisionTime)
+    || firstDecisionTime % baseDuration !== 0
+    || firstDecisionTime < firstBaseOpen + baseDuration
+    || firstDecisionTime > lastBaseClose) {
+    throw new Error('firstDecisionTime must be an aligned base candle close inside the dataset window')
+  }
+  const afterDecisionTime = options.afterDecisionTime ?? -1
+  if (!Number.isSafeInteger(afterDecisionTime) || afterDecisionTime < -1) {
+    throw new Error('afterDecisionTime must be a non-negative integer timestamp or -1')
+  }
   for (const timeframe of uniqueTimeframes) {
     const source = dataset.timeframes[timeframe]!
     const { duration } = strategyTimeframeMilliseconds(timeframe)
@@ -113,11 +116,7 @@ export function runHistoricalStrategy(options: {
     }
   }
   const cursors = Object.fromEntries(uniqueTimeframes.map((timeframe) => [timeframe, 0])) as Record<string, number>
-  const signals: Array<HistoricalSignalDecision & {
-    sequence: number
-    sourceCandleOpenTime: number
-    decisionTime: number
-  }> = []
+  const contexts: HistoricalDecisionContext[] = []
 
   for (const sourceCandle of baseCandles) {
     const decisionTime = sourceCandle.time + baseDuration
@@ -132,6 +131,7 @@ export function runHistoricalStrategy(options: {
       cursors[timeframe] = cursor
       contextCandles[timeframe] = closedCandleView(source, cursor)
     }
+    if (decisionTime < firstDecisionTime || decisionTime <= afterDecisionTime) continue
     const context: HistoricalDecisionContext = Object.freeze({
       symbol: dataset.source.symbol,
       baseTimeframe: options.baseTimeframe,
@@ -139,6 +139,41 @@ export function runHistoricalStrategy(options: {
       sourceCandle,
       candles: Object.freeze(contextCandles),
     })
+    contexts.push(context)
+  }
+  return {
+    dataset,
+    baseDuration,
+    firstDecisionTime,
+    lastBaseClose,
+    contexts: Object.freeze(contexts),
+  }
+}
+
+export function runHistoricalStrategy(options: {
+  dataset: StrategyHistoricalDataset
+  identity: StrategyDecisionIdentity
+  strategyLifecycle: StrategyLifecycle
+  objectModel: StrategyObjectModel
+  baseTimeframe: string
+  firstDecisionTime?: number
+  requiredTimeframes: readonly string[]
+  registeredReasonCodes: readonly string[]
+  evaluate: HistoricalStrategyEvaluator
+}): StrategySignalArtifact {
+  const prepared = historicalDecisionContexts(options)
+  if (options.identity.marketDataSnapshotId !== prepared.dataset.datasetHash) {
+    throw new Error('identity.marketDataSnapshotId must equal the historical dataset hash')
+  }
+  const registeredReasonCodes = new Set(options.registeredReasonCodes)
+  if (registeredReasonCodes.size === 0) throw new Error('registeredReasonCodes must not be empty')
+  const signals: Array<HistoricalSignalDecision & {
+    sequence: number
+    sourceCandleOpenTime: number
+    decisionTime: number
+  }> = []
+
+  for (const context of prepared.contexts) {
     const decisions = options.evaluate(context)
     if (!Array.isArray(decisions)) throw new Error('historical evaluator must return an array')
     for (const decision of decisions) {
@@ -153,8 +188,8 @@ export function runHistoricalStrategy(options: {
       signals.push({
         ...decision,
         sequence: signals.length,
-        sourceCandleOpenTime: sourceCandle.time,
-        decisionTime,
+        sourceCandleOpenTime: context.sourceCandle.time,
+        decisionTime: context.decisionTime,
       })
     }
   }
@@ -164,11 +199,11 @@ export function runHistoricalStrategy(options: {
     identity: options.identity,
     strategyLifecycle: options.strategyLifecycle,
     objectModel: options.objectModel,
-    symbol: dataset.source.symbol,
+    symbol: prepared.dataset.source.symbol,
     baseTimeframe: options.baseTimeframe,
     marketData: {
-      firstCandleOpenTime: baseCandles[0]!.time,
-      lastCandleCloseTime: baseCandles.at(-1)!.time + baseDuration,
+      firstCandleOpenTime: prepared.firstDecisionTime - prepared.baseDuration,
+      lastCandleCloseTime: prepared.lastBaseClose,
     },
     signals,
   })

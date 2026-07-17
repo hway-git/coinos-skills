@@ -129,6 +129,59 @@ test('requires Decision Identity to name the exact dataset snapshot', () => {
   }), /marketDataSnapshotId must equal/)
 })
 
+test('uses warm-up candles without evaluating decisions before the activation boundary', () => {
+  const snapshot = dataset()
+  const evaluated: Array<{ decisionTime: number; baseCandles: number }> = []
+  const artifact = runHistoricalStrategy({
+    dataset: snapshot,
+    identity: identity(snapshot.datasetHash),
+    strategyLifecycle: 'shadow',
+    objectModel: 'PRICE_EVENT',
+    baseTimeframe: '1m',
+    firstDecisionTime: 5 * minute,
+    requiredTimeframes: ['1m', '5m'],
+    registeredReasonCodes: ['EXECUTION_TRIGGERED', 'TIME_STOP'],
+    evaluate: (context) => {
+      evaluated.push({ decisionTime: context.decisionTime, baseCandles: context.candles['1m']!.length })
+      return [{
+        signalId: `signal-${context.decisionTime}`,
+        decisionId: `decision-${context.decisionTime}`,
+        object: { model: 'PRICE_EVENT', id: 'event-activation' },
+        action: context.decisionTime === 5 * minute ? 'ENTER' : 'EXIT',
+        side: 'LONG',
+        reasonCodes: [context.decisionTime === 5 * minute ? 'EXECUTION_TRIGGERED' : 'TIME_STOP'],
+      }]
+    },
+  })
+
+  assert.deepEqual(evaluated, [
+    { decisionTime: 5 * minute, baseCandles: 5 },
+    { decisionTime: 6 * minute, baseCandles: 6 },
+  ])
+  assert.equal(artifact.marketData.firstCandleOpenTime, 4 * minute)
+  assert.equal(artifact.signals[0]!.decisionTime, 5 * minute)
+})
+
+test('rejects an activation boundary outside closed aligned base candles', () => {
+  const snapshot = dataset()
+  const options = {
+    dataset: snapshot,
+    identity: identity(snapshot.datasetHash),
+    strategyLifecycle: 'shadow' as const,
+    objectModel: 'PRICE_EVENT' as const,
+    baseTimeframe: '1m',
+    requiredTimeframes: ['1m'],
+    registeredReasonCodes: ['EXECUTION_TRIGGERED'],
+    evaluate: () => [],
+  }
+  for (const firstDecisionTime of [minute / 2, 7 * minute]) {
+    assert.throws(
+      () => runHistoricalStrategy({ ...options, firstDecisionTime }),
+      /firstDecisionTime must be an aligned base candle close inside the dataset window/,
+    )
+  }
+})
+
 test('rejects stale higher-timeframe tails and unregistered reason codes', () => {
   const late = createStrategyHistoricalDataset({
     schemaVersion: 'helix.market-dataset/v1',

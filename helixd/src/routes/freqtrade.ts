@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import type { FreqtradeEmergencyStopResult, FreqtradeReconciliationResult } from '@helix/contracts/freqtrade'
 import {
   createFreqtradeStrategy,
   deployFreqtradeDryRun,
@@ -23,6 +24,43 @@ import {
 } from '../security/live-access'
 
 export const freqtradeRoutes = new Hono()
+
+type EmergencyStopActionResult =
+  | { ok: true; data: FreqtradeEmergencyStopResult }
+  | { ok: false; error: string }
+
+export function finalizeFreqtradeEmergencyStop(
+  result: EmergencyStopActionResult,
+  reconciliation: FreqtradeReconciliationResult,
+) {
+  const operationError = result.ok ? null : result.error
+  const base: FreqtradeEmergencyStopResult = result.ok ? result.data : {
+    success: false,
+    operationError,
+    openTradesBefore: null,
+    openTradesAfter: null,
+    forceExitError: null,
+    stopError: null,
+    reconciliationStatus: null,
+    reconciliationError: null,
+    reconciliationMismatches: [],
+  }
+  const exchangeFlat = reconciliation.status === 'not_applicable'
+    ? reconciliation.botPositions === 0
+      && reconciliation.exchangePositions === 0
+      && reconciliation.mismatches.length === 0
+    : reconciliation.status === 'matched'
+      && reconciliation.botPositions === 0
+      && reconciliation.exchangePositions === 0
+  return {
+    ...base,
+    success: base.success && exchangeFlat,
+    operationError,
+    reconciliationStatus: reconciliation.status,
+    reconciliationError: exchangeFlat ? null : reconciliation.detail,
+    reconciliationMismatches: reconciliation.mismatches,
+  } satisfies FreqtradeEmergencyStopResult
+}
 
 freqtradeRoutes.get('/snapshot', async (c) => {
   const refresh = c.req.query('refresh') === '1'
@@ -63,6 +101,8 @@ freqtradeRoutes.post('/deploy', async (c) => {
   const body = await readJson(c)
   const result = await deployFreqtradeDryRun({
     strategy: stringField(body.strategy),
+    signalArtifactHash: body.signalArtifactHash,
+    walkForwardReportFile: body.walkForwardReportFile,
     pairs: stringList(body.pairs),
     maxOpenTrades: numberField(body.maxOpenTrades),
   })
@@ -76,7 +116,7 @@ freqtradeRoutes.post('/deploy', async (c) => {
   clearFreqtradeSnapshotCache()
   appendFreqtradeAuditEvent(
     'dry_run_deployed',
-    `${result.data.strategy} · ${result.data.pairs.length || 'existing'} pairs · max ${result.data.maxOpenTrades ?? '--'}`,
+    `${result.data.strategy} · ${result.data.signalArtifactHash ?? 'no-artifact'} · ${result.data.forwardRuntime?.state ?? 'static'} · ${result.data.pairs.length || 'existing'} pairs · max ${result.data.maxOpenTrades ?? '--'}`,
   )
   return c.json({ ok: true, result: result.data })
 })
@@ -113,16 +153,21 @@ freqtradeRoutes.post('/emergency-stop', async (c) => {
 
   const result = await emergencyStopFreqtrade()
   clearFreqtradeSnapshotCache()
-  if (!result.ok) {
-    appendFreqtradeAuditEvent('emergency_stop_error', result.error, 'Operator')
-    return c.json({ ok: false, error: result.error }, 502)
-  }
-
-  const summary = `open ${result.data.openTradesBefore ?? '--'} · force ${result.data.forceExitError ? 'failed' : 'ok'} · stop ${result.data.stopError ? 'failed' : 'ok'}`
-  appendFreqtradeAuditEvent('emergency_stop', summary, 'Operator')
+  const reconciliation = await reconcileFreqtradeAccount().catch((error) => ({
+    status: 'offline' as const,
+    checkedAt: Date.now(),
+    botPositions: 0,
+    exchangePositions: 0,
+    mismatches: [],
+    detail: error instanceof Error ? error.message : 'reconciliation failed',
+  }))
+  const emergency = finalizeFreqtradeEmergencyStop(result, reconciliation)
+  const operationError = emergency.operationError
+  const summary = `operation ${emergency.operationError ?? 'ok'} · open ${emergency.openTradesBefore ?? '--'} -> ${emergency.openTradesAfter ?? '--'} · force ${emergency.forceExitError ?? 'ok'} · stop ${emergency.stopError ?? 'ok'} · reconcile ${emergency.reconciliationError ?? emergency.reconciliationStatus}`
+  appendFreqtradeAuditEvent(emergency.success ? 'emergency_stop' : 'emergency_stop_error', summary, 'Operator')
   return c.json(
-    { ok: result.data.success, result: result.data },
-    result.data.success ? 200 : 502,
+    { ok: emergency.success, ...(operationError ? { error: operationError } : {}), result: emergency },
+    emergency.success ? 200 : 502,
   )
 })
 
@@ -175,7 +220,9 @@ freqtradeRoutes.post('/live/deploy', async (c) => {
 
   const body = await readJson(c)
   const result = await deployFreqtradeLive({
-    strategy: stringField(body.strategy) ?? '',
+    strategy: stringField(body.strategy),
+    signalArtifactHash: body.signalArtifactHash,
+    walkForwardReportFile: body.walkForwardReportFile,
     pairs: stringList(body.pairs),
     maxOpenTrades: numberField(body.maxOpenTrades),
   })
@@ -188,7 +235,7 @@ freqtradeRoutes.post('/live/deploy', async (c) => {
 
   appendFreqtradeAuditEvent(
     'live_deployed',
-    `${result.data.strategy} · ${result.data.pairs.length || 'existing'} pairs · max ${result.data.maxOpenTrades}`,
+    `${result.data.strategy} · ${result.data.signalArtifactHash ?? 'no-artifact'} · ${result.data.pairs.length || 'existing'} pairs · max ${result.data.maxOpenTrades}`,
     'Operator',
   )
   return c.json({ ok: true, result: result.data })

@@ -1,4 +1,5 @@
 import type { Candle } from '@helix/contracts/market'
+import type { StrategyHistoricalSwingRiskTraceEntry } from '@helix/contracts/strategy'
 import type {
   SwingDailyMarketContextConfig,
   SwingDailyMarketContextDecision,
@@ -44,6 +45,45 @@ type OpenSwingPosition = {
   stop: number
   target: number
   riskR: number
+}
+
+export const SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION = 'helix.swing-evaluator-checkpoint/v1' as const
+
+export type SwingHistoricalEvaluatorCheckpoint = Readonly<{
+  schemaVersion: typeof SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION
+  context: SwingDailyMarketContextDecision | null
+  locations: readonly SwingLocationCandidate[]
+  thesis: SwingTradeThesis | null
+  thesisLocation: SwingLocationCandidate | null
+  thesisContext: StrategyHistoricalSwingRiskTraceEntry['swing']['context'] | null
+  position: OpenSwingPosition | null
+  lastDailyCandleTime: number
+  lastLocationCandleTime: number
+  lastEvidenceCandleTime: number
+  attempts: number
+  thesisRiskUsedR: number
+  createdTheses: number
+  enteredTrades: number
+  exitedTrades: number
+  missingExpectedMoveDecisions: number
+  invalidatedBeforeFirstEntry: number
+  expiredBeforeFirstEntry: number
+  entriesByStage: Readonly<Record<SwingExecutionStage, number>>
+  entryGateRejections: readonly Readonly<{ thesisId: string; reasonCodes: readonly string[] }>[]
+}>
+
+function checkpointInteger(value: unknown, name: string, minimum = 0) {
+  if (!Number.isSafeInteger(value) || Number(value) < minimum) {
+    throw new Error(`${name} must be a safe integer >= ${minimum}`)
+  }
+  return Number(value)
+}
+
+function checkpointNumber(value: unknown, name: string) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative finite number`)
+  }
+  return value
 }
 
 function latest(series: readonly Candle[] | undefined) {
@@ -107,6 +147,7 @@ export class SwingHistoricalEvaluator {
   private locations: SwingLocationCandidate[] = []
   private thesis?: SwingTradeThesis
   private thesisLocation?: SwingLocationCandidate
+  private thesisContext?: StrategyHistoricalSwingRiskTraceEntry['swing']['context']
   private position?: OpenSwingPosition
   private lastDailyCandleTime = -1
   private lastLocationCandleTime = -1
@@ -126,7 +167,98 @@ export class SwingHistoricalEvaluator {
   }
   private readonly entryGateRejections = new Map<string, Set<string>>()
 
-  constructor(private readonly config: SwingHistoricalEvaluatorConfig) {}
+  constructor(
+    private readonly config: SwingHistoricalEvaluatorConfig,
+    private readonly recordHistoricalRiskEntry?: (entry: StrategyHistoricalSwingRiskTraceEntry) => void,
+    checkpoint?: SwingHistoricalEvaluatorCheckpoint,
+  ) {
+    if (checkpoint) this.restore(checkpoint)
+  }
+
+  checkpoint(): SwingHistoricalEvaluatorCheckpoint {
+    return structuredClone({
+      schemaVersion: SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION,
+      context: this.context ?? null,
+      locations: this.locations,
+      thesis: this.thesis ?? null,
+      thesisLocation: this.thesisLocation ?? null,
+      thesisContext: this.thesisContext ?? null,
+      position: this.position ?? null,
+      lastDailyCandleTime: this.lastDailyCandleTime,
+      lastLocationCandleTime: this.lastLocationCandleTime,
+      lastEvidenceCandleTime: this.lastEvidenceCandleTime,
+      attempts: this.attempts,
+      thesisRiskUsedR: this.thesisRiskUsedR,
+      createdTheses: this.createdTheses,
+      enteredTrades: this.enteredTrades,
+      exitedTrades: this.exitedTrades,
+      missingExpectedMoveDecisions: this.missingExpectedMoveDecisions,
+      invalidatedBeforeFirstEntry: this.invalidatedBeforeFirstEntry,
+      expiredBeforeFirstEntry: this.expiredBeforeFirstEntry,
+      entriesByStage: this.entriesByStage,
+      entryGateRejections: [...this.entryGateRejections.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([thesisId, reasonCodes]) => ({ thesisId, reasonCodes: [...reasonCodes].sort() })),
+    })
+  }
+
+  private restore(checkpoint: SwingHistoricalEvaluatorCheckpoint) {
+    if (!checkpoint || checkpoint.schemaVersion !== SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION) {
+      throw new Error('unsupported Swing evaluator checkpoint')
+    }
+    if (!Array.isArray(checkpoint.locations) || !Array.isArray(checkpoint.entryGateRejections)) {
+      throw new Error('Swing evaluator checkpoint arrays are invalid')
+    }
+    const entriesByStage = checkpoint.entriesByStage
+    if (!entriesByStage || typeof entriesByStage !== 'object'
+      || Object.keys(entriesByStage).sort().join(',') !== 'CONFIRMED,EARLY,STANDARD') {
+      throw new Error('Swing evaluator checkpoint entriesByStage is invalid')
+    }
+    const rejections = new Map<string, Set<string>>()
+    for (const entry of checkpoint.entryGateRejections) {
+      if (!entry || typeof entry.thesisId !== 'string' || !entry.thesisId.trim()
+        || !Array.isArray(entry.reasonCodes)
+        || entry.reasonCodes.some((reason: string) => typeof reason !== 'string' || !reason.trim())) {
+        throw new Error('Swing evaluator checkpoint rejection entry is invalid')
+      }
+      if (rejections.has(entry.thesisId)) throw new Error('Swing evaluator checkpoint has duplicate rejection entries')
+      rejections.set(entry.thesisId, new Set(entry.reasonCodes))
+    }
+    if (checkpoint.position && (!checkpoint.thesis || !checkpoint.thesisLocation || !checkpoint.thesisContext)) {
+      throw new Error('Swing evaluator checkpoint position is missing its frozen Thesis state')
+    }
+    if (checkpoint.thesis && (!checkpoint.thesisLocation || !checkpoint.thesisContext)) {
+      throw new Error('Swing evaluator checkpoint Thesis is missing its frozen Context')
+    }
+    this.context = structuredClone(checkpoint.context ?? undefined)
+    this.locations = structuredClone([...checkpoint.locations])
+    this.thesis = structuredClone(checkpoint.thesis ?? undefined)
+    this.thesisLocation = structuredClone(checkpoint.thesisLocation ?? undefined)
+    this.thesisContext = structuredClone(checkpoint.thesisContext ?? undefined)
+    this.position = structuredClone(checkpoint.position ?? undefined)
+    this.lastDailyCandleTime = checkpointInteger(checkpoint.lastDailyCandleTime, 'lastDailyCandleTime', -1)
+    this.lastLocationCandleTime = checkpointInteger(checkpoint.lastLocationCandleTime, 'lastLocationCandleTime', -1)
+    this.lastEvidenceCandleTime = checkpointInteger(checkpoint.lastEvidenceCandleTime, 'lastEvidenceCandleTime', -1)
+    this.attempts = checkpointInteger(checkpoint.attempts, 'attempts')
+    this.thesisRiskUsedR = checkpointNumber(checkpoint.thesisRiskUsedR, 'thesisRiskUsedR')
+    this.createdTheses = checkpointInteger(checkpoint.createdTheses, 'createdTheses')
+    this.enteredTrades = checkpointInteger(checkpoint.enteredTrades, 'enteredTrades')
+    this.exitedTrades = checkpointInteger(checkpoint.exitedTrades, 'exitedTrades')
+    this.missingExpectedMoveDecisions = checkpointInteger(
+      checkpoint.missingExpectedMoveDecisions,
+      'missingExpectedMoveDecisions',
+    )
+    this.invalidatedBeforeFirstEntry = checkpointInteger(
+      checkpoint.invalidatedBeforeFirstEntry,
+      'invalidatedBeforeFirstEntry',
+    )
+    this.expiredBeforeFirstEntry = checkpointInteger(checkpoint.expiredBeforeFirstEntry, 'expiredBeforeFirstEntry')
+    for (const stage of Object.keys(this.entriesByStage) as SwingExecutionStage[]) {
+      this.entriesByStage[stage] = checkpointInteger(entriesByStage[stage], `entriesByStage.${stage}`)
+    }
+    this.entryGateRejections.clear()
+    for (const [thesisId, reasons] of rejections) this.entryGateRejections.set(thesisId, reasons)
+  }
 
   statistics() {
     return {
@@ -191,6 +323,7 @@ export class SwingHistoricalEvaluator {
       }).thesis
       this.thesis = undefined
       this.thesisLocation = undefined
+      this.thesisContext = undefined
     }
 
     const latestHour = latest(hourly)
@@ -241,6 +374,11 @@ export class SwingHistoricalEvaluator {
       reasonCodes: ['THESIS_ACTIVATED'],
     }).thesis
     this.thesisLocation = location
+    this.thesisContext = {
+      id: this.context.context.id,
+      state: this.context.state,
+      bias: this.context.bias,
+    }
     this.attempts = 0
     this.thesisRiskUsedR = 0
     this.createdTheses += 1
@@ -347,13 +485,36 @@ export class SwingHistoricalEvaluator {
       this.recordEntryGateRejection(this.thesis.id, risk.reasonCodes)
       return null
     }
-    this.thesis = transitionSwingTradeThesis(this.thesis, {
+    const triggered = transitionSwingTradeThesis(this.thesis, {
       toState: 'TRIGGERED',
       occurredAt: decision.decisionTime,
       reasonCodes: ['EXECUTION_TRIGGERED'],
       featureSnapshot: execution.featureSnapshot,
     }).thesis
-    this.attempts += 1
+    const attempt = this.attempts + 1
+    const signalId = `${triggered.id}:entry:${attempt}:${decision.decisionTime}`
+    if (this.recordHistoricalRiskEntry) {
+      if (!this.thesisContext || this.thesisContext.id !== triggered.contextId) {
+        throw new Error(`Swing Thesis ${triggered.id} is missing its frozen creation-time Context`)
+      }
+      this.recordHistoricalRiskEntry({
+        entrySignalId: signalId,
+        family: 'swing',
+        object: { model: 'TRADE_THESIS', id: triggered.id },
+        side,
+        entryPrice: { source: 'DECISION_CANDLE_CLOSE', price: entryPrice },
+        initialStop: stop,
+        initialTarget: target,
+        riskDistance,
+        riskR: risk.requestedRiskR,
+        swing: {
+          stage,
+          context: { ...this.thesisContext },
+        },
+      })
+    }
+    this.thesis = triggered
+    this.attempts = attempt
     this.thesisRiskUsedR += risk.requestedRiskR
     this.position = {
       thesis: this.thesis,
@@ -368,7 +529,7 @@ export class SwingHistoricalEvaluator {
     this.enteredTrades += 1
     this.entriesByStage[stage] += 1
     return {
-      signalId: `${this.thesis.id}:entry:${this.attempts}:${decision.decisionTime}`,
+      signalId,
       decisionId: `${this.thesis.id}:decision:entry:${this.attempts}:${decision.decisionTime}`,
       object: { model: 'TRADE_THESIS', id: this.thesis.id },
       action: 'ENTER', side, reasonCodes: ['EXECUTION_TRIGGERED'],
@@ -386,9 +547,10 @@ export class SwingHistoricalEvaluator {
     const targeted = position.side === 'LONG' ? candle.close >= position.target : candle.close <= position.target
     if (!stopped && !targeted) return null
     const reasonCode = stopped ? 'STOP_HIT' : 'TARGET_HIT'
-    if (stopped && this.attempts < this.config.execution.maxAttemptsPerThesis
+    const retryable = stopped && this.attempts < this.config.execution.maxAttemptsPerThesis
       && decision.decisionTime < this.thesis.expiresAt
-      && this.thesisRiskUsedR < this.config.risk.thesisRiskBudgetR) {
+      && this.thesisRiskUsedR < this.config.risk.thesisRiskBudgetR
+    if (retryable) {
       this.thesis = transitionSwingTradeThesis(this.thesis, {
         toState: 'ACTIVE', occurredAt: decision.decisionTime, reasonCodes: ['STOP_HIT'],
       }).thesis
@@ -396,6 +558,8 @@ export class SwingHistoricalEvaluator {
       this.thesis = transitionSwingTradeThesis(this.thesis, {
         toState: 'CLOSED', occurredAt: decision.decisionTime, reasonCodes: ['THESIS_CLOSED'],
       }).thesis
+      this.thesisLocation = undefined
+      this.thesisContext = undefined
     }
     const thesisId = position.thesis.id
     this.position = undefined
@@ -429,6 +593,8 @@ export class SwingHistoricalEvaluator {
       reasonCodes: ['THESIS_INVALIDATED'],
     }).thesis
     this.position = undefined
+    this.thesisLocation = undefined
+    this.thesisContext = undefined
     if (!position) return null
     this.exitedTrades += 1
     return {

@@ -14,20 +14,21 @@
 // coinclaw 模式下 strategy / backtest / 配置变更 都通过容器里预装的
 // freqtrade CLI + freqtrade REST API 完成, 跟 dashboard 看到的状态保持一致.
 import {
-  readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync,
-  readdirSync, renameSync, chmodSync, openSync, closeSync,
+  readFileSync, writeFileSync, existsSync, mkdirSync,
+  readdirSync, renameSync, chmodSync, openSync, closeSync, unlinkSync,
 } from 'node:fs';
 import { basename, resolve, dirname } from 'node:path';
 import { execFileSync, execSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 import {
   coinclawEnv, dockerFreqtradeEnv, hostModeFreqtradePaths, envFileCandidates, supervisorSocket,
 } from '../lib/coinclaw-env.mjs';
 import { ftGet, ftPost } from '../lib/freqtrade-api.mjs';
 import {
-  buildStrategyCode, SAMPLE_STRATEGY,
+  buildStrategyCode,
   AVAILABLE_INDICATORS,
 } from '../lib/strategy-builder.mjs';
 import {
@@ -35,15 +36,64 @@ import {
   loadSignalArtifact,
   pinnedSignalIdentity,
   samePinnedSignalIdentity,
+  verifySignalArtifact,
 } from '../lib/signal-artifact.mjs';
 import {
   freqtradeOhlcvFile,
   loadMarketDataset,
   marketTimeframeMilliseconds,
+  requireMarketDatasetArtifactWindow,
 } from '../lib/market-dataset.mjs';
 import { reconcileSignalBacktest } from '../lib/backtest-reconciliation.mjs';
+import { backtestFeeObservations, backtestMetrics } from '../lib/backtest-metrics.mjs';
+import { firstStrategySummary, readBacktestPayload } from '../lib/backtest-result.mjs';
+import {
+  SIGNAL_ADAPTER_FILE_NAMES,
+  createExecutionRuntimeEvidence,
+  createSecretFreeBacktestConfig,
+  executionConfigIdentity,
+  executionConfigIdentityHash,
+  secretFreeBacktestEnvironment,
+  secretFreeDockerEnvironmentArguments,
+  signalAdapterBundleFromDirectory,
+  signalExecutionProfile as createRuntimeExecutionProfile,
+} from '../lib/execution-runtime-evidence.mjs';
+import {
+  createWalkForwardReport,
+  loadPromotableWalkForwardReport,
+  loadWalkForwardBundle,
+  verifyWalkForwardReport,
+  walkForwardEvidenceHash,
+} from '../lib/walk-forward.mjs';
+import {
+  createForwardDeployment,
+  createForwardWorkerOwner,
+  createForwardWorkerOwnerToken,
+  forwardWorkerOwnerMatchesProcess,
+  verifyForwardDeployment,
+  verifyForwardWorkerOwner,
+} from '../lib/forward-runtime.mjs';
+import {
+  beginDeploymentTransaction,
+  cleanupDeploymentBackups,
+  clearEmergencyStopLatch,
+  deploymentTransactionIsIncomplete,
+  emergencyStopIsLatched,
+  readDeploymentTransaction,
+  requireHealthyDeploymentTransaction,
+  requireNoEmergencyStop,
+  restoreDeploymentFiles,
+  setEmergencyStopLatch,
+  signalArtifactArchivePath,
+  updateDeploymentTransaction,
+  withBacktestLock,
+  withDeploymentLock,
+  withEntryTransitionLock,
+  writeDeploymentFile,
+} from '../lib/deployment-transaction.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
+const DEPLOY_SCRIPT_FILE = fileURLToPath(import.meta.url);
 
 // ─── 模式 / 路径解析 ─────────────────────────────────────────────
 const COINCLAW_ENV = coinclawEnv();
@@ -52,7 +102,7 @@ const ENV = COINCLAW_ENV || DOCKER_ENV;
 const IS_DOCKER = ENV?.engine === 'docker';
 const HOST = hostModeFreqtradePaths();
 const SIGNAL_ADAPTER_ASSET_DIR = resolve(__dir, '..', 'assets');
-const SIGNAL_ADAPTER_FILES = ['HelixSignalStrategy.py', 'helix_signal_artifact.py'];
+const SIGNAL_ADAPTER_FILES = SIGNAL_ADAPTER_FILE_NAMES;
 
 // 三引擎下 STRAT_DIR / USER_DATA / CONFIG_PATH 直接来自 daemon 启动参数,
 // 跟 dashboard / freqtrade /api/v1/show_config 保持完全一致 — 不会出现
@@ -61,13 +111,17 @@ const STRAT_DIR  = ENV ? ENV.strategyPath      : HOST.strategyPath;
 const USER_DATA  = ENV ? ENV.freqtradeUserdir  : HOST.userdir;
 const CONFIG_PATH = ENV ? ENV.configPath       : HOST.configPath;
 const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[0]; // host: ~/.helix/.env(规范位置, 与读路径最高优先级一致)
-const FT_API_PORT = 8888;
-const FT_API_URL = `http://127.0.0.1:${FT_API_PORT}`;
+const FT_API_URL = process.env.FREQTRADE_URL || process.env.FT_API_URL || 'http://127.0.0.1:8888';
+const FT_API_PORT = Number(new URL(FT_API_URL).port || 8888);
 const BACKTEST_EVIDENCE_VERSION = 2;
 const BACKTEST_EVIDENCE_FILE = resolve(USER_DATA, 'backtest_results', '.helix-evidence.json');
 const SIGNAL_ARTIFACT_DIR = resolve(USER_DATA, 'helix', 'signals');
-const ACTIVE_SIGNAL_ARTIFACT_FILE = resolve(SIGNAL_ARTIFACT_DIR, 'active.json');
 const SIGNAL_BACKTEST_DATA_DIR = resolve(USER_DATA, 'helix', 'backtest-data');
+const WALK_FORWARD_REPORT_INDEX = resolve(USER_DATA, 'helix', 'validation', 'walk-forward-reports.json');
+const HELIX_REPO_ROOT = resolve(__dir, '..', '..', '..');
+const CORE_PACKAGE_DIR = resolve(HELIX_REPO_ROOT, 'packages', 'core');
+const FORWARD_WORKER_FILE = resolve(CORE_PACKAGE_DIR, 'src', 'strategy', 'forward-worker.ts');
+const FORWARD_RUNTIME_FILE = resolve(__dir, '..', 'lib', 'forward-runtime.mjs');
 
 // FT_BIN 解析顺序:
 //   1. coinclaw 容器: 'freqtrade' — image PATH 上已经有 (entrypoint
@@ -109,7 +163,7 @@ function dockerCompose(args, opts = {}) {
 }
 
 function dockerCliPath(value) {
-  if (typeof value !== 'string') return value;
+  if (!IS_DOCKER || typeof value !== 'string') return value;
   if (value === STRAT_DIR || value.startsWith(`${STRAT_DIR}/`)) {
     return `${ENV.containerStrategyPath}${value.slice(STRAT_DIR.length)}`;
   }
@@ -117,6 +171,299 @@ function dockerCliPath(value) {
     return `${ENV.containerUserdir}${value.slice(USER_DATA.length)}`;
   }
   return value;
+}
+
+function hostCliPath(value) {
+  if (!IS_DOCKER || typeof value !== 'string') return value;
+  if (value === ENV.containerUserdir || value.startsWith(`${ENV.containerUserdir}/`)) {
+    return `${USER_DATA}${value.slice(ENV.containerUserdir.length)}`;
+  }
+  return value;
+}
+
+function forwardRuntimePaths(deployment) {
+  const root = resolve(USER_DATA, 'helix', 'forward', deployment.deploymentId);
+  return {
+    root,
+    deploymentFile: resolve(root, 'deployment.json'),
+    batchesDirectory: resolve(root, 'batches'),
+    marketDataFile: resolve(root, 'market-data.json'),
+    checkpointFile: resolve(root, 'checkpoint.json'),
+    noSignalJournalFile: resolve(root, 'no-signal-journal.json'),
+    statusFile: resolve(root, 'status.json'),
+    pidFile: resolve(root, 'worker.pid'),
+    logFile: resolve(root, 'worker.log'),
+    deploymentHash: deployment.deploymentHash,
+  };
+}
+
+function forwardRuntimeFromConfig(config) {
+  const deploymentPath = config?.helix_signal_forward_deployment_path;
+  const batchPath = config?.helix_signal_batch_path;
+  const deploymentHash = config?.helix_signal_forward_deployment_hash;
+  const statusPath = config?.helix_signal_forward_status_path;
+  if (!deploymentPath && !batchPath && !deploymentHash && !statusPath) return null;
+  if (typeof deploymentPath !== 'string' || typeof batchPath !== 'string'
+    || typeof deploymentHash !== 'string' || typeof statusPath !== 'string') {
+    throw new Error('Stored forward Signal deployment is incomplete.');
+  }
+  const deploymentFile = hostCliPath(deploymentPath);
+  const root = dirname(deploymentFile);
+  const managedRoot = resolve(USER_DATA, 'helix', 'forward');
+  if (root !== managedRoot && !root.startsWith(`${managedRoot}/`)) {
+    throw new Error('Stored forward Signal deployment path escapes the managed runtime directory.');
+  }
+  if (hostCliPath(batchPath) !== resolve(root, 'batches')) {
+    throw new Error('Stored forward Signal batch path does not match its deployment directory.');
+  }
+  if (hostCliPath(statusPath) !== resolve(root, 'status.json')) {
+    throw new Error('Stored forward Signal status path does not match its deployment directory.');
+  }
+  if (!/^sha256:[a-f0-9]{64}$/.test(deploymentHash)) {
+    throw new Error('Stored forward Signal deployment hash is invalid.');
+  }
+  return {
+    root,
+    deploymentFile,
+    batchesDirectory: hostCliPath(batchPath),
+    marketDataFile: resolve(root, 'market-data.json'),
+    checkpointFile: resolve(root, 'checkpoint.json'),
+    noSignalJournalFile: resolve(root, 'no-signal-journal.json'),
+    statusFile: resolve(root, 'status.json'),
+    pidFile: resolve(root, 'worker.pid'),
+    logFile: resolve(root, 'worker.log'),
+    deploymentHash,
+  };
+}
+
+function readForwardWorkerOwner(paths) {
+  if (!existsSync(paths.pidFile)) return null;
+  const content = readFileSync(paths.pidFile, 'utf8').trim();
+  if (!content) return null;
+  let owner;
+  try { owner = JSON.parse(content); } catch { throw new Error('Forward worker PID metadata is invalid.'); }
+  if (owner?.deploymentHash !== paths.deploymentHash) {
+    throw new Error('Forward worker PID metadata does not match its deployment.');
+  }
+  return verifyForwardWorkerOwner(owner, paths.deploymentHash);
+}
+
+function readForwardWorkerPid(paths) {
+  return readForwardWorkerOwner(paths)?.pid ?? null;
+}
+
+async function stopForwardWorker(paths) {
+  if (!paths) return null;
+  const owner = readForwardWorkerOwner(paths);
+  const pid = owner?.pid ?? null;
+  if (pid && hostPidIsAlive(pid)) {
+    if (!forwardWorkerOwnerMatchesProcess(owner, paths.deploymentHash)) {
+      throw new Error(`Forward worker PID ${pid} no longer matches its ownership token; refusing to signal it.`);
+    }
+    process.kill(pid, 'SIGTERM');
+    await waitForHostPidExit(pid);
+  }
+  try { writeDeploymentFile(paths.pidFile, ''); } catch {}
+  return pid;
+}
+
+function startForwardWorker(paths) {
+  const workerFile = process.env.HELIX_TEST_FORWARD_WORKER_FILE?.trim()
+    ? resolve(process.env.HELIX_TEST_FORWARD_WORKER_FILE.trim())
+    : FORWARD_WORKER_FILE;
+  if (!existsSync(workerFile)) {
+    throw new Error(`Helix forward worker is unavailable at ${workerFile}`);
+  }
+  const existing = readForwardWorkerOwner(paths);
+  if (existing && hostPidIsAlive(existing.pid)) {
+    if (!forwardWorkerOwnerMatchesProcess(existing, paths.deploymentHash)) {
+      throw new Error(`Forward worker PID ${existing.pid} no longer matches its ownership token.`);
+    }
+    return existing.pid;
+  }
+  mkdirSync(paths.root, { recursive: true, mode: 0o700 });
+  mkdirSync(paths.batchesDirectory, { recursive: true, mode: 0o700 });
+  const logFd = openSync(paths.logFile, 'a', 0o600);
+  const ownerToken = createForwardWorkerOwnerToken();
+  const emergencyStopFile = resolve(USER_DATA, 'helix', 'deployment', 'emergency-stop.json');
+  const allowedInitialEmergencyStopHash = existsSync(emergencyStopFile)
+    ? `sha256:${createHash('sha256').update(readFileSync(emergencyStopFile)).digest('hex')}`
+    : null;
+  try {
+    const child = spawn(process.execPath, [
+      FORWARD_RUNTIME_FILE, 'watchdog', JSON.stringify({
+        deploymentHash: paths.deploymentHash,
+        ownerToken,
+        pidFile: paths.pidFile,
+        emergencyStopFile,
+        allowedInitialEmergencyStopHash,
+        deploymentFile: paths.deploymentFile,
+        configFile: CONFIG_PATH,
+        workerFile,
+        workerParams: {
+          deployment: paths.deploymentFile,
+          batches: paths.batchesDirectory,
+          marketData: paths.marketDataFile,
+          checkpoint: paths.checkpointFile,
+          noSignalJournal: paths.noSignalJournalFile,
+          status: paths.statusFile,
+        },
+        cwd: CORE_PACKAGE_DIR,
+      }),
+    ], {
+      cwd: CORE_PACKAGE_DIR,
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: proxyEnv(),
+    });
+    if (!Number.isSafeInteger(child.pid) || child.pid < 1) throw new Error('Unable to start Helix forward worker.');
+    child.unref();
+    let owner;
+    try {
+      owner = createForwardWorkerOwner({
+        pid: child.pid,
+        deploymentHash: paths.deploymentHash,
+        ownerToken,
+      });
+      writeDeploymentFile(paths.pidFile, `${JSON.stringify(owner)}\n`);
+    } catch (error) {
+      try { process.kill(child.pid, 'SIGTERM'); } catch {}
+      throw error;
+    }
+    chmodSync(paths.logFile, 0o600);
+    return child.pid;
+  } finally {
+    closeSync(logFd);
+  }
+}
+
+async function waitForForwardWorker(
+  paths,
+  deploymentHash,
+  timeoutMs = Number(process.env.HELIX_TEST_FORWARD_TIMEOUT_MS) || 180_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'forward worker has not published a heartbeat';
+  while (Date.now() < deadline) {
+    const owner = readForwardWorkerOwner(paths);
+    const pid = owner?.pid ?? null;
+    if (!pid || !hostPidIsAlive(pid)
+      || !forwardWorkerOwnerMatchesProcess(owner, paths.deploymentHash)) {
+      throw new Error('Helix forward worker exited or lost ownership before readiness');
+    }
+    const status = readJsonFile(paths.statusFile);
+    if (status?.deploymentHash && status.deploymentHash !== deploymentHash) {
+      throw new Error('Helix forward worker heartbeat belongs to another deployment');
+    }
+    if (status?.state === 'error') throw new Error(`Helix forward worker failed: ${status.error || 'unknown error'}`);
+    if ((status?.state === 'waiting' || status?.state === 'ready')
+      && status.deploymentHash === deploymentHash
+      && status.pid === pid
+      && Number.isSafeInteger(status.updatedAt)
+      && Date.now() - status.updatedAt < 30_000) {
+      return status;
+    }
+    lastError = status?.error || lastError;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  throw new Error(`Helix forward worker readiness failed: ${lastError}`);
+}
+
+async function startStoredForwardWorker(config) {
+  const paths = forwardRuntimeFromConfig(config);
+  if (!paths) return null;
+  const deployment = verifyForwardDeployment(readJsonFile(paths.deploymentFile));
+  if (deployment.deploymentHash !== paths.deploymentHash) {
+    throw new Error('Stored forward deployment hash does not match before worker start.');
+  }
+  const pid = startForwardWorker(paths);
+  const status = await waitForForwardWorker(paths, paths.deploymentHash);
+  return { pid, status };
+}
+
+function configureForwardRuntime(config, deployment, paths) {
+  config.helix_signal_forward_deployment_path = dockerCliPath(paths.deploymentFile);
+  config.helix_signal_forward_deployment_hash = deployment.deploymentHash;
+  config.helix_signal_batch_path = dockerCliPath(paths.batchesDirectory);
+  config.helix_signal_forward_status_path = dockerCliPath(paths.statusFile);
+}
+
+function clearForwardRuntimeConfig(config) {
+  delete config.helix_signal_forward_deployment_path;
+  delete config.helix_signal_forward_deployment_hash;
+  delete config.helix_signal_batch_path;
+  delete config.helix_signal_forward_status_path;
+}
+
+function readForwardRuntimeStatus(config) {
+  try {
+    const paths = forwardRuntimeFromConfig(config);
+    if (!paths) return null;
+    const deployment = verifyForwardDeployment(readJsonFile(paths.deploymentFile));
+    if (deployment.deploymentHash !== paths.deploymentHash) {
+      throw new Error('Forward deployment file does not match the configured hash.');
+    }
+    const owner = readForwardWorkerOwner(paths);
+    const pid = owner?.pid ?? null;
+    const status = readJsonFile(paths.statusFile);
+    if (status) {
+      const fields = [
+        'schemaVersion', 'deploymentHash', 'state', 'pid', 'updatedAt', 'lastDecisionTime',
+        'lastMarketSnapshotId', 'lastBatchHash', 'batches', 'error',
+      ];
+      const actual = Object.keys(status).sort();
+      const expected = [...fields].sort();
+      if (actual.length !== expected.length || actual.some((field, index) => field !== expected[index])) {
+        throw new Error('Forward worker heartbeat contains unexpected fields.');
+      }
+      if (status.schemaVersion !== 'helix.forward-worker-status/v1') {
+        throw new Error('Forward worker heartbeat schema is unsupported.');
+      }
+      if (status.deploymentHash !== paths.deploymentHash) {
+        throw new Error('Forward worker heartbeat belongs to another deployment.');
+      }
+      if (!['waiting', 'ready', 'error'].includes(status.state)
+        || !Number.isSafeInteger(status.pid) || status.pid < 1
+        || !Number.isSafeInteger(status.updatedAt) || status.updatedAt < 0
+        || !Number.isSafeInteger(status.batches) || status.batches < 0) {
+        throw new Error('Forward worker heartbeat is invalid.');
+      }
+      if (pid && status.pid !== pid) {
+        throw new Error('Forward worker heartbeat PID does not match its owner metadata.');
+      }
+    }
+    const heartbeatAgeMs = Number.isSafeInteger(status?.updatedAt) ? Date.now() - status.updatedAt : null;
+    const running = Boolean(pid && hostPidIsAlive(pid)
+      && forwardWorkerOwnerMatchesProcess(owner, paths.deploymentHash));
+    let state = status?.state || (running ? 'starting' : 'stopped');
+    if (running && (heartbeatAgeMs == null || heartbeatAgeMs > 300_000)) state = 'stale';
+    if (!running && status?.state !== 'error') state = 'stopped';
+    return {
+      deployment_hash: paths.deploymentHash,
+      pid,
+      running,
+      state,
+      heartbeat_age_ms: heartbeatAgeMs,
+      last_decision_time: status?.lastDecisionTime ?? null,
+      last_market_snapshot_id: status?.lastMarketSnapshotId ?? null,
+      last_batch_hash: status?.lastBatchHash ?? null,
+      batches: status?.batches ?? 0,
+      error: status?.error ?? null,
+    };
+  } catch (error) {
+    return {
+      deployment_hash: config?.helix_signal_forward_deployment_hash ?? null,
+      pid: null,
+      running: false,
+      state: 'error',
+      heartbeat_age_ms: null,
+      last_decision_time: null,
+      last_market_snapshot_id: null,
+      last_batch_hash: null,
+      batches: 0,
+      error: error.message,
+    };
+  }
 }
 
 function runFreqtrade(args, opts = {}) {
@@ -135,6 +482,19 @@ function hasCommand(cmd) {
 function proxyEnv() {
   const proxyUrl = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
   return proxyUrl ? { ...process.env, HTTPS_PROXY: proxyUrl, HTTP_PROXY: proxyUrl } : process.env;
+}
+
+function runSecretFreeSignalBacktest(args, opts = {}) {
+  const environment = secretFreeBacktestEnvironment(opts.env || proxyEnv());
+  if (IS_DOCKER) {
+    return dockerCompose([
+      'run', '--rm', '--no-deps',
+      ...secretFreeDockerEnvironmentArguments(environment),
+      'freqtrade',
+      ...args.map(dockerCliPath),
+    ], { ...opts, env: environment });
+  }
+  return runFile(FT_BIN, args, { ...opts, env: environment });
 }
 
 function parseTailLines(lines, fallback = 50) {
@@ -175,21 +535,215 @@ function requireUnchangedFile(file, expectedHash, name) {
   }
 }
 
+function runBacktestSubprocess(params) {
+  try {
+    const output = runFile(process.execPath, [
+      DEPLOY_SCRIPT_FILE,
+      'backtest',
+      JSON.stringify(params),
+    ], { maxBuffer: 20 * 1024 * 1024 });
+    return JSON.parse(output);
+  } catch (error) {
+    const stderr = error?.stderr ? String(error.stderr).trim() : '';
+    throw new Error(`walk-forward backtest failed: ${stderr || error.message}`);
+  }
+}
+
+function archiveWalkForwardEvidence(directory, sourceFile, expectedHash, suffix) {
+  if (fileHash(sourceFile) !== expectedHash) throw new Error(`walk-forward evidence changed: ${sourceFile}`);
+  const evidenceDirectory = resolve(directory, 'evidence');
+  mkdirSync(evidenceDirectory, { recursive: true });
+  const name = `${expectedHash.replace(':', '-')}${suffix}`;
+  const destination = resolve(evidenceDirectory, name);
+  if (existsSync(destination)) {
+    if (fileHash(destination) !== expectedHash) {
+      throw new Error(`walk-forward evidence archive is corrupt: ${destination}`);
+    }
+  } else {
+    const temporary = `${destination}.tmp.${process.pid}`;
+    writeFileSync(temporary, readFileSync(sourceFile), { mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, destination);
+  }
+  return `evidence/${name}`;
+}
+
+function archiveWalkForwardRuntimeEvidence(directory, value) {
+  const content = `${JSON.stringify(value, null, 2)}\n`;
+  const expectedHash = `sha256:${createHash('sha256').update(content).digest('hex')}`;
+  const evidenceDirectory = resolve(directory, 'evidence');
+  mkdirSync(evidenceDirectory, { recursive: true });
+  const name = `${expectedHash.replace(':', '-')}.runtime.json`;
+  const destination = resolve(evidenceDirectory, name);
+  if (existsSync(destination)) {
+    if (fileHash(destination) !== expectedHash) {
+      throw new Error(`walk-forward runtime evidence archive is corrupt: ${destination}`);
+    }
+  } else {
+    const temporary = `${destination}.tmp.${process.pid}`;
+    writeFileSync(temporary, content, { mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, destination);
+  }
+  return { file: `evidence/${name}`, hash: expectedHash };
+}
+
+function writeImmutableJsonFile(file, value) {
+  const content = `${JSON.stringify(value, null, 2)}\n`;
+  const expectedHash = `sha256:${createHash('sha256').update(content).digest('hex')}`;
+  mkdirSync(dirname(file), { recursive: true });
+  if (existsSync(file)) {
+    if (fileHash(file) !== expectedHash) throw new Error(`immutable JSON archive is corrupt: ${file}`);
+    return expectedHash;
+  }
+  const temporary = `${file}.tmp.${process.pid}`;
+  writeFileSync(temporary, content, { mode: 0o600 });
+  chmodSync(temporary, 0o600);
+  renameSync(temporary, file);
+  return expectedHash;
+}
+
+function archiveWalkForwardCoreBundle(bundle) {
+  const root = `core/${bundle.run.runHash.replace(':', '-')}`;
+  const entries = [
+    ['source-dataset.json', bundle.sourceDataset],
+    [bundle.run.planFile, bundle.plan],
+    ['walk-forward-run.json', bundle.run],
+    ...bundle.folds.flatMap((fold) => [
+      [fold.run.datasetFile, fold.dataset],
+      [fold.run.decisionArtifactFile, fold.decisionArtifact],
+      [fold.run.decisionRiskTraceFile, fold.decisionRiskTrace],
+      [fold.run.replayArtifactFile, fold.replayArtifact],
+      [fold.run.executionArtifactFile, fold.executionArtifact],
+      [fold.run.executionRiskTraceFile, fold.executionRiskTrace],
+    ]),
+  ];
+  const files = entries.map(([name, value]) => {
+    const relative = `${root}/${name}`;
+    return {
+      file: relative,
+      fileHash: writeImmutableJsonFile(resolve(bundle.directory, relative), value),
+    };
+  });
+  const coreEvidence = {
+    root,
+    sourceDatasetFile: `${root}/source-dataset.json`,
+    runFile: `${root}/walk-forward-run.json`,
+    files,
+  };
+  const archived = loadWalkForwardBundle(
+    resolve(bundle.directory, coreEvidence.runFile),
+    resolve(bundle.directory, coreEvidence.sourceDatasetFile),
+  );
+  if (archived.plan.planHash !== bundle.plan.planHash || archived.run.runHash !== bundle.run.runHash) {
+    throw new Error('archived walk-forward Core bundle identity mismatch');
+  }
+  return coreEvidence;
+}
+
+function writeImmutableWalkForwardReport(directory, report) {
+  const file = resolve(directory, `walk-forward-report-${report.reportHash.replace(':', '-')}.json`);
+  const content = `${JSON.stringify(report, null, 2)}\n`;
+  const expectedFileHash = `sha256:${createHash('sha256').update(content).digest('hex')}`;
+  if (existsSync(file)) {
+    if (fileHash(file) !== expectedFileHash) throw new Error(`walk-forward report archive is corrupt: ${file}`);
+    return file;
+  }
+  const temporary = `${file}.tmp.${process.pid}`;
+  writeFileSync(temporary, content, { mode: 0o600 });
+  chmodSync(temporary, 0o600);
+  renameSync(temporary, file);
+  return file;
+}
+
 function strategyFingerprint(strategy) {
   const file = resolve(STRAT_DIR, `${strategy}.py`);
-  if (!existsSync(file)) return null;
   if (strategy === HELIX_SIGNAL_STRATEGY) {
-    const files = SIGNAL_ADAPTER_FILES.map((name) => resolve(STRAT_DIR, name));
-    if (files.some((candidate) => !existsSync(candidate))) return null;
-    const hash = createHash('sha256');
-    for (const candidate of files) {
-      hash.update(`${candidate.slice(STRAT_DIR.length)}\0`);
-      hash.update(readFileSync(candidate));
-      hash.update('\0');
+    try {
+      return signalAdapterBundleFromDirectory(SIGNAL_ADAPTER_ASSET_DIR).adapterHash.slice('sha256:'.length);
+    } catch {
+      return null;
     }
-    return hash.digest('hex');
   }
+  if (!existsSync(file)) return null;
   return createHash('sha256').update(readFileSync(file)).digest('hex');
+}
+
+function signalExecutionProfile(config, { timeframe, pairs, fee = null }) {
+  const configuredFee = fee ?? numberOrNull(config?.fee);
+  const maxOpenTrades = numberOrNull(config?.max_open_trades);
+  return {
+    schemaVersion: 'helix.freqtrade-execution-profile/v1',
+    strategy: HELIX_SIGNAL_STRATEGY,
+    timeframe: String(timeframe || ''),
+    pairs: [...pairs].map(String).sort(),
+    exchange: String(config?.exchange?.name || '').toLowerCase(),
+    tradingMode: String(config?.trading_mode || ''),
+    marginMode: String(config?.margin_mode || ''),
+    maxOpenTrades,
+    stakeCurrency: String(config?.stake_currency || ''),
+    stakeAmount: config?.stake_amount ?? null,
+    tradableBalanceRatio: numberOrNull(config?.tradable_balance_ratio),
+    dryRunWallet: numberOrNull(config?.dry_run_wallet),
+    fee: configuredFee,
+    entryPricing: config?.entry_pricing ?? null,
+    exitPricing: config?.exit_pricing ?? null,
+    orderTypes: config?.order_types ?? null,
+    orderTimeInForce: config?.order_time_in_force ?? null,
+    unfilledTimeout: config?.unfilledtimeout ?? null,
+    positionAdjustmentEnabled: config?.position_adjustment_enable ?? null,
+    maxEntryPositionAdjustment: numberOrNull(config?.max_entry_position_adjustment),
+  };
+}
+
+function hasSignalExecutionEnvironment(evidence) {
+  const environment = evidence?.executionEnvironment;
+  return typeof environment?.freqtradeVersion === 'string'
+    && environment.freqtradeVersion.trim().length > 0
+    && typeof environment.configHash === 'string'
+    && environment.configHash.startsWith('sha256:')
+    && typeof environment.artifactFileHash === 'string'
+    && environment.artifactFileHash.startsWith('sha256:')
+    && environment.dataFormatOhlcv === 'json'
+    && environment.executionProfile?.schemaVersion === 'helix.freqtrade-execution-profile/v1';
+}
+
+let cachedFreqtradeVersion;
+function currentFreqtradeVersion() {
+  if (cachedFreqtradeVersion === undefined) {
+    cachedFreqtradeVersion = runFreqtrade(['--version'], { timeout: 60_000, env: proxyEnv() }).trim();
+  }
+  if (!cachedFreqtradeVersion) throw new Error('Freqtrade did not report a version');
+  return cachedFreqtradeVersion;
+}
+
+function requireSignalExecutionCompatibility(evidence, config, archivedArtifact) {
+  if (!hasSignalExecutionEnvironment(evidence)) {
+    throw new Error(`Backtest evidence "${evidence.id}" predates the execution identity gate. Run the exact Signal backtest again.`);
+  }
+  const environment = evidence.executionEnvironment;
+  const version = currentFreqtradeVersion();
+  if (environment.freqtradeVersion.trim() !== version) {
+    throw new Error(`Backtest evidence "${evidence.id}" used Freqtrade ${environment.freqtradeVersion.trim()}, current runtime is ${version}.`);
+  }
+  const profileOptions = {
+    timeframe: archivedArtifact.artifact.baseTimeframe,
+    pairs: [archivedArtifact.artifact.symbol],
+  };
+  const expectedProfile = typeof environment.executionProfile?.configHash === 'string'
+    && typeof environment.fee === 'number'
+    ? createRuntimeExecutionProfile(
+        createSecretFreeBacktestConfig(config, profileOptions),
+        { ...profileOptions, fee: environment.fee },
+      )
+    : signalExecutionProfile(config, profileOptions);
+  if (!isDeepStrictEqual(environment.executionProfile, expectedProfile)) {
+    throw new Error(`Backtest evidence "${evidence.id}" execution profile does not match the deployment target.`);
+  }
+  if (environment.artifactFileHash !== fileHash(archivedArtifact.hashFile)) {
+    throw new Error(`Backtest evidence "${evidence.id}" Artifact file hash does not match the immutable archive.`);
+  }
+  return evidence;
 }
 
 function readBacktestEvidence() {
@@ -286,7 +840,7 @@ function requireCurrentBacktestEvidence(strategy, signalArtifact = null) {
   const evidence = strategyHash ? readBacktestEvidence().find((record) => {
     if (record.strategy !== strategy || record.strategyHash !== strategyHash) return false;
     if (strategy !== HELIX_SIGNAL_STRATEGY) return true;
-    if (!signalArtifact || !record.signalArtifact?.identity) return false;
+    if (!signalArtifact || !record.signalArtifact?.identity || !hasSignalExecutionEnvironment(record)) return false;
     return record.signalArtifact.artifactHash === signalArtifact.artifactHash
       && record.signalArtifact.marketDataSnapshotId === signalArtifact.identity.marketDataSnapshotId
       && record.marketDataset?.datasetHash === signalArtifact.identity.marketDataSnapshotId
@@ -310,27 +864,210 @@ function installSignalAdapter() {
     const source = resolve(SIGNAL_ADAPTER_ASSET_DIR, name);
     const destination = resolve(STRAT_DIR, name);
     if (!existsSync(source)) throw new Error(`Helix signal adapter asset is missing: ${source}`);
-    if (source !== destination) copyFileSync(source, destination);
+    if (source !== destination) writeDeploymentFile(destination, readFileSync(source), 0o644);
     try { chmodSync(destination, 0o644); } catch {}
+  }
+}
+
+function requireInstalledSignalAdapter() {
+  for (const name of SIGNAL_ADAPTER_FILES) {
+    const source = resolve(SIGNAL_ADAPTER_ASSET_DIR, name);
+    const destination = resolve(STRAT_DIR, name);
+    if (fileHash(source) !== fileHash(destination)) {
+      throw new Error(`installed Helix signal adapter does not match Engine asset: ${name}`);
+    }
   }
 }
 
 function archiveSignalArtifact(file) {
   if (typeof file !== 'string' || !file.trim()) throw new Error('signal_artifact must be a JSON file path');
   const source = resolve(file.trim());
-  const artifact = loadSignalArtifact(source);
+  let artifact;
+  try {
+    artifact = verifySignalArtifact(JSON.parse(readFileSync(source, 'utf8')));
+  } catch (error) {
+    throw new Error(`cannot read signal artifact ${source}: ${error.message}`);
+  }
   mkdirSync(SIGNAL_ARTIFACT_DIR, { recursive: true });
-  const hashFile = resolve(SIGNAL_ARTIFACT_DIR, `${artifact.artifactHash.replace(':', '-')}.json`);
+  const hashFile = signalArtifactArchivePath(USER_DATA, artifact.artifactHash);
+  const content = `${JSON.stringify(artifact, null, 2)}\n`;
   if (existsSync(hashFile)) {
     const staged = loadSignalArtifact(hashFile);
     if (staged.artifactHash !== artifact.artifactHash) throw new Error(`staged signal artifact is corrupt: ${hashFile}`);
   } else {
     const tempFile = `${hashFile}.tmp.${process.pid}`;
-    copyFileSync(source, tempFile);
+    writeFileSync(tempFile, content);
     chmodSync(tempFile, 0o600);
     renameSync(tempFile, hashFile);
   }
   return { artifact, hashFile };
+}
+
+function loadArchivedSignalArtifact(artifactHash) {
+  const hashFile = signalArtifactArchivePath(USER_DATA, artifactHash);
+  if (!existsSync(hashFile)) throw new Error(`Archived signal artifact is missing: ${artifactHash}`);
+  const artifact = loadSignalArtifact(hashFile);
+  if (artifact.artifactHash !== artifactHash) throw new Error(`Archived signal artifact hash mismatch: ${artifactHash}`);
+  return { artifact, hashFile };
+}
+
+function resolveSignalArtifact(params) {
+  const hasSource = typeof params.signal_artifact === 'string' && params.signal_artifact.trim();
+  const hasHash = typeof params.signal_artifact_hash === 'string' && params.signal_artifact_hash.trim();
+  if (hasSource && hasHash) throw new Error('Use signal_artifact or signal_artifact_hash, not both.');
+  if (hasSource) return archiveSignalArtifact(params.signal_artifact);
+  if (hasHash) {
+    return loadArchivedSignalArtifact(params.signal_artifact_hash.trim());
+  }
+  return null;
+}
+
+function resolveSignalWalkForwardReport(params, artifact) {
+  const value = params.walk_forward_report;
+  if (value == null || value === '') return null;
+  if (!artifact) throw new Error('walk_forward_report can only be used with a Signal Artifact deployment.');
+  if (typeof value !== 'string' || !value.trim()) throw new Error('walk_forward_report must be a JSON file path.');
+  return loadPromotableWalkForwardReport(value.trim(), artifact);
+}
+
+function requireSignalWalkForwardReport(artifact, evidence) {
+  if (artifact && !evidence) {
+    throw new Error('Helix Signal deployment requires a promotable walk_forward_report for the exact Artifact identity.');
+  }
+  return evidence;
+}
+
+function requireUnchangedWalkForwardReport(evidence, artifact) {
+  if (!evidence) return null;
+  const current = loadPromotableWalkForwardReport(evidence.file, artifact);
+  if (current.report.reportHash !== evidence.report.reportHash) {
+    throw new Error('walk-forward report changed during deployment.');
+  }
+  return current;
+}
+
+function configureWalkForwardReport(config, evidence) {
+  if (!evidence) {
+    delete config.helix_signal_walk_forward_report_path;
+    delete config.helix_signal_walk_forward_report_hash;
+    return;
+  }
+  config.helix_signal_walk_forward_report_path = evidence.file;
+  config.helix_signal_walk_forward_report_hash = evidence.report.reportHash;
+}
+
+function requireStoredWalkForwardReport(config, artifact) {
+  const file = config?.helix_signal_walk_forward_report_path;
+  const reportHash = config?.helix_signal_walk_forward_report_hash;
+  if (file == null && reportHash == null) return null;
+  if (typeof file !== 'string' || typeof reportHash !== 'string') {
+    throw new Error('Stored Signal walk-forward report pin is incomplete.');
+  }
+  const evidence = loadPromotableWalkForwardReport(file, artifact);
+  if (evidence.report.reportHash !== reportHash) {
+    throw new Error('Stored Signal walk-forward report hash does not match its verified report.');
+  }
+  return evidence;
+}
+
+function readWalkForwardReportIndex() {
+  const payload = readJsonFile(WALK_FORWARD_REPORT_INDEX);
+  return payload?.version === 1 && Array.isArray(payload.records) ? payload.records : [];
+}
+
+function recordWalkForwardReport(evidence) {
+  const record = {
+    reportHash: evidence.report.reportHash,
+    reportFile: evidence.file,
+    candidate: evidence.report.candidate,
+    createdAt: new Date().toISOString(),
+  };
+  const records = [record, ...readWalkForwardReportIndex().filter(
+    (item) => item?.reportHash !== record.reportHash,
+  )].slice(0, 100);
+  mkdirSync(dirname(WALK_FORWARD_REPORT_INDEX), { recursive: true, mode: 0o700 });
+  const temporary = `${WALK_FORWARD_REPORT_INDEX}.tmp.${process.pid}`;
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, records }, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(temporary, 0o600);
+  renameSync(temporary, WALK_FORWARD_REPORT_INDEX);
+  return record;
+}
+
+function walkForwardCandidateMatchesArtifact(candidate, artifact) {
+  return candidate?.strategyId === artifact.identity.strategyId
+    && candidate?.strategyVersion === artifact.identity.strategyVersion
+    && candidate?.strategyRepoCommit === artifact.identity.strategyRepoCommit
+    && candidate?.strategyConfigHash === artifact.identity.strategyConfigHash
+    && candidate?.engineCommit === artifact.identity.engineCommit
+    && candidate?.lifecycle === artifact.strategyLifecycle
+    && candidate?.objectModel === artifact.objectModel;
+}
+
+function findWalkForwardReportForArtifact(artifact) {
+  for (const record of readWalkForwardReportIndex()) {
+    if (typeof record?.reportFile !== 'string' || typeof record?.reportHash !== 'string'
+      || !walkForwardCandidateMatchesArtifact(record.candidate, artifact)) continue;
+    try {
+      const evidence = loadPromotableWalkForwardReport(record.reportFile, artifact);
+      if (evidence.report.reportHash === record.reportHash) return evidence;
+    } catch {}
+  }
+  return null;
+}
+
+function requireStoredDeploymentIdentity(config) {
+  const strategy = assertStrategyName(config?.strategy);
+  let archivedArtifact = null;
+  if (strategy === HELIX_SIGNAL_STRATEGY) {
+    const artifactHash = config?.helix_signal_artifact_hash;
+    const artifactPath = config?.helix_signal_artifact_path;
+    if (typeof artifactHash !== 'string' || typeof artifactPath !== 'string') {
+      throw new Error('Stored HelixSignalStrategy config is missing its immutable Artifact pin.');
+    }
+    archivedArtifact = loadArchivedSignalArtifact(artifactHash);
+    const expectedPath = dockerCliPath(archivedArtifact.hashFile);
+    if (artifactPath !== expectedPath) {
+      throw new Error(`Stored signal artifact path does not match its hash: expected ${expectedPath}`);
+    }
+    requireInstalledSignalAdapter();
+    const walkForwardEvidence = requireSignalWalkForwardReport(
+      archivedArtifact.artifact,
+      requireStoredWalkForwardReport(config, archivedArtifact.artifact),
+    );
+    const forwardRuntime = forwardRuntimeFromConfig(config);
+    if (forwardRuntime) {
+      const deployment = verifyForwardDeployment(readJsonFile(forwardRuntime.deploymentFile));
+      if (deployment.deploymentHash !== forwardRuntime.deploymentHash) {
+        throw new Error('Stored forward Signal deployment hash does not match its file.');
+      }
+      const pin = deployment.strategy;
+      const artifact = archivedArtifact.artifact;
+      if (pin.id !== artifact.identity.strategyId
+        || pin.version !== artifact.identity.strategyVersion
+        || pin.repoCommit !== artifact.identity.strategyRepoCommit
+        || pin.configHash !== artifact.identity.strategyConfigHash
+        || pin.engineCommit !== artifact.identity.engineCommit
+        || pin.lifecycle !== artifact.strategyLifecycle
+        || pin.objectModel !== artifact.objectModel
+        || pin.baseTimeframe !== artifact.baseTimeframe
+        || deployment.symbol !== artifact.symbol) {
+        throw new Error('Stored forward Signal deployment does not match its backtested Artifact identity.');
+      }
+      if ((walkForwardEvidence?.report.reportHash ?? null) !== (deployment.walkForwardReportHash ?? null)) {
+        throw new Error('Stored forward Signal deployment does not match its walk-forward report pin.');
+      }
+    }
+  } else if (config?.helix_signal_artifact_hash || config?.helix_signal_artifact_path) {
+    throw new Error('Stored non-signal strategy config contains an unexpected signal Artifact pin.');
+  } else if (forwardRuntimeFromConfig(config)) {
+    throw new Error('Stored non-signal strategy config contains an unexpected forward Signal deployment.');
+  }
+  const evidence = requireDeployableBacktestEvidence(
+    requireCurrentBacktestEvidence(strategy, archivedArtifact?.artifact || null),
+    archivedArtifact?.artifact || null,
+  );
+  if (archivedArtifact) requireSignalExecutionCompatibility(evidence, config, archivedArtifact);
+  return { strategy, archivedArtifact, evidence };
 }
 
 function stageSignalBacktestDataset(file, artifact) {
@@ -345,11 +1082,8 @@ function stageSignalBacktestDataset(file, artifact) {
   }
   const rendered = freqtradeOhlcvFile(dataset, artifact.baseTimeframe);
   const candles = dataset.timeframes[artifact.baseTimeframe];
-  const lastCandleCloseTime = candles.at(-1).time + marketTimeframeMilliseconds(artifact.baseTimeframe);
-  if (candles[0].time !== artifact.marketData.firstCandleOpenTime
-    || lastCandleCloseTime !== artifact.marketData.lastCandleCloseTime) {
-    throw new Error('market_dataset base timeframe window does not match signal artifact marketData');
-  }
+  const marketWindow = requireMarketDatasetArtifactWindow(dataset, artifact);
+  const lastCandleCloseTime = marketWindow.lastCandleCloseTime;
   const dataRoot = resolve(SIGNAL_BACKTEST_DATA_DIR, dataset.datasetHash.replace(':', '-'));
   const destination = resolve(dataRoot, rendered.relativePath);
   mkdirSync(dirname(destination), { recursive: true });
@@ -377,18 +1111,11 @@ function stageSignalBacktestDataset(file, artifact) {
       dataHash: rendered.dataHash,
       candleCount: candles.length,
       firstCandleOpenTime: candles[0].time,
+      activationCandleOpenTime: marketWindow.activationCandleOpenTime,
+      warmupCandles: marketWindow.warmupCandles,
       lastCandleCloseTime,
     },
   };
-}
-
-function activateSignalArtifact(file) {
-  const archived = archiveSignalArtifact(file);
-  const activeTemp = `${ACTIVE_SIGNAL_ARTIFACT_FILE}.tmp.${process.pid}`;
-  writeFileSync(activeTemp, `${JSON.stringify(archived.artifact, null, 2)}\n`);
-  chmodSync(activeTemp, 0o600);
-  renameSync(activeTemp, ACTIVE_SIGNAL_ARTIFACT_FILE);
-  return { ...archived, activeFile: ACTIVE_SIGNAL_ARTIFACT_FILE };
 }
 
 function requireSignalDeploymentLifecycle(artifact, dryRun) {
@@ -401,64 +1128,6 @@ function requireSignalDeploymentLifecycle(artifact, dryRun) {
       + `expected ${[...allowed].join(' or ')}.`,
     );
   }
-}
-
-function readBacktestZipJson(zipFile) {
-  if (!hasCommand('unzip')) return null;
-  try {
-    const entries = runFile('unzip', ['-Z1', zipFile], { maxBuffer: 1024 * 1024 })
-      .split('\n')
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-    const expectedEntry = `${basename(zipFile, '.zip')}.json`;
-    const jsonEntry = entries.find((entry) => basename(entry) === expectedEntry);
-    if (!jsonEntry) return null;
-
-    const content = runFile('unzip', ['-p', zipFile, jsonEntry], { maxBuffer: 50 * 1024 * 1024 });
-    return JSON.parse(content);
-  } catch {
-    return null;
-  }
-}
-
-function readBacktestPayload(resultsDir, file) {
-  if (file.endsWith('.json')) return readJsonFile(resolve(resultsDir, file));
-  if (file.endsWith('.zip')) return readBacktestZipJson(resolve(resultsDir, file));
-
-  const jsonFile = resolve(resultsDir, `${file}.json`);
-  if (existsSync(jsonFile)) return readJsonFile(jsonFile);
-
-  const zipFile = resolve(resultsDir, `${file}.zip`);
-  if (existsSync(zipFile)) return readBacktestZipJson(zipFile);
-
-  return null;
-}
-
-function firstStrategySummary(payload, strategy) {
-  if (!payload || typeof payload !== 'object') return null;
-  const strategyMap = payload.strategy && typeof payload.strategy === 'object' ? payload.strategy : payload;
-  if (strategyMap[strategy] && typeof strategyMap[strategy] === 'object') return strategyMap[strategy];
-  return null;
-}
-
-function backtestMetrics(summary) {
-  if (!summary || typeof summary !== 'object') return {};
-
-  const trades = firstNumber(summary.total_trades, summary.trade_count, summary.trades);
-  const wins = firstNumber(summary.winning_trades, summary.wins, summary.win_trades);
-  const draws = firstNumber(summary.draws, summary.draw_trades);
-  const losses = firstNumber(summary.losing_trades, summary.losses, summary.loss_trades);
-  const winRate = firstNumber(summary.winrate, summary.win_rate)
-    ?? (wins != null && trades ? wins / trades : null)
-    ?? (wins != null && losses != null && (wins + losses + (draws ?? 0)) > 0 ? wins / (wins + losses + (draws ?? 0)) : null);
-
-  return {
-    trades,
-    profitPct: firstNumber(summary.profit_total_pct, summary.profit_total_percent, summary.total_profit_pct, summary.profit_total),
-    profitAbs: firstNumber(summary.profit_total_abs, summary.total_profit_abs, summary.profit_abs),
-    winRate,
-    drawdown: firstNumber(summary.max_drawdown_account, summary.max_drawdown_pct, summary.drawdown, summary.max_drawdown),
-  };
 }
 
 function evidenceFilePath(resultsDir, file, name, validSuffixes) {
@@ -482,16 +1151,14 @@ function evidenceSignalArtifact(evidence, signalArtifact = null) {
     return loadSignalArtifact(file);
   })();
   if (artifact.artifactHash !== expectedHash
-    || !evidence.signalArtifact?.identity
-    || !samePinnedSignalIdentity({ identity: evidence.signalArtifact.identity }, artifact)
-    || evidence.signalArtifact.marketDataSnapshotId !== artifact.identity.marketDataSnapshotId
+    || !isDeepStrictEqual(evidence.signalArtifact, signalArtifactEvidence(artifact))
     || evidence.marketDataset?.datasetHash !== artifact.identity.marketDataSnapshotId) {
     throw new Error(`Backtest evidence "${evidence.id}" does not match its signal artifact identity.`);
   }
   return artifact;
 }
 
-function verifyBacktestEvidenceResult(evidence, signalArtifact = null) {
+function verifyBacktestEvidenceResult(evidence, signalArtifact = null, requestedFee = null, riskContext = null) {
   if (!evidence?.resultFile) {
     throw new Error(`Backtest evidence "${evidence?.id || 'unknown'}" has no result file. Run backtest again before deploy.`);
   }
@@ -524,31 +1191,39 @@ function verifyBacktestEvidenceResult(evidence, signalArtifact = null) {
   if (!summary) {
     throw new Error(`Backtest evidence "${evidence.id}" result payload does not contain strategy "${evidence.strategy}".`);
   }
-  const reconciliation = evidence.strategy === HELIX_SIGNAL_STRATEGY
-    ? reconcileSignalBacktest(summary, evidenceSignalArtifact(evidence, signalArtifact))
+  const verifiedSignalArtifact = evidence.strategy === HELIX_SIGNAL_STRATEGY
+    ? evidenceSignalArtifact(evidence, signalArtifact)
+    : null;
+  const reconciliation = verifiedSignalArtifact
+    ? reconcileSignalBacktest(summary, verifiedSignalArtifact)
     : null;
   if (fileHash(resultFile) !== actualResultHash || fileHash(resultMetaFile) !== actualResultMetaHash) {
     throw new Error(`Backtest evidence "${evidence.id}" result files changed during verification.`);
   }
   return {
-    metrics: backtestMetrics(summary),
+    metrics: backtestMetrics(summary, riskContext),
+    feeObservations: requestedFee === null ? null : backtestFeeObservations(summary, requestedFee),
     resultHash: actualResultHash,
     resultMetaHash: actualResultMetaHash,
     reconciliation,
+    signalArtifact: verifiedSignalArtifact ? signalArtifactEvidence(verifiedSignalArtifact) : null,
   };
 }
 
 function requireDeployableBacktestEvidence(evidence, signalArtifact = null) {
   const verified = verifyBacktestEvidenceResult(evidence, signalArtifact);
   const metrics = verified.metrics;
-  if (metrics.trades == null || metrics.profitPct == null) {
+  if (metrics.trades == null) {
     throw new Error(`Backtest evidence "${evidence.id}" has no verifiable trade/profit metrics. Run backtest again before deploy.`);
   }
   if (metrics.trades < 1) {
     throw new Error(`Backtest evidence "${evidence.id}" has 0 trades and cannot be deployed.`);
   }
-  if (metrics.profitPct <= 0) {
-    throw new Error(`Backtest evidence "${evidence.id}" is not profitable (${(metrics.profitPct * 100).toFixed(2)}%). Deployment blocked.`);
+  if (metrics.profitRatio == null) {
+    throw new Error(`Backtest evidence "${evidence.id}" has no verifiable trade/profit metrics. Run backtest again before deploy.`);
+  }
+  if (metrics.profitRatio <= 0) {
+    throw new Error(`Backtest evidence "${evidence.id}" is not profitable (${(metrics.profitRatio * 100).toFixed(2)}%). Deployment blocked.`);
   }
   return { ...evidence, ...verified, metrics };
 }
@@ -575,9 +1250,88 @@ function startHostTrade(strategy) {
     });
     child.unref();
     writeFileSync(HOST.pidFile, `${child.pid}\n`);
+    return child.pid;
   } finally {
     closeSync(logFd);
   }
+}
+
+function writeHostApiEnvironment(config) {
+  const values = {
+    FREQTRADE_URL: FT_API_URL,
+    FREQTRADE_USERNAME: String(config.api_server.username),
+    FREQTRADE_PASSWORD: String(config.api_server.password),
+  };
+  const lines = existsSync(ENV_FILE) ? readFileSync(ENV_FILE, 'utf8').split('\n') : [];
+  for (const [key, value] of Object.entries(values)) {
+    const index = lines.findIndex((line) => line.trim().startsWith(`${key}=`));
+    if (index >= 0) lines[index] = `${key}=${value}`;
+    else lines.push(`${key}=${value}`);
+  }
+  writeDeploymentFile(ENV_FILE, `${lines.filter((line, index) => line || index < lines.length - 1).join('\n').trimEnd()}\n`, 0o600);
+}
+
+async function rollbackHostDeployment(transaction, previous, originalError) {
+  try {
+    await stopHostDaemon();
+    if (previous.running && !emergencyStopIsLatched(USER_DATA)) {
+      await restartPreviousHostDeployment(transaction, previous);
+    } else {
+      restoreDeploymentFiles(transaction);
+      if (emergencyStopIsLatched(USER_DATA)) persistStoppedDeploymentConfig();
+    }
+    updateDeploymentTransaction(USER_DATA, transaction, 'ROLLED_BACK', originalError.message);
+  } catch (rollbackError) {
+    try { await stopHostDaemon(); } catch {}
+    try {
+      updateDeploymentTransaction(
+        USER_DATA,
+        transaction,
+        'FAILED_ROLLBACK',
+        `${originalError.message}; rollback: ${rollbackError.message}`,
+      );
+    } catch {}
+    throw new Error(`FAILED_ROLLBACK: ${originalError.message}; rollback failed: ${rollbackError.message}`);
+  }
+  try {
+    discardDeploymentBackups(transaction);
+  } catch (cleanupError) {
+    throw new Error(`Deployment failed and was rolled back, but backup cleanup failed: ${cleanupError.message}`);
+  }
+  throw new Error(`Deployment failed and was rolled back: ${originalError.message}`);
+}
+
+async function recoverHostDeployment() {
+  const transaction = readDeploymentTransaction(USER_DATA);
+  if (transaction?.phase === 'FAILED_ROLLBACK') {
+    throw new Error('FAILED_ROLLBACK requires operator intervention; automatic deployment is blocked');
+  }
+  if (!deploymentTransactionIsIncomplete(transaction)) {
+    if (transaction) discardDeploymentBackups(transaction);
+    return null;
+  }
+  if (transaction.phase === 'PREPARING' || transaction.phase === 'PREPARED') {
+    if (transaction.previous?.running) {
+      const previousConfig = readJsonFile(CONFIG_PATH);
+      if (!previousConfig) throw new Error('host config is unreadable during prepared recovery');
+      await requestHostEntryState(previousConfig, false);
+      writeDeploymentFile(
+        CONFIG_PATH,
+        `${JSON.stringify({ ...previousConfig, initial_state: 'stopped' }, null, 4)}\n`,
+        0o600,
+      );
+    }
+    updateDeploymentTransaction(USER_DATA, transaction, 'ROLLED_BACK', 'recovered prepared host deployment');
+    discardDeploymentBackups(transaction);
+    return transaction.id;
+  }
+  const candidateForwardRuntime = forwardRuntimeFromConfig(readJsonFile(CONFIG_PATH));
+  await stopHostDaemon();
+  await stopForwardWorker(candidateForwardRuntime);
+  await restartPreviousHostDeployment(transaction, transaction.previous, { restoreEntries: false });
+  updateDeploymentTransaction(USER_DATA, transaction, 'ROLLED_BACK', 'recovered incomplete host deployment');
+  discardDeploymentBackups(transaction);
+  return transaction.id;
 }
 
 // 轻量 env 读取 — freqtrade-api.mjs 已经 loadEnv() 一次, 这里是为了 host
@@ -670,39 +1424,296 @@ function readDaemonConfig() {
   return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
 }
 
-function writeDaemonConfig(cfg) {
-  const bak = `${CONFIG_PATH}.bak`;
-  copyFileSync(CONFIG_PATH, bak);
-  try { chmodSync(bak, 0o600); } catch {}
-  const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(cfg, null, 4) + '\n');
-  try { chmodSync(tmp, 0o600); } catch {}
-  renameSync(tmp, CONFIG_PATH);
-  try { chmodSync(CONFIG_PATH, 0o600); } catch {}
+function persistStoppedDeploymentConfig() {
+  const config = readJsonFile(CONFIG_PATH);
+  if (!config) throw new Error('Freqtrade config is unreadable while persisting stopped entry state');
+  config.initial_state = 'stopped';
+  writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(config, null, 4)}\n`, 0o600);
 }
 
-function restartDaemon() {
+function configPairs(cfg) {
+  if (Array.isArray(cfg?.whitelist) && cfg.whitelist.length) return cfg.whitelist;
+  if (Array.isArray(cfg?.pair_whitelist) && cfg.pair_whitelist.length) return cfg.pair_whitelist;
+  return Array.isArray(cfg?.exchange?.pair_whitelist) ? cfg.exchange.pair_whitelist : [];
+}
+
+function managedDeploymentState(cfg) {
+  return {
+    strategy: String(cfg?.strategy || ''),
+    dryRun: typeof cfg?.dry_run === 'boolean' ? cfg.dry_run : null,
+    pairs: configPairs(cfg).map(String).sort(),
+    timeframe: String(cfg?.timeframe || ''),
+    maxOpenTrades: Number(cfg?.max_open_trades),
+    artifactHash: typeof cfg?.helix_signal_artifact_hash === 'string'
+      ? cfg.helix_signal_artifact_hash
+      : null,
+    artifactPath: typeof cfg?.helix_signal_artifact_path === 'string'
+      ? cfg.helix_signal_artifact_path
+      : null,
+  };
+}
+
+function daemonEntriesRunning(cfg) {
+  const state = String(cfg?.state || '').toLowerCase();
+  if (!state) throw new Error('Freqtrade show_config did not report an entry state');
+  return state !== 'stopped' && state !== 'stop';
+}
+
+function configuredInitialEntriesRunning(cfg) {
+  const state = String(cfg?.initial_state || 'running').toLowerCase();
+  if (state === 'running' || state === 'run') return true;
+  if (state === 'stopped' || state === 'stop') return false;
+  throw new Error(`Stored Freqtrade initial_state is invalid: ${state}`);
+}
+
+function sameManagedDeploymentState(actual, expected, { includeArtifact = false } = {}) {
+  const baseMatches = actual.strategy === expected.strategy
+    && actual.dryRun === expected.dryRun
+    && actual.timeframe === expected.timeframe
+    && actual.maxOpenTrades === expected.maxOpenTrades
+    && actual.pairs.length === expected.pairs.length
+    && actual.pairs.every((pair, index) => pair === expected.pairs[index]);
+  return baseMatches && (!includeArtifact || (
+    actual.artifactHash === expected.artifactHash
+    && actual.artifactPath === expected.artifactPath
+  ));
+}
+
+function discardDeploymentBackups(transaction) {
+  cleanupDeploymentBackups(transaction);
+}
+
+function stopManagedDaemon() {
   if (IS_DOCKER) {
-    dockerCompose(['up', '-d', '--force-recreate', '--no-deps', 'freqtrade'], { timeout: 60_000 });
-    return { method: 'docker compose recreate' };
+    dockerCompose(['stop', 'freqtrade'], { timeout: 60_000 });
+    return { method: 'docker compose stop' };
   }
-  if (!ENV) throw new Error('restart daemon 仅在 coinclaw 容器内可用');
+  if (!ENV) throw new Error('managed daemon stop is unavailable in host mode');
   const sock = supervisorSocket();
-  try {
-    execFileSync('supervisorctl', ['-s', `unix://${sock}`, 'restart', 'freqtrade'], {
-      stdio: 'pipe', timeout: 30000,
-    });
-    return { method: 'supervisorctl' };
-  } catch (e) {
-    try {
-      const pid = runFile('pgrep', ['-f', 'freqtrade trade']).split('\n')[0]?.trim();
-      if (pid) {
-        process.kill(Number(pid), 'SIGTERM');
-        return { method: 'kill+autorestart', pid: Number(pid) };
-      }
-    } catch {}
-    throw new Error(`restart 失败: ${e.message}`);
+  execFileSync('supervisorctl', ['-s', `unix://${sock}`, 'stop', 'freqtrade'], {
+    stdio: 'pipe', timeout: 30000,
+  });
+  return { method: 'supervisorctl stop' };
+}
+
+function startManagedDaemon() {
+  if (IS_DOCKER) {
+    dockerCompose(['up', '-d', '--no-deps', 'freqtrade'], { timeout: 60_000 });
+    return { method: 'docker compose up' };
   }
+  if (!ENV) throw new Error('managed daemon start is unavailable in host mode');
+  const sock = supervisorSocket();
+  execFileSync('supervisorctl', ['-s', `unix://${sock}`, 'start', 'freqtrade'], {
+    stdio: 'pipe', timeout: 30000,
+  });
+  return { method: 'supervisorctl start' };
+}
+
+async function guardDaemonStart(operation, startCallback, stopCallback) {
+  return withEntryTransitionLock(USER_DATA, operation, async () => {
+    requireNoEmergencyStop(USER_DATA);
+    try {
+      const result = await startCallback();
+      requireNoEmergencyStop(USER_DATA);
+      return result;
+    } catch (error) {
+      try { await stopCallback(); } catch {}
+      throw error;
+    }
+  });
+}
+
+async function waitForManagedDaemon(expected, timeoutMs = 60_000, abortOnEmergency = false) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'daemon did not respond';
+  while (Date.now() < deadline) {
+    if (abortOnEmergency) requireNoEmergencyStop(USER_DATA);
+    try {
+      const config = await ftGet('show_config', {}, { timeoutMs: 2_000 });
+      const actual = managedDeploymentState(config);
+      if (sameManagedDeploymentState(actual, expected)) return actual;
+      lastError = `effective config mismatch: ${JSON.stringify({ actual, expected })}`;
+    } catch (error) {
+      lastError = error.message;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
+  throw new Error(`daemon readiness failed: ${lastError}`);
+}
+
+async function waitForManagedEntryState(
+  expectedRunning,
+  timeoutMs = Number(process.env.HELIX_TEST_ENTRY_TIMEOUT_MS) || 5_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'daemon entry state was not available';
+  while (Date.now() < deadline) {
+    try {
+      const config = await ftGet('show_config', {}, { timeoutMs: 2_000 });
+      if (daemonEntriesRunning(config) === expectedRunning) return config;
+      lastError = `entry state remained ${String(config?.state || 'unknown')}`;
+    } catch (error) {
+      lastError = error.message;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  throw new Error(`entry state confirmation failed: ${lastError}`);
+}
+
+async function requestManagedEntryState(expectedRunning) {
+  let response = null;
+  let requestError = null;
+  try {
+    response = await ftPost(expectedRunning ? 'start' : 'stopentry', {}, { timeoutMs: 5_000 });
+  } catch (error) {
+    requestError = error;
+  }
+  try {
+    await waitForManagedEntryState(expectedRunning);
+  } catch (confirmationError) {
+    const prefix = requestError ? `${requestError.message}; ` : '';
+    throw new Error(`${prefix}${confirmationError.message}`);
+  }
+  return response;
+}
+
+async function activateManagedEntries(operation) {
+  return withEntryTransitionLock(USER_DATA, operation, async () => {
+    requireNoEmergencyStop(USER_DATA);
+    const response = await requestManagedEntryState(true);
+    if (emergencyStopIsLatched(USER_DATA)) {
+      await requestManagedEntryState(false);
+      throw new Error('entry activation was canceled by emergency stop latch');
+    }
+    return response;
+  });
+}
+
+async function commitManagedEntryActivation(config) {
+  return withEntryTransitionLock(USER_DATA, 'commit managed entry activation', async () => {
+    requireNoEmergencyStop(USER_DATA);
+    try {
+      const response = await requestManagedEntryState(true);
+      config.initial_state = 'running';
+      writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(config, null, 4)}\n`);
+      requireNoEmergencyStop(USER_DATA);
+      return response;
+    } catch (error) {
+      const convergenceErrors = [];
+      try { await requestManagedEntryState(false); } catch (stopError) { convergenceErrors.push(stopError.message); }
+      try {
+        config.initial_state = 'stopped';
+        writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(config, null, 4)}\n`);
+      } catch (writeError) {
+        convergenceErrors.push(writeError.message);
+      }
+      const suffix = convergenceErrors.length > 0
+        ? `; entry state could not be made safe: ${convergenceErrors.join('; ')}`
+        : '; target remains committed with entries stopped';
+      throw new Error(`${error.message}${suffix}`);
+    }
+  });
+}
+
+async function restartPreviousManagedDeployment(transaction, previous, { restoreEntries = true } = {}) {
+  restoreDeploymentFiles(transaction);
+  const restored = readJsonFile(CONFIG_PATH);
+  if (!restored) throw new Error('restored managed config is unreadable');
+  writeDeploymentFile(CONFIG_PATH, `${JSON.stringify({ ...restored, initial_state: 'stopped' }, null, 4)}\n`);
+  startManagedDaemon();
+  await waitForManagedDaemon(previous);
+  await waitForManagedEntryState(false);
+  await startStoredForwardWorker(restored);
+  if (restoreEntries && previous.entriesRunning && !emergencyStopIsLatched(USER_DATA)) {
+    await activateManagedEntries('restore managed entry state');
+    restoreDeploymentFiles(transaction);
+  } else if (restoreEntries && !previous.entriesRunning) {
+    restoreDeploymentFiles(transaction);
+  }
+}
+
+async function stopEntries() {
+  return requestManagedEntryState(false);
+}
+
+async function requireFlatBot() {
+  const openTrades = await ftGet('status', {}, { timeoutMs: 5_000 });
+  if (!Array.isArray(openTrades)) throw new Error('Freqtrade status did not return open trades');
+  if (openTrades.length > 0) {
+    throw new Error(`Deployment requires a flat bot; ${openTrades.length} open trade(s) remain.`);
+  }
+}
+
+function managedAdapterDestinations(signalArtifact) {
+  if (!signalArtifact) return [];
+  return SIGNAL_ADAPTER_FILES
+    .map((name) => resolve(STRAT_DIR, name))
+    .filter((destination) => !SIGNAL_ADAPTER_FILES
+      .map((name) => resolve(SIGNAL_ADAPTER_ASSET_DIR, name))
+      .includes(destination));
+}
+
+async function rollbackManagedDeployment(transaction, previous, originalError) {
+  try {
+    stopManagedDaemon();
+    if (!emergencyStopIsLatched(USER_DATA)) {
+      await restartPreviousManagedDeployment(transaction, previous);
+    } else {
+      restoreDeploymentFiles(transaction);
+      persistStoppedDeploymentConfig();
+    }
+    updateDeploymentTransaction(USER_DATA, transaction, 'ROLLED_BACK', originalError.message);
+  } catch (rollbackError) {
+    try { stopManagedDaemon(); } catch {}
+    try {
+      updateDeploymentTransaction(
+        USER_DATA,
+        transaction,
+        'FAILED_ROLLBACK',
+        `${originalError.message}; rollback: ${rollbackError.message}`,
+      );
+    } catch {}
+    throw new Error(`FAILED_ROLLBACK: ${originalError.message}; rollback failed: ${rollbackError.message}`);
+  }
+  try {
+    discardDeploymentBackups(transaction);
+  } catch (cleanupError) {
+    throw new Error(`Deployment failed and was rolled back, but backup cleanup failed: ${cleanupError.message}`);
+  }
+  throw new Error(`Deployment failed and was rolled back: ${originalError.message}`);
+}
+
+async function recoverManagedDeployment() {
+  const transaction = readDeploymentTransaction(USER_DATA);
+  if (transaction?.phase === 'FAILED_ROLLBACK') {
+    throw new Error('FAILED_ROLLBACK requires operator intervention; automatic deployment is blocked');
+  }
+  if (!deploymentTransactionIsIncomplete(transaction)) {
+    if (transaction) discardDeploymentBackups(transaction);
+    return null;
+  }
+  if (transaction.phase === 'PREPARING' || transaction.phase === 'PREPARED') {
+    await requestManagedEntryState(false);
+    const config = readDaemonConfig();
+    config.initial_state = 'stopped';
+    writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(config, null, 4)}\n`);
+    updateDeploymentTransaction(USER_DATA, transaction, 'ROLLED_BACK', 'recovered prepared deployment');
+    discardDeploymentBackups(transaction);
+    return transaction.id;
+  }
+  try {
+    await stopEntries();
+    await requireFlatBot();
+  } catch (error) {
+    if (/flat bot|did not return open trades/.test(String(error.message))) throw error;
+  }
+  const candidateForwardRuntime = forwardRuntimeFromConfig(readJsonFile(CONFIG_PATH));
+  stopManagedDaemon();
+  await stopForwardWorker(candidateForwardRuntime);
+  await restartPreviousManagedDeployment(transaction, transaction.previous, { restoreEntries: false });
+  updateDeploymentTransaction(USER_DATA, transaction, 'ROLLED_BACK', 'recovered incomplete deployment');
+  discardDeploymentBackups(transaction);
+  return transaction.id;
 }
 
 // 通过 dump+grep ps 拿 daemon 当前用的 strategy / pair_whitelist 等运行
@@ -722,6 +1733,182 @@ function getHostPid() {
   const pid = readFileSync(HOST.pidFile, 'utf-8').trim();
   if (!pid) return null;
   try { process.kill(Number(pid), 0); return Number(pid); } catch { return null; }
+}
+
+function hostPidIsAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+}
+
+async function waitForHostPidExit(pid, timeoutMs = Number(process.env.HELIX_TEST_DEPLOY_TIMEOUT_MS) || 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!hostPidIsAlive(pid)) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  }
+  throw new Error(`host Freqtrade process ${pid} did not exit after SIGTERM`);
+}
+
+async function stopHostDaemon() {
+  const pid = getHostPid();
+  if (pid) {
+    process.kill(pid, 'SIGTERM');
+    await waitForHostPidExit(pid);
+  }
+  try { writeFileSync(HOST.pidFile, ''); } catch {}
+  return pid;
+}
+
+function hostApiCredentials(config) {
+  const username = String(config?.api_server?.username || 'freqtrade');
+  const password = String(config?.api_server?.password || '');
+  if (!password) throw new Error('host Freqtrade config has no API password');
+  return { username, password };
+}
+
+async function hostApiRequest(config, path, { method = 'GET', body, timeoutMs = 3_000 } = {}) {
+  const { username, password } = hostApiCredentials(config);
+  const response = await fetch(`${FT_API_URL}/api/v1/${path}`, {
+    method,
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`,
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`Freqtrade ${response.status}: ${await response.text()}`);
+  return response.json();
+}
+
+async function waitForHostDaemon(
+  expected,
+  config,
+  timeoutMs = Number(process.env.HELIX_TEST_DEPLOY_TIMEOUT_MS) || 30_000,
+  abortOnEmergency = false,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'host daemon did not respond';
+  while (Date.now() < deadline) {
+    if (abortOnEmergency) requireNoEmergencyStop(USER_DATA);
+    try {
+      if (!getHostPid()) throw new Error('host daemon process exited');
+      const actual = managedDeploymentState(await hostApiRequest(config, 'show_config'));
+      if (sameManagedDeploymentState(actual, expected)) return actual;
+      lastError = `effective config mismatch: ${JSON.stringify({ actual, expected })}`;
+    } catch (error) {
+      lastError = error.message;
+      if (lastError === 'host daemon process exited') break;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
+  throw new Error(`host daemon readiness failed: ${lastError}`);
+}
+
+async function waitForHostEntryState(
+  config,
+  expectedRunning,
+  timeoutMs = Number(process.env.HELIX_TEST_ENTRY_TIMEOUT_MS) || 5_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'host daemon entry state was not available';
+  while (Date.now() < deadline) {
+    try {
+      const effective = await hostApiRequest(config, 'show_config');
+      if (daemonEntriesRunning(effective) === expectedRunning) return effective;
+      lastError = `entry state remained ${String(effective?.state || 'unknown')}`;
+    } catch (error) {
+      lastError = error.message;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  throw new Error(`host entry state confirmation failed: ${lastError}`);
+}
+
+async function requestHostEntryState(config, expectedRunning) {
+  let response = null;
+  let requestError = null;
+  try {
+    response = await hostApiRequest(config, expectedRunning ? 'start' : 'stopentry', { method: 'POST', body: {} });
+  } catch (error) {
+    requestError = error;
+  }
+  try {
+    await waitForHostEntryState(config, expectedRunning);
+  } catch (confirmationError) {
+    const prefix = requestError ? `${requestError.message}; ` : '';
+    throw new Error(`${prefix}${confirmationError.message}`);
+  }
+  return response;
+}
+
+async function activateHostEntries(config, operation) {
+  return withEntryTransitionLock(USER_DATA, operation, async () => {
+    requireNoEmergencyStop(USER_DATA);
+    const response = await requestHostEntryState(config, true);
+    if (emergencyStopIsLatched(USER_DATA)) {
+      await requestHostEntryState(config, false);
+      throw new Error('host entry activation was canceled by emergency stop latch');
+    }
+    return response;
+  });
+}
+
+async function commitHostEntryActivation(config) {
+  return withEntryTransitionLock(USER_DATA, 'commit host entry activation', async () => {
+    requireNoEmergencyStop(USER_DATA);
+    try {
+      const response = await requestHostEntryState(config, true);
+      config.initial_state = 'running';
+      writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(config, null, 4)}\n`, 0o600);
+      requireNoEmergencyStop(USER_DATA);
+      return response;
+    } catch (error) {
+      const convergenceErrors = [];
+      try { await requestHostEntryState(config, false); } catch (stopError) { convergenceErrors.push(stopError.message); }
+      try {
+        config.initial_state = 'stopped';
+        writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(config, null, 4)}\n`, 0o600);
+      } catch (writeError) {
+        convergenceErrors.push(writeError.message);
+      }
+      const suffix = convergenceErrors.length > 0
+        ? `; host entry state could not be made safe: ${convergenceErrors.join('; ')}`
+        : '; target remains committed with entries stopped';
+      throw new Error(`${error.message}${suffix}`);
+    }
+  });
+}
+
+async function restartPreviousHostDeployment(transaction, previous, { restoreEntries = true } = {}) {
+  restoreDeploymentFiles(transaction);
+  if (!previous.running) return;
+  const restoredConfig = readJsonFile(CONFIG_PATH);
+  if (!restoredConfig) throw new Error('restored host config is unreadable');
+  const stoppedConfig = { ...restoredConfig, initial_state: 'stopped' };
+  writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(stoppedConfig, null, 4)}\n`, 0o600);
+  startHostTrade(previous.state.strategy);
+  await waitForHostDaemon(previous.state, stoppedConfig);
+  await waitForHostEntryState(stoppedConfig, false);
+  await startStoredForwardWorker(restoredConfig);
+  if (restoreEntries && previous.state.entriesRunning && !emergencyStopIsLatched(USER_DATA)) {
+    await activateHostEntries(restoredConfig, 'restore host entry state');
+    restoreDeploymentFiles(transaction);
+  } else if (restoreEntries && !previous.state.entriesRunning) {
+    restoreDeploymentFiles(transaction);
+  }
+}
+
+async function stopHostEntries(config) {
+  return requestHostEntryState(config, false);
+}
+
+async function requireFlatHostBot(config) {
+  const openTrades = await hostApiRequest(config, 'status');
+  if (!Array.isArray(openTrades)) throw new Error('Freqtrade status did not return open trades');
+  if (openTrades.length > 0) {
+    throw new Error(`Deployment requires a flat bot; ${openTrades.length} open trade(s) remain.`);
+  }
 }
 
 function findPython() {
@@ -788,6 +1975,10 @@ function ensureModernPython() {
 function generateHostConfig(exchangeInfo, apiPassword, params = {}) {
   const config = {
     ...(params.timeframe ? { timeframe: params.timeframe } : {}),
+    ...(params.helix_signal_artifact_path ? {
+      helix_signal_artifact_path: params.helix_signal_artifact_path,
+      helix_signal_artifact_hash: params.helix_signal_artifact_hash,
+    } : {}),
     trading_mode: params.trading_mode || 'futures',
     margin_mode: params.margin_mode || 'isolated',
     max_open_trades: params.max_open_trades || 2,
@@ -934,10 +2125,9 @@ const actions = {
   //   改 config.strategy + 重启 daemon. 不再 git clone, 不再 nohup.
   // host 模式: 沿用老路径 (clone + setup.sh + nohup).
   deploy: async (params = {}) => {
-    const signalArtifact = params.signal_artifact
-      ? loadSignalArtifact(resolve(String(params.signal_artifact)))
-      : null;
-    if (signalArtifact) installSignalAdapter();
+    const archivedArtifact = resolveSignalArtifact(params);
+    const signalArtifact = archivedArtifact?.artifact || null;
+    const walkForwardEvidence = resolveSignalWalkForwardReport(params, signalArtifact);
     const strategy = params.strategy
       ? assertStrategyName(params.strategy)
       : signalArtifact ? HELIX_SIGNAL_STRATEGY : null;
@@ -957,137 +2147,559 @@ const actions = {
       throw new Error(`Signal artifact deployment pair must be exactly ${signalArtifact.symbol}.`);
     }
     const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
-    if (!existsSync(stratFile)) {
+    if (strategy !== HELIX_SIGNAL_STRATEGY && !existsSync(stratFile)) {
       throw new Error(`策略文件不存在: ${stratFile}. 先用 create_strategy 创建策略并完成回测。`);
     }
-    const evidence = requireDeployableBacktestEvidence(
+    requireDeployableBacktestEvidence(
       requireCurrentBacktestEvidence(strategy, signalArtifact),
       signalArtifact,
     );
 
     if (ENV) {
-      const cfg = readDaemonConfig();
-      const before = {
-        strategy: cfg.strategy,
-        dry_run: cfg.dry_run,
-        pairs: cfg.exchange?.pair_whitelist,
-        timeframe: cfg.timeframe,
-      };
-      const targetDryRun = typeof params.dry_run === 'boolean' ? params.dry_run : cfg.dry_run;
-      const maxOpenTrades = requireMaxOpenTrades(params.max_open_trades ?? cfg.max_open_trades ?? 2);
-      if (signalArtifact) requireSignalDeploymentLifecycle(signalArtifact, targetDryRun);
-      if (targetDryRun === false) requireLiveAuthorization({ ...params, max_open_trades: maxOpenTrades }, cfg);
-      const stagedArtifact = signalArtifact ? activateSignalArtifact(String(params.signal_artifact)) : null;
-      cfg.strategy = strategy;
-      // 允许在 deploy 里同时改 dry_run / pairs / max_open_trades, 一次完成.
-      cfg.dry_run = targetDryRun;
-      if (deploymentPairs.length) {
-        if (!cfg.exchange) cfg.exchange = {};
-        cfg.exchange.pair_whitelist = deploymentPairs;
-      } else if (signalArtifact) {
-        if (!cfg.exchange) cfg.exchange = {};
-        cfg.exchange.pair_whitelist = [signalArtifact.symbol];
-      }
-      if (signalArtifact) cfg.timeframe = signalArtifact.baseTimeframe;
-      cfg.max_open_trades = maxOpenTrades;
-      writeDaemonConfig(cfg);
-      const restart = restartDaemon();
-      return {
-        success: true, mode: runtimeMode(), engine: ENV.engine,
-        strategy, before, restart, backtest_evidence: evidence.id,
-        signal_artifact: stagedArtifact ? {
-          hash: stagedArtifact.artifact.artifactHash,
-          identity: pinnedSignalIdentity(stagedArtifact.artifact),
-          lifecycle: stagedArtifact.artifact.strategyLifecycle,
-          active_file: stagedArtifact.activeFile,
-        } : null,
-        config_path: CONFIG_PATH, strategy_file: stratFile,
-        note: '策略生效需 daemon 重启完成 (10-30s); dashboard 会自动刷新到新策略名',
-        warning: cfg.dry_run === false
-          ? '⚠️ 已切到实盘 — 真实交易, 真实亏损. 确认 .env 里交易所 key 正确, 余额可控.'
-          : null,
-      };
+      return withDeploymentLock(USER_DATA, 'deploy', async () => {
+        const hadEmergencyLatch = emergencyStopIsLatched(USER_DATA);
+        let emergencyLatchCleared = false;
+        await recoverManagedDeployment();
+        let evidence = requireDeployableBacktestEvidence(
+          requireCurrentBacktestEvidence(strategy, signalArtifact),
+          signalArtifact,
+        );
+        const cfg = readDaemonConfig();
+        const effectiveConfigBefore = await ftGet('show_config', {}, { timeoutMs: 5_000 });
+        const effectiveBefore = {
+          ...managedDeploymentState(effectiveConfigBefore),
+          entriesRunning: daemonEntriesRunning(effectiveConfigBefore),
+        };
+        const configuredBefore = managedDeploymentState(cfg);
+        if (!sameManagedDeploymentState(configuredBefore, effectiveBefore)) {
+          throw new Error('Stored Freqtrade config does not match the running daemon; reconcile before deployment.');
+        }
+        if (configuredInitialEntriesRunning(cfg) !== effectiveBefore.entriesRunning) {
+          throw new Error('Stored Freqtrade initial_state does not match the running daemon entry state; reconcile before deployment.');
+        }
+        const targetDryRun = typeof params.dry_run === 'boolean' ? params.dry_run : cfg.dry_run;
+        const maxOpenTrades = requireMaxOpenTrades(params.max_open_trades ?? cfg.max_open_trades ?? 2);
+        if (signalArtifact) requireSignalDeploymentLifecycle(signalArtifact, targetDryRun);
+        requireSignalWalkForwardReport(signalArtifact, walkForwardEvidence);
+        if (targetDryRun === false) requireLiveAuthorization({ ...params, max_open_trades: maxOpenTrades }, cfg);
+        const previousForwardRuntime = forwardRuntimeFromConfig(cfg);
+        let forwardDeployment = null;
+        let forwardPaths = null;
+        if (signalArtifact) {
+          if (targetDryRun !== true) throw new Error('Helix Signal forward deployment currently supports dry-run only.');
+          if (String(cfg.exchange?.name || '').toLowerCase() !== 'okx') {
+            throw new Error('Forward Signal deployment currently requires the OKX futures market data identity.');
+          }
+          const duration = marketTimeframeMilliseconds(signalArtifact.baseTimeframe);
+          const activatedAt = (Math.floor(Date.now() / duration) + 3) * duration;
+          forwardDeployment = createForwardDeployment(signalArtifact, {
+            activatedAt,
+            walkForwardReportHash: walkForwardEvidence?.report.reportHash ?? null,
+          });
+          forwardPaths = forwardRuntimePaths(forwardDeployment);
+        }
+
+        const next = structuredClone(cfg);
+        next.strategy = strategy;
+        next.dry_run = targetDryRun;
+        if (deploymentPairs.length) {
+          if (!next.exchange) next.exchange = {};
+          next.exchange.pair_whitelist = deploymentPairs;
+        } else if (signalArtifact) {
+          if (!next.exchange) next.exchange = {};
+          next.exchange.pair_whitelist = [signalArtifact.symbol];
+        }
+        if (signalArtifact) {
+          next.timeframe = signalArtifact.baseTimeframe;
+          next.helix_signal_artifact_path = dockerCliPath(archivedArtifact.hashFile);
+          next.helix_signal_artifact_hash = signalArtifact.artifactHash;
+          if (forwardDeployment) configureForwardRuntime(next, forwardDeployment, forwardPaths);
+          else clearForwardRuntimeConfig(next);
+          configureWalkForwardReport(next, walkForwardEvidence);
+        } else {
+          delete next.helix_signal_artifact_path;
+          delete next.helix_signal_artifact_hash;
+          clearForwardRuntimeConfig(next);
+          configureWalkForwardReport(next, null);
+        }
+        next.max_open_trades = maxOpenTrades;
+        next.initial_state = 'stopped';
+        const target = managedDeploymentState(next);
+        if (archivedArtifact) requireSignalExecutionCompatibility(evidence, next, archivedArtifact);
+        const adapterDestinations = managedAdapterDestinations(signalArtifact);
+        const transaction = beginDeploymentTransaction(USER_DATA, {
+          operation: 'deploy',
+          files: [CONFIG_PATH, ...adapterDestinations, ...(forwardPaths ? [forwardPaths.deploymentFile] : [])],
+          previous: effectiveBefore,
+          target,
+        });
+        let entriesStopped = false;
+        let previousForwardStopped = false;
+        let forwardWorkerStarted = false;
+        try {
+          await stopEntries();
+          entriesStopped = true;
+          await requireFlatBot();
+          if (previousForwardRuntime) {
+            await stopForwardWorker(previousForwardRuntime);
+            previousForwardStopped = true;
+          }
+          updateDeploymentTransaction(USER_DATA, transaction, 'FLAT');
+          stopManagedDaemon();
+          updateDeploymentTransaction(USER_DATA, transaction, 'STOPPED');
+          if (signalArtifact) installSignalAdapter();
+          if (forwardDeployment) {
+            writeDeploymentFile(forwardPaths.deploymentFile, `${JSON.stringify(forwardDeployment, null, 2)}\n`);
+          }
+          evidence = requireDeployableBacktestEvidence(
+            requireCurrentBacktestEvidence(strategy, signalArtifact),
+            signalArtifact,
+          );
+          if (archivedArtifact) requireSignalExecutionCompatibility(evidence, next, archivedArtifact);
+          requireUnchangedWalkForwardReport(walkForwardEvidence, signalArtifact);
+          const configContent = `${JSON.stringify(next, null, 4)}\n`;
+          const targetConfigHash = `sha256:${createHash('sha256').update(configContent).digest('hex')}`;
+          if (writeDeploymentFile(CONFIG_PATH, configContent) !== targetConfigHash) {
+            throw new Error('candidate config hash mismatch after commit');
+          }
+          updateDeploymentTransaction(USER_DATA, transaction, 'COMMITTED');
+          const start = startManagedDaemon();
+          const effective = await waitForManagedDaemon(target, 60_000, !hadEmergencyLatch);
+          if (signalArtifact) requireInstalledSignalAdapter();
+          evidence = requireDeployableBacktestEvidence(
+            requireCurrentBacktestEvidence(strategy, signalArtifact),
+            signalArtifact,
+          );
+          if (archivedArtifact) requireSignalExecutionCompatibility(evidence, next, archivedArtifact);
+          requireUnchangedWalkForwardReport(walkForwardEvidence, signalArtifact);
+          const stored = readDaemonConfig();
+          if (!sameManagedDeploymentState(managedDeploymentState(stored), target, { includeArtifact: true })) {
+            throw new Error('stored signal artifact hash does not match deployment target');
+          }
+          if (signalArtifact && loadSignalArtifact(archivedArtifact.hashFile).artifactHash !== signalArtifact.artifactHash) {
+            throw new Error('deployed signal artifact archive failed postcondition verification');
+          }
+          let forwardStatus = null;
+          let forwardPid = null;
+          if (forwardDeployment) {
+            const firstDecisionTime = forwardDeployment.activatedAt
+              + marketTimeframeMilliseconds(forwardDeployment.strategy.baseTimeframe);
+            if (Date.now() >= firstDecisionTime) {
+              throw new Error('Candidate readiness missed the first forward decision boundary; deploy again.');
+            }
+            forwardPid = startForwardWorker(forwardPaths);
+            forwardWorkerStarted = true;
+            forwardStatus = await waitForForwardWorker(forwardPaths, forwardDeployment.deploymentHash);
+          }
+          if (hadEmergencyLatch) {
+            clearEmergencyStopLatch(USER_DATA);
+            emergencyLatchCleared = true;
+          }
+          requireNoEmergencyStop(USER_DATA);
+          updateDeploymentTransaction(USER_DATA, transaction, 'ACTIVE');
+          try {
+            await commitManagedEntryActivation(next);
+          } catch (startError) {
+            try { discardDeploymentBackups(transaction); } catch (cleanupError) {
+              throw new Error(`Deployment committed but entry activation failed: ${startError.message}; backup cleanup failed: ${cleanupError.message}`);
+            }
+            throw new Error(`Deployment committed but entry activation failed: ${startError.message}`);
+          }
+          discardDeploymentBackups(transaction);
+          return {
+            success: true,
+            mode: runtimeMode(),
+            engine: ENV.engine,
+            strategy,
+            dry_run: targetDryRun,
+            pairs: target.pairs,
+            max_open_trades: maxOpenTrades,
+            before: effectiveBefore,
+            effective,
+            start,
+            transaction_id: transaction.id,
+            backtest_evidence: evidence.id,
+            signal_artifact: signalArtifact ? {
+              hash: signalArtifact.artifactHash,
+              identity: pinnedSignalIdentity(signalArtifact),
+              lifecycle: signalArtifact.strategyLifecycle,
+              active_file: archivedArtifact.hashFile,
+            } : null,
+            walk_forward_report: walkForwardEvidence ? {
+              hash: walkForwardEvidence.report.reportHash,
+              file: walkForwardEvidence.file,
+            } : null,
+            forward_runtime: forwardDeployment ? {
+              deployment_hash: forwardDeployment.deploymentHash,
+              activated_at: forwardDeployment.activatedAt,
+              worker_pid: forwardPid,
+              state: forwardStatus.state,
+              deployment_file: forwardPaths.deploymentFile,
+              batches: forwardPaths.batchesDirectory,
+            } : null,
+            config_path: CONFIG_PATH,
+            strategy_file: stratFile,
+            note: 'Deployment is active and verified against the daemon effective config.',
+            warning: targetDryRun === false
+              ? '⚠️ 已切到实盘 — 真实交易, 真实亏损. 确认 .env 里交易所 key 正确, 余额可控.'
+              : null,
+          };
+        } catch (error) {
+          if (forwardWorkerStarted) {
+            try { await stopForwardWorker(forwardPaths); } catch (stopError) {
+              error = new Error(`${error.message}; failed to stop forward worker: ${stopError.message}`);
+            }
+          }
+          if (emergencyLatchCleared && !emergencyStopIsLatched(USER_DATA)) {
+            setEmergencyStopLatch(USER_DATA);
+          }
+          const phase = readDeploymentTransaction(USER_DATA)?.phase;
+          if (phase === 'ACTIVE') {
+            const convergenceErrors = [];
+            try { await requestManagedEntryState(false); } catch (stopError) { convergenceErrors.push(stopError.message); }
+            try { persistStoppedDeploymentConfig(); } catch (writeError) { convergenceErrors.push(writeError.message); }
+            const suffix = convergenceErrors.length > 0
+              ? `; ACTIVE deployment could not be made safe: ${convergenceErrors.join('; ')}`
+              : '; target remains committed with entries stopped';
+            throw new Error(`${error.message}${suffix}`);
+          }
+          if (phase === 'PREPARED') {
+            if (entriesStopped && effectiveBefore.entriesRunning && !emergencyStopIsLatched(USER_DATA)) {
+              try {
+                if (previousForwardStopped) await startStoredForwardWorker(cfg);
+                await activateManagedEntries('restore entry state after rejected deployment');
+              } catch (resumeError) {
+                throw new Error(`${error.message}; failed to restore entry state: ${resumeError.message}`);
+              }
+            }
+            if (emergencyStopIsLatched(USER_DATA)) persistStoppedDeploymentConfig();
+            updateDeploymentTransaction(USER_DATA, transaction, 'ROLLED_BACK', error.message);
+            discardDeploymentBackups(transaction);
+            throw error;
+          }
+          return rollbackManagedDeployment(transaction, effectiveBefore, error);
+        }
+      });
     }
     // host mode
     const targetDryRun = params.dry_run !== false;
     const maxOpenTrades = requireMaxOpenTrades(params.max_open_trades ?? 2);
     if (signalArtifact) requireSignalDeploymentLifecycle(signalArtifact, targetDryRun);
+    requireSignalWalkForwardReport(signalArtifact, walkForwardEvidence);
     if (!targetDryRun) {
       requireLiveAuthorization({ ...params, max_open_trades: maxOpenTrades }, {
         max_open_trades: maxOpenTrades,
         exchange: { name: params.exchange || detectExchange()?.name || '' },
       });
     }
-    ensureHostFreqtradeInstalled();
-    const stagedArtifact = signalArtifact ? activateSignalArtifact(String(params.signal_artifact)) : null;
-    let exchangeInfo = detectExchange();
-    if (!exchangeInfo) {
-      if (params.dry_run !== false) {
-        const exName = params.exchange || 'binance';
-        exchangeInfo = { name: exName, key: 'dry-run', secret: 'dry-run' };
-        console.error(`No exchange API keys found — using dummy keys for dry-run (${exName})`);
-      } else {
-        throw new Error('No exchange API keys found in .env (required for live trading)');
-      }
-    }
-    mkdirSync(STRAT_DIR, { recursive: true });
-    const apiPassword = randomBytes(8).toString('hex');
-    const config = generateHostConfig(exchangeInfo, apiPassword, {
-      ...params,
-      dry_run: targetDryRun,
-      max_open_trades: maxOpenTrades,
-      ...(signalArtifact ? {
-        timeframe: signalArtifact.baseTimeframe,
-        pairs: deploymentPairs.length ? deploymentPairs : [signalArtifact.symbol],
-      } : {}),
-    });
-    writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
-    try { chmodSync(CONFIG_PATH, 0o600); } catch {} // config.json 含明文交易所 key/secret, 收紧权限
-    const samplePath = resolve(STRAT_DIR, 'SampleStrategy.py');
-    if (!existsSync(samplePath)) writeFileSync(samplePath, SAMPLE_STRATEGY);
-    const oldPid = getHostPid();
-    if (oldPid) { try { process.kill(oldPid, 'SIGTERM'); } catch {} }
-    startHostTrade(strategy);
-    let ready = false;
-    for (let i = 0; i < 15; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const pid = getHostPid();
-      if (pid) {
-        try {
-          const res = await fetch(`${FT_API_URL}/api/v1/ping`, {
-            headers: { Authorization: 'Basic ' + Buffer.from(`freqtrade:${apiPassword}`).toString('base64') },
-            signal: AbortSignal.timeout(3000),
+    return withDeploymentLock(USER_DATA, 'deploy', async () => {
+      const hadEmergencyLatch = emergencyStopIsLatched(USER_DATA);
+      let emergencyLatchCleared = false;
+      await recoverHostDeployment();
+      ensureHostFreqtradeInstalled();
+      const previousConfig = readJsonFile(CONFIG_PATH);
+      const wasRunning = Boolean(getHostPid());
+      let effectiveBefore = previousConfig
+        ? { ...managedDeploymentState(previousConfig), entriesRunning: false }
+        : null;
+      let entriesStopped = false;
+      let transaction = null;
+      let forwardDeployment = null;
+      let forwardPaths = null;
+      let forwardWorkerStarted = false;
+      let previousForwardStopped = false;
+
+      try {
+        if (wasRunning) {
+          if (!previousConfig) throw new Error('running host daemon has no readable config');
+          const effectiveConfig = await hostApiRequest(previousConfig, 'show_config');
+          effectiveBefore = {
+            ...managedDeploymentState(effectiveConfig),
+            entriesRunning: daemonEntriesRunning(effectiveConfig),
+          };
+          if (!sameManagedDeploymentState(managedDeploymentState(previousConfig), effectiveBefore)) {
+            throw new Error('Stored Freqtrade config does not match the running host daemon; reconcile before deployment.');
+          }
+          if (configuredInitialEntriesRunning(previousConfig) !== effectiveBefore.entriesRunning) {
+            throw new Error('Stored host Freqtrade initial_state does not match the running daemon entry state; reconcile before deployment.');
+          }
+        }
+
+        let exchangeInfo = detectExchange();
+        if (!exchangeInfo) {
+          if (targetDryRun) {
+            const exName = params.exchange || 'binance';
+            exchangeInfo = { name: exName, key: 'dry-run', secret: 'dry-run' };
+            console.error(`No exchange API keys found — using dummy keys for dry-run (${exName})`);
+          } else {
+            throw new Error('No exchange API keys found in .env (required for live trading)');
+          }
+        }
+
+        mkdirSync(STRAT_DIR, { recursive: true });
+        const apiPassword = String(
+          previousConfig?.api_server?.password
+          || process.env.FREQTRADE_PASSWORD
+          || randomBytes(16).toString('hex'),
+        );
+        const config = generateHostConfig(exchangeInfo, apiPassword, {
+          ...params,
+          dry_run: targetDryRun,
+          max_open_trades: maxOpenTrades,
+          ...(signalArtifact ? {
+            timeframe: signalArtifact.baseTimeframe,
+            pairs: deploymentPairs.length ? deploymentPairs : [signalArtifact.symbol],
+            helix_signal_artifact_path: archivedArtifact.hashFile,
+            helix_signal_artifact_hash: signalArtifact.artifactHash,
+          } : {}),
+        });
+        config.strategy = strategy;
+        config.initial_state = 'stopped';
+        configureWalkForwardReport(config, walkForwardEvidence);
+        const previousForwardRuntime = forwardRuntimeFromConfig(previousConfig);
+        if (signalArtifact) {
+          if (targetDryRun !== true) throw new Error('Helix Signal forward deployment currently supports dry-run only.');
+          if (String(exchangeInfo.name || '').toLowerCase() !== 'okx') {
+            throw new Error('Forward Signal deployment currently requires the OKX futures market data identity.');
+          }
+          const duration = marketTimeframeMilliseconds(signalArtifact.baseTimeframe);
+          const activatedAt = (Math.floor(Date.now() / duration) + 3) * duration;
+          forwardDeployment = createForwardDeployment(signalArtifact, {
+            activatedAt,
+            walkForwardReportHash: walkForwardEvidence?.report.reportHash ?? null,
           });
-          if (res.ok) { ready = true; break; }
-        } catch {}
+          forwardPaths = forwardRuntimePaths(forwardDeployment);
+          configureForwardRuntime(config, forwardDeployment, forwardPaths);
+        } else {
+          clearForwardRuntimeConfig(config);
+        }
+        const target = managedDeploymentState(config);
+        let evidence = requireDeployableBacktestEvidence(
+          requireCurrentBacktestEvidence(strategy, signalArtifact),
+          signalArtifact,
+        );
+        if (archivedArtifact) requireSignalExecutionCompatibility(evidence, config, archivedArtifact);
+        const adapterDestinations = managedAdapterDestinations(signalArtifact);
+        transaction = beginDeploymentTransaction(USER_DATA, {
+          operation: 'deploy',
+          files: [CONFIG_PATH, ENV_FILE, ...adapterDestinations, ...(forwardPaths ? [forwardPaths.deploymentFile] : [])],
+          previous: { running: wasRunning, state: effectiveBefore },
+          target: { running: true, state: target },
+        });
+
+        if (wasRunning) {
+          await stopHostEntries(previousConfig);
+          entriesStopped = true;
+          await requireFlatHostBot(previousConfig);
+        } else if (previousConfig) {
+          const inspectionConfig = { ...previousConfig, initial_state: 'stopped' };
+          writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(inspectionConfig, null, 4)}\n`, 0o600);
+          try {
+            startHostTrade(assertStrategyName(previousConfig.strategy));
+            await waitForHostDaemon(managedDeploymentState(previousConfig), inspectionConfig);
+            await requestHostEntryState(inspectionConfig, false);
+            entriesStopped = true;
+            await requireFlatHostBot(inspectionConfig);
+          } finally {
+            try { await stopHostDaemon(); } finally { restoreDeploymentFiles(transaction); }
+          }
+        } else if (existsSync(USER_DATA)) {
+          const orphanDatabases = readdirSync(USER_DATA)
+            .filter((file) => /^tradesv3.*\.sqlite(?:-(?:wal|shm))?$/.test(file));
+          if (orphanDatabases.length > 0) {
+            throw new Error(`Host deployment cannot prove flat state without the previous config; found ${orphanDatabases.join(', ')}.`);
+          }
+        }
+        updateDeploymentTransaction(USER_DATA, transaction, 'FLAT');
+        if (previousForwardRuntime) {
+          await stopForwardWorker(previousForwardRuntime);
+          previousForwardStopped = true;
+        }
+        if (wasRunning) await stopHostDaemon();
+        updateDeploymentTransaction(USER_DATA, transaction, 'STOPPED');
+        if (signalArtifact) installSignalAdapter();
+        if (forwardDeployment) {
+          writeDeploymentFile(forwardPaths.deploymentFile, `${JSON.stringify(forwardDeployment, null, 2)}\n`);
+        }
+        evidence = requireDeployableBacktestEvidence(
+          requireCurrentBacktestEvidence(strategy, signalArtifact),
+          signalArtifact,
+        );
+        if (archivedArtifact) requireSignalExecutionCompatibility(evidence, config, archivedArtifact);
+        requireUnchangedWalkForwardReport(walkForwardEvidence, signalArtifact);
+        writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 0o600);
+        updateDeploymentTransaction(USER_DATA, transaction, 'COMMITTED');
+        const pid = startHostTrade(strategy);
+        const effective = await waitForHostDaemon(target, config, undefined, !hadEmergencyLatch);
+        if (signalArtifact) requireInstalledSignalAdapter();
+        evidence = requireDeployableBacktestEvidence(
+          requireCurrentBacktestEvidence(strategy, signalArtifact),
+          signalArtifact,
+        );
+        if (archivedArtifact) requireSignalExecutionCompatibility(evidence, config, archivedArtifact);
+        requireUnchangedWalkForwardReport(walkForwardEvidence, signalArtifact);
+        const stored = readJsonFile(CONFIG_PATH);
+        if (!stored || !sameManagedDeploymentState(managedDeploymentState(stored), target, { includeArtifact: true })) {
+          throw new Error('stored signal artifact hash does not match deployment target');
+        }
+        if (signalArtifact && loadSignalArtifact(archivedArtifact.hashFile).artifactHash !== signalArtifact.artifactHash) {
+          throw new Error('deployed signal artifact archive failed postcondition verification');
+        }
+        let forwardStatus = null;
+        let forwardPid = null;
+        if (forwardDeployment) {
+          const firstDecisionTime = forwardDeployment.activatedAt
+            + marketTimeframeMilliseconds(forwardDeployment.strategy.baseTimeframe);
+          if (Date.now() >= firstDecisionTime) {
+            throw new Error('Candidate readiness missed the first forward decision boundary; deploy again.');
+          }
+          forwardPid = startForwardWorker(forwardPaths);
+          forwardWorkerStarted = true;
+          forwardStatus = await waitForForwardWorker(forwardPaths, forwardDeployment.deploymentHash);
+        }
+        writeHostApiEnvironment(config);
+        if (hadEmergencyLatch) {
+          clearEmergencyStopLatch(USER_DATA);
+          emergencyLatchCleared = true;
+        }
+        requireNoEmergencyStop(USER_DATA);
+        updateDeploymentTransaction(USER_DATA, transaction, 'ACTIVE');
+        try {
+          await commitHostEntryActivation(config);
+        } catch (startError) {
+          try { discardDeploymentBackups(transaction); } catch (cleanupError) {
+            throw new Error(`Deployment committed but host entry activation failed: ${startError.message}; backup cleanup failed: ${cleanupError.message}`);
+          }
+          throw new Error(`Deployment committed but host entry activation failed: ${startError.message}`);
+        }
+        discardDeploymentBackups(transaction);
+        return {
+          success: true,
+          mode: 'host',
+          backtest_evidence: evidence.id,
+          signal_artifact: signalArtifact ? {
+            hash: signalArtifact.artifactHash,
+            identity: pinnedSignalIdentity(signalArtifact),
+            lifecycle: signalArtifact.strategyLifecycle,
+            active_file: archivedArtifact.hashFile,
+          } : null,
+          walk_forward_report: walkForwardEvidence ? {
+            hash: walkForwardEvidence.report.reportHash,
+            file: walkForwardEvidence.file,
+          } : null,
+          forward_runtime: forwardDeployment ? {
+            deployment_hash: forwardDeployment.deploymentHash,
+            activated_at: forwardDeployment.activatedAt,
+            worker_pid: forwardPid,
+            state: forwardStatus.state,
+            deployment_file: forwardPaths.deploymentFile,
+            batches: forwardPaths.batchesDirectory,
+          } : null,
+          exchange: exchangeInfo.name,
+          strategy,
+          dry_run: config.dry_run,
+          pairs: config.exchange.pair_whitelist,
+          max_open_trades: maxOpenTrades,
+          api_url: FT_API_URL,
+          api_auth: 'stored in .env (FREQTRADE_PASSWORD)',
+          pid,
+          ready: true,
+          effective,
+          transaction_id: transaction.id,
+          log_file: HOST.logFile,
+          config_path: CONFIG_PATH,
+          strategies_dir: STRAT_DIR,
+          note: config.dry_run ? 'Running in DRY-RUN mode' : 'WARNING: Running in LIVE mode',
+          warning: targetDryRun === false
+            ? '⚠️ 已切到实盘 — 真实交易, 真实亏损. 确认 .env 里交易所 key 正确, 余额可控.'
+            : null,
+        };
+      } catch (error) {
+        if (forwardWorkerStarted) {
+          try { await stopForwardWorker(forwardPaths); } catch (stopError) {
+            error = new Error(`${error.message}; failed to stop forward worker: ${stopError.message}`);
+          }
+        }
+        if (emergencyLatchCleared && !emergencyStopIsLatched(USER_DATA)) {
+          setEmergencyStopLatch(USER_DATA);
+        }
+        const phase = transaction ? readDeploymentTransaction(USER_DATA)?.phase : null;
+        if (phase === 'ACTIVE') {
+          const convergenceErrors = [];
+          try {
+            const activeConfig = readJsonFile(CONFIG_PATH);
+            if (!activeConfig) throw new Error('active host config is unreadable');
+            await requestHostEntryState(activeConfig, false);
+          } catch (stopError) { convergenceErrors.push(stopError.message); }
+          try { persistStoppedDeploymentConfig(); } catch (writeError) { convergenceErrors.push(writeError.message); }
+          const suffix = convergenceErrors.length > 0
+            ? `; ACTIVE host deployment could not be made safe: ${convergenceErrors.join('; ')}`
+            : '; target remains committed with entries stopped';
+          throw new Error(`${error.message}${suffix}`);
+        }
+        if (transaction && phase === 'PREPARED') {
+          if (entriesStopped && effectiveBefore?.entriesRunning && previousConfig && !emergencyStopIsLatched(USER_DATA)) {
+            try {
+              if (previousForwardStopped) await startStoredForwardWorker(previousConfig);
+              await activateHostEntries(previousConfig, 'restore entry state after rejected host deployment');
+            } catch (resumeError) {
+              throw new Error(`${error.message}; failed to restore entry state: ${resumeError.message}`);
+            }
+          }
+          if (emergencyStopIsLatched(USER_DATA)) persistStoppedDeploymentConfig();
+          updateDeploymentTransaction(USER_DATA, transaction, 'ROLLED_BACK', error.message);
+          discardDeploymentBackups(transaction);
+          throw error;
+        }
+        if (transaction) return rollbackHostDeployment(transaction, transaction.previous, error);
+        if (entriesStopped && previousConfig) {
+          await activateHostEntries(previousConfig, 'restore host entry state after preflight failure');
+        }
+        throw error;
       }
-    }
-    appendEnv('FREQTRADE_URL', FT_API_URL);
-    appendEnv('FREQTRADE_USERNAME', 'freqtrade');
-    appendEnv('FREQTRADE_PASSWORD', apiPassword);
-    return {
-      success: true, mode: 'host', backtest_evidence: evidence.id,
-      signal_artifact: stagedArtifact ? {
-        hash: stagedArtifact.artifact.artifactHash,
-        identity: pinnedSignalIdentity(stagedArtifact.artifact),
-        lifecycle: stagedArtifact.artifact.strategyLifecycle,
-        active_file: stagedArtifact.activeFile,
-      } : null,
-      exchange: exchangeInfo.name, strategy, dry_run: config.dry_run,
-      pairs: config.exchange.pair_whitelist,
-      api_url: FT_API_URL, api_auth: 'stored in .env (FREQTRADE_PASSWORD)',
-      pid: getHostPid(), ready, log_file: HOST.logFile, config_path: CONFIG_PATH,
-      strategies_dir: STRAT_DIR,
-      note: config.dry_run ? 'Running in DRY-RUN mode' : 'WARNING: Running in LIVE mode',
-    };
+    });
   },
 
   // ── update ─────────────────────────────────────────────────────
-  update: async () => {
+  update: async () => withDeploymentLock(USER_DATA, 'update', async () => {
+    requireHealthyDeploymentTransaction(USER_DATA);
+    requireNoEmergencyStop(USER_DATA);
     if (IS_DOCKER) {
+      const config = readDaemonConfig();
+      const effectiveConfig = await ftGet('show_config', {}, { timeoutMs: 5_000 });
+      const effective = managedDeploymentState(effectiveConfig);
+      if (!sameManagedDeploymentState(managedDeploymentState(config), effective)) {
+        throw new Error('Stored Freqtrade config does not match the running daemon; reconcile before update.');
+      }
+      if (configuredInitialEntriesRunning(config) !== daemonEntriesRunning(effectiveConfig)) {
+        throw new Error('Stored Freqtrade initial_state does not match the running daemon entry state; reconcile before update.');
+      }
+      await requestManagedEntryState(false);
+      config.initial_state = 'stopped';
+      writeDeploymentFile(CONFIG_PATH, `${JSON.stringify(config, null, 4)}\n`, 0o600);
+      await requireFlatBot();
+      const forwardWorkerPid = await stopForwardWorker(forwardRuntimeFromConfig(config));
+      requireNoEmergencyStop(USER_DATA);
       dockerCompose(['pull', 'freqtrade']);
-      dockerCompose(['up', '-d', 'freqtrade']);
-      return { updated: true, mode: 'docker', note: 'Pulled the stable image and recreated the daemon.' };
+      const target = managedDeploymentState(config);
+      const restarted = await guardDaemonStart(
+        'update docker daemon',
+        async () => {
+          const start = dockerCompose(['up', '-d', 'freqtrade']);
+          const ready = await waitForManagedDaemon(target, 60_000, true);
+          await waitForManagedEntryState(false);
+          return { start, ready };
+        },
+        () => dockerCompose(['stop', 'freqtrade']),
+      );
+      return {
+        updated: true,
+        mode: 'docker',
+        entries_stopped: true,
+        forward_worker_pid: forwardWorkerPid,
+        effective: restarted.ready,
+        note: 'Pulled the stable image and recreated the daemon with entries stopped. Re-run backtest evidence before activation.',
+      };
     }
     if (ENV) {
       return {
@@ -1099,11 +2711,21 @@ const actions = {
       return { error: 'Freqtrade not installed. Run deploy first.' };
     }
     const pid = getHostPid();
-    if (pid) { try { process.kill(pid, 'SIGTERM'); } catch {} }
+    const config = readJsonFile(CONFIG_PATH);
+    if (pid) {
+      if (!config) throw new Error('running host daemon has no readable config');
+      await requestHostEntryState(config, false);
+      persistStoppedDeploymentConfig();
+      await requireFlatHostBot(config);
+      await stopHostDaemon();
+    } else if (config) {
+      persistStoppedDeploymentConfig();
+    }
+    const forwardWorkerPid = await stopForwardWorker(forwardRuntimeFromConfig(config));
     console.error('Updating Freqtrade...');
     runFile(resolve(HOST.sourceDir, 'setup.sh'), ['-u'], { cwd: HOST.sourceDir, timeout: 600000 });
-    return { updated: true, mode: 'host', note: 'Run start to restart Freqtrade.' };
-  },
+    return { updated: true, mode: 'host', forward_worker_pid: forwardWorkerPid, note: 'Run start to restart Freqtrade.' };
+  }),
 
   // ── status ─────────────────────────────────────────────────────
   status: async () => {
@@ -1111,11 +2733,18 @@ const actions = {
       const state = await fetchDaemonState();
       let lastLogs = '';
       try { lastLogs = dockerCompose(['logs', '--tail', '10', '--no-color', 'freqtrade']); } catch {}
-      return { mode: 'docker', engine: ENV.engine, ...state, last_logs: lastLogs };
+      return {
+        mode: 'docker', engine: ENV.engine, ...state,
+        forward_runtime: readForwardRuntimeStatus(readJsonFile(CONFIG_PATH)),
+        last_logs: lastLogs,
+      };
     }
     if (ENV) {
       const state = await fetchDaemonState();
-      const result = { mode: 'coinclaw', engine: ENV.engine, ...state };
+      const result = {
+        mode: 'coinclaw', engine: ENV.engine, ...state,
+        forward_runtime: readForwardRuntimeStatus(readJsonFile(CONFIG_PATH)),
+      };
       // tail freqtrade 日志, 三引擎日志位置不同.
       const logCandidates = [
         '/workspace/logs/freqtrade.log',
@@ -1129,57 +2758,140 @@ const actions = {
       return result;
     }
     const pid = getHostPid();
-    if (!pid) return { mode: 'host', running: false };
+    const forwardRuntime = readForwardRuntimeStatus(readJsonFile(CONFIG_PATH));
+    if (!pid) return { mode: 'host', running: false, forward_runtime: forwardRuntime };
     let lastLogs = '';
     try { lastLogs = runFile('tail', ['-5', HOST.logFile]); } catch {}
-    return { mode: 'host', running: true, pid, log_file: HOST.logFile, last_logs: lastLogs };
+    return { mode: 'host', running: true, pid, forward_runtime: forwardRuntime, log_file: HOST.logFile, last_logs: lastLogs };
   },
 
   // ── stop / start ───────────────────────────────────────────────
   // coinclaw 模式: supervisorctl. host 模式: SIGTERM pid.
-  stop: async () => {
+  stop: async () => withDeploymentLock(USER_DATA, 'stop', async () => {
+    const forwardRuntime = forwardRuntimeFromConfig(readJsonFile(CONFIG_PATH));
     if (IS_DOCKER) {
       dockerCompose(['stop', 'freqtrade'], { timeout: 60_000 });
-      return { stopped: true, mode: 'docker', method: 'docker compose stop' };
+      const workerPid = await stopForwardWorker(forwardRuntime);
+      return { stopped: true, mode: 'docker', method: 'docker compose stop', forward_worker_pid: workerPid };
     }
     if (ENV) {
       const sock = supervisorSocket();
       try {
         runFile('supervisorctl', ['-s', `unix://${sock}`, 'stop', 'freqtrade']);
-        return { stopped: true, mode: 'coinclaw', method: 'supervisorctl' };
+        const workerPid = await stopForwardWorker(forwardRuntime);
+        return { stopped: true, mode: 'coinclaw', method: 'supervisorctl', forward_worker_pid: workerPid };
       } catch (e) {
         return { stopped: false, error: e.message, note: 'supervisorctl 不可达, 试试 ft.mjs stop (REST)' };
       }
     }
     const pid = getHostPid();
-    if (!pid) return { stopped: false, mode: 'host', reason: 'Not running' };
-    try { process.kill(pid, 'SIGTERM'); } catch {}
-    try { writeFileSync(HOST.pidFile, ''); } catch {}
-    return { stopped: true, mode: 'host', pid };
-  },
+    if (pid) await stopHostDaemon();
+    const workerPid = await stopForwardWorker(forwardRuntime);
+    if (!pid && !workerPid) return { stopped: false, mode: 'host', reason: 'Not running' };
+    return { stopped: true, mode: 'host', pid, forward_worker_pid: workerPid };
+  }),
 
-  start: async (params = {}) => {
+  start: async (params = {}) => withDeploymentLock(USER_DATA, 'start', async () => {
+    requireHealthyDeploymentTransaction(USER_DATA);
+    requireNoEmergencyStop(USER_DATA);
+    if (Object.prototype.hasOwnProperty.call(params, 'strategy')) {
+      throw new Error('start does not accept a strategy override; deploy the intended strategy first');
+    }
+    if (!existsSync(CONFIG_PATH)) throw new Error('No config found. Run deploy first.');
+    const config = readJsonFile(CONFIG_PATH);
+    if (!config) throw new Error('Stored Freqtrade config is unreadable.');
+    const identity = requireStoredDeploymentIdentity(config);
+    const target = managedDeploymentState(config);
+    if (!ENV && !getHostPid() && !existsSync(FT_BIN)) {
+      throw new Error('Freqtrade not installed. Run deploy first.');
+    }
+    const forwardRuntime = forwardRuntimeFromConfig(config);
+    let forwardStatus = null;
+    let forwardPid = null;
+    if (forwardRuntime) {
+      forwardPid = startForwardWorker(forwardRuntime);
+      forwardStatus = await waitForForwardWorker(forwardRuntime, forwardRuntime.deploymentHash);
+    }
     if (IS_DOCKER) {
-      dockerCompose(['up', '-d', 'freqtrade'], { timeout: 60_000 });
-      return { started: true, mode: 'docker', method: 'docker compose up' };
+      const started = await guardDaemonStart(
+        'start docker daemon',
+        async () => {
+          const start = dockerCompose(['up', '-d', 'freqtrade'], { timeout: 60_000 });
+          const effective = await waitForManagedDaemon(target, 60_000, true);
+          await waitForManagedEntryState(configuredInitialEntriesRunning(config));
+          requireStoredDeploymentIdentity(config);
+          if (!sameManagedDeploymentState(effective, target)) {
+            throw new Error('started daemon does not match the stored deployment identity');
+          }
+          return { start, effective };
+        },
+        async () => {
+          dockerCompose(['stop', 'freqtrade'], { timeout: 60_000 });
+          await stopForwardWorker(forwardRuntime);
+        },
+      );
+      return {
+        started: true,
+        mode: 'docker',
+        method: 'docker compose up',
+        strategy: identity.strategy,
+        effective: started.effective,
+        forward_runtime: forwardStatus ? { pid: forwardPid, state: forwardStatus.state } : null,
+      };
     }
     if (ENV) {
-      const sock = supervisorSocket();
-      try {
-        runFile('supervisorctl', ['-s', `unix://${sock}`, 'start', 'freqtrade']);
-        return { started: true, mode: 'coinclaw', method: 'supervisorctl' };
-      } catch (e) {
-        return { started: false, error: e.message };
-      }
+      const started = await guardDaemonStart('start managed daemon', async () => {
+        const start = startManagedDaemon();
+        const effective = await waitForManagedDaemon(target, 60_000, true);
+        await waitForManagedEntryState(configuredInitialEntriesRunning(config));
+        requireStoredDeploymentIdentity(config);
+        if (!sameManagedDeploymentState(effective, target)) {
+          throw new Error('started daemon does not match the stored deployment identity');
+        }
+        return { start, effective };
+      }, async () => {
+        stopManagedDaemon();
+        await stopForwardWorker(forwardRuntime);
+      });
+      return {
+        started: true,
+        mode: 'coinclaw',
+        method: 'supervisorctl',
+        strategy: identity.strategy,
+        effective: started.effective,
+        forward_runtime: forwardStatus ? { pid: forwardPid, state: forwardStatus.state } : null,
+      };
     }
-    if (getHostPid()) return { started: false, mode: 'host', reason: 'Already running' };
-    if (!existsSync(FT_BIN)) throw new Error('Freqtrade not installed. Run deploy first.');
-    if (!existsSync(CONFIG_PATH)) throw new Error('No config found. Run deploy first.');
-    const strategy = assertStrategyName(params.strategy || 'SampleStrategy');
-    startHostTrade(strategy);
-    await new Promise((r) => setTimeout(r, 3000));
-    return { started: true, mode: 'host', pid: getHostPid() };
-  },
+    if (getHostPid()) {
+      return {
+        started: false,
+        mode: 'host',
+        reason: 'Already running',
+        forward_runtime: forwardStatus ? { pid: forwardPid, state: forwardStatus.state } : null,
+      };
+    }
+    const started = await guardDaemonStart('start host daemon', async () => {
+      const pid = startHostTrade(identity.strategy);
+      const effective = await waitForHostDaemon(target, config, undefined, true);
+      await waitForHostEntryState(config, configuredInitialEntriesRunning(config));
+      requireStoredDeploymentIdentity(config);
+      if (!sameManagedDeploymentState(effective, target)) {
+        throw new Error('started host daemon does not match the stored deployment identity');
+      }
+      return { pid, effective };
+    }, async () => {
+      await stopHostDaemon();
+      await stopForwardWorker(forwardRuntime);
+    });
+    return {
+      started: true,
+      mode: 'host',
+      pid: started.pid,
+      strategy: identity.strategy,
+      effective: started.effective,
+      forward_runtime: forwardStatus ? { pid: forwardPid, state: forwardStatus.state } : null,
+    };
+  }),
 
   // ── logs ───────────────────────────────────────────────────────
   // coinclaw 模式: tail /workspace/logs/freqtrade.log (supervisord 写在那).
@@ -1209,10 +2921,9 @@ const actions = {
   // 两边都用 freqtrade backtesting CLI; 区别只在路径.
   // coinclaw 模式跑 backtest 不影响 daemon: backtesting 走自己的进程,
   // 跟 daemon 共用 user_data 但不共用 :8888.
-  backtest: async (params = {}) => {
-    const signalArtifact = params.signal_artifact
-      ? loadSignalArtifact(resolve(String(params.signal_artifact)))
-      : null;
+  backtest: async (params = {}) => withBacktestLock(USER_DATA, 'backtest', async () => {
+    const archivedArtifact = resolveSignalArtifact(params);
+    const signalArtifact = archivedArtifact?.artifact || null;
     const strategy = assertStrategyName(params.strategy || (signalArtifact ? HELIX_SIGNAL_STRATEGY : 'SampleStrategy'));
     if (strategy === HELIX_SIGNAL_STRATEGY && !signalArtifact) {
       throw new Error('HelixSignalStrategy backtest requires signal_artifact.');
@@ -1242,11 +2953,19 @@ const actions = {
     if (!signalArtifact && params.market_dataset) {
       throw new Error('market_dataset can only be used with a signal_artifact backtest.');
     }
+    const feeMissing = params.fee === undefined
+      || params.fee === null
+      || (typeof params.fee === 'string' && !params.fee.trim());
+    const fee = feeMissing ? null : Number(params.fee);
+    if (signalArtifact && fee === null) {
+      throw new Error('HelixSignalStrategy backtest requires an explicit non-negative fee.');
+    }
+    if (fee !== null && (!Number.isFinite(fee) || fee < 0)) {
+      throw new Error('fee must be a non-negative number');
+    }
     const stagedDataset = signalArtifact
       ? stageSignalBacktestDataset(String(params.market_dataset), signalArtifact)
       : null;
-    if (signalArtifact) installSignalAdapter();
-    const archivedArtifact = signalArtifact ? archiveSignalArtifact(String(params.signal_artifact)) : null;
     ensureHostFreqtradeInstalled();
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
@@ -1270,19 +2989,35 @@ const actions = {
         throw new Error(`Freqtrade trading_mode ${backtestConfig?.trading_mode || 'unknown'} does not match market_dataset market ${stagedDataset.dataset.source.market}`);
       }
     }
-    const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
+    const backtestStrategyDir = signalArtifact ? SIGNAL_ADAPTER_ASSET_DIR : STRAT_DIR;
+    const stratFile = resolve(backtestStrategyDir, `${strategy}.py`);
     if (!existsSync(stratFile)) {
       throw new Error(`Strategy "${strategy}" not found at ${stratFile}. Use create_strategy or list with strategy_list.`);
     }
     const timerange = signalArtifact ? '' : params.timerange || '';
-    const fee = params.fee === undefined ? null : Number(params.fee);
-    if (fee !== null && (!Number.isFinite(fee) || fee < 0)) throw new Error('fee must be a non-negative number');
+    const safeBacktestConfig = signalArtifact
+      ? createSecretFreeBacktestConfig(backtestConfig, { timeframe, pairs: pairList })
+      : null;
+    const backtestConfigPath = safeBacktestConfig
+      ? resolve(USER_DATA, 'helix', 'backtest-runtime', `${process.pid}-${randomBytes(8).toString('hex')}.json`)
+      : CONFIG_PATH;
+    if (safeBacktestConfig) {
+      mkdirSync(dirname(backtestConfigPath), { recursive: true, mode: 0o700 });
+      writeFileSync(backtestConfigPath, `${JSON.stringify(safeBacktestConfig, null, 2)}\n`, { mode: 0o600 });
+      chmodSync(backtestConfigPath, 0o600);
+    }
+    const recordedExecutionProfile = safeBacktestConfig
+      ? createRuntimeExecutionProfile(safeBacktestConfig, { timeframe, pairs: pairList, fee })
+      : null;
     const resultsDir = resolve(USER_DATA, 'backtest_results');
     const previousResultFiles = new Set(backtestMetaFiles(resultsDir));
     const strategyHash = strategyFingerprint(strategy);
     if (!strategyHash) throw new Error(`Unable to fingerprint strategy: ${stratFile}`);
-    const configHash = fileHash(CONFIG_PATH);
-    if (!configHash) throw new Error(`Unable to fingerprint Freqtrade config: ${CONFIG_PATH}`);
+    const configFileHash = fileHash(backtestConfigPath);
+    if (!configFileHash) throw new Error(`Unable to fingerprint Freqtrade config: ${backtestConfigPath}`);
+    const configHash = safeBacktestConfig
+      ? executionConfigIdentityHash(executionConfigIdentity(safeBacktestConfig))
+      : configFileHash;
     const stagedDataHash = stagedDataset ? fileHash(stagedDataset.dataFile) : null;
     if (stagedDataset && stagedDataHash !== stagedDataset.evidence.dataHash) {
       throw new Error(`Staged market dataset is corrupt: ${stagedDataset.dataFile}`);
@@ -1309,9 +3044,9 @@ const actions = {
     console.error(`Running backtest: strategy=${strategy}, timeframe=${timeframe}${timerange ? `, timerange=${timerange}` : ''}...`);
     const backtestArgs = [
       'backtesting',
-      '--config', CONFIG_PATH,
+      '--config', backtestConfigPath,
       '--strategy', strategy,
-      '--strategy-path', STRAT_DIR,
+      '--strategy-path', backtestStrategyDir,
       '--timeframe', timeframe,
       '--userdir', USER_DATA,
     ];
@@ -1324,9 +3059,21 @@ const actions = {
     const backtestEnv = archivedArtifact ? {
       ...proxyEnv(),
       HELIX_SIGNAL_ARTIFACT_PATH: dockerCliPath(archivedArtifact.hashFile),
+      HELIX_SIGNAL_ARTIFACT_HASH: signalArtifact.artifactHash,
+      HELIX_SIGNAL_ARTIFACT_OVERRIDE: '1',
       HELIX_SIGNAL_TIMEFRAME: signalArtifact.baseTimeframe,
     } : proxyEnv();
-    const rawOutput = runFreqtrade(backtestArgs, { timeout: 600000, env: backtestEnv });
+    let rawOutput;
+    try {
+      rawOutput = signalArtifact
+        ? runSecretFreeSignalBacktest(backtestArgs, { timeout: 600000, env: backtestEnv })
+        : runFreqtrade(backtestArgs, { timeout: 600000, env: backtestEnv });
+      requireUnchangedFile(backtestConfigPath, configFileHash, 'Freqtrade backtest config');
+    } finally {
+      if (safeBacktestConfig && existsSync(backtestConfigPath)) {
+        try { unlinkSync(backtestConfigPath); } catch {}
+      }
+    }
     const backtestResult = findNewBacktestResult(resultsDir, previousResultFiles, strategy);
     if (!backtestResult) {
       throw new Error(`Freqtrade did not create a verifiable result and metadata file for strategy "${strategy}".`);
@@ -1344,11 +3091,11 @@ const actions = {
     const reconciliation = signalArtifact
       ? reconcileSignalBacktest(summary, signalArtifact)
       : null;
-    const freqtradeVersion = runFreqtrade(['--version'], { timeout: 60000, env: proxyEnv() });
+    const freqtradeVersion = currentFreqtradeVersion();
     if (strategyFingerprint(strategy) !== strategyHash) {
       throw new Error(`Strategy "${strategy}" changed during backtest. Run the backtest again for the current code.`);
     }
-    requireUnchangedFile(CONFIG_PATH, configHash, 'Freqtrade config');
+    if (!signalArtifact) requireUnchangedFile(CONFIG_PATH, configFileHash, 'Freqtrade config');
     if (stagedDataset) requireUnchangedFile(stagedDataset.dataFile, stagedDataHash, 'Staged market dataset');
     if (archivedArtifact) {
       requireUnchangedFile(archivedArtifact.hashFile, archivedArtifactFileHash, 'Archived signal artifact');
@@ -1372,6 +3119,8 @@ const actions = {
         artifactFileHash: archivedArtifactFileHash,
         fee,
         dataFormatOhlcv: stagedDataset ? 'json' : null,
+        configIdentity: safeBacktestConfig ? executionConfigIdentity(safeBacktestConfig) : null,
+        executionProfile: recordedExecutionProfile,
       },
       resultHash,
       resultMetaHash,
@@ -1400,6 +3149,149 @@ const actions = {
         current: true,
         signalArtifact: evidence.signalArtifact,
       },
+    };
+  }),
+
+  // ── walk_forward ──────────────────────────────────────────────
+  walk_forward: async (params = {}) => {
+    if (typeof params.walk_forward_run !== 'string' || !params.walk_forward_run.trim()) {
+      throw new Error('walk_forward requires walk_forward_run.');
+    }
+    if (typeof params.source_dataset !== 'string' || !params.source_dataset.trim()) {
+      throw new Error('walk_forward requires source_dataset.');
+    }
+    const runFile = resolve(params.walk_forward_run.trim());
+    const sourceDatasetFile = resolve(params.source_dataset.trim());
+    const bundle = loadWalkForwardBundle(runFile, sourceDatasetFile);
+    const censoredEntries = bundle.run.folds.flatMap((fold) => fold.censoredEntries);
+    if (censoredEntries.length) {
+      throw new Error(
+        `walk-forward run has ${censoredEntries.length} right-censored entr${censoredEntries.length === 1 ? 'y' : 'ies'}; `
+        + 'extend observationEndTime and rerun Core before Freqtrade execution.',
+      );
+    }
+
+    const runtimeAdapterBundle = signalAdapterBundleFromDirectory(SIGNAL_ADAPTER_ASSET_DIR);
+    const foldEvidence = [];
+    for (const [foldIndex, fold] of bundle.folds.entries()) {
+      const scenarioEvidence = [];
+      for (const scenario of bundle.plan.executionScenarios) {
+        const result = runBacktestSubprocess({
+          signal_artifact: resolve(bundle.directory, fold.run.executionArtifactFile),
+          market_dataset: resolve(bundle.directory, fold.run.datasetFile),
+          fee: scenario.fee,
+        });
+        const evidenceId = result?.evidence?.id;
+        const record = typeof evidenceId === 'string'
+          ? readBacktestEvidence().find((item) => item.id === evidenceId)
+          : null;
+        if (!record) {
+          throw new Error(`walk-forward fold ${foldIndex} scenario ${scenario.id} has no stored backtest evidence.`);
+        }
+        const verified = verifyBacktestEvidenceResult(
+          record,
+          fold.executionArtifact,
+          scenario.fee,
+          {
+            signalArtifact: fold.executionArtifact,
+            riskTrace: fold.executionRiskTrace,
+            marketDataset: fold.dataset,
+          },
+        );
+        if (!hasSignalExecutionEnvironment(record)) {
+          throw new Error(`walk-forward fold ${foldIndex} scenario ${scenario.id} has no execution identity.`);
+        }
+        const environment = record.executionEnvironment;
+        if (!environment.configIdentity
+          || runtimeAdapterBundle.adapterHash !== `sha256:${record.strategyHash}`) {
+          throw new Error(`walk-forward fold ${foldIndex} scenario ${scenario.id} has incomplete runtime evidence.`);
+        }
+        if (environment.fee !== scenario.fee
+          || environment.executionProfile?.fee !== scenario.fee) {
+          throw new Error(`walk-forward fold ${foldIndex} scenario ${scenario.id} fee identity mismatch.`);
+        }
+        if (verified.feeObservations.status === 'OBSERVED'
+          && !verified.feeObservations.matchesRequested) {
+          throw new Error(`walk-forward fold ${foldIndex} scenario ${scenario.id} observed fee mismatch.`);
+        }
+        const resultsDirectory = dirname(BACKTEST_EVIDENCE_FILE);
+        const resultPath = evidenceFilePath(
+          resultsDirectory,
+          record.resultFile,
+          'resultFile',
+          ['.json', '.zip'],
+        );
+        const resultMetaPath = evidenceFilePath(
+          resultsDirectory,
+          record.resultMetaFile,
+          'resultMetaFile',
+          ['.meta.json'],
+        );
+        const resultSuffix = record.resultFile.endsWith('.zip') ? '.zip' : '.json';
+        const runtimeEvidence = createExecutionRuntimeEvidence({
+          resultHash: verified.resultHash,
+          resultMetaHash: verified.resultMetaHash,
+          datasetHash: fold.dataset.datasetHash,
+          executionArtifactHash: fold.executionArtifact.artifactHash,
+          scenarioId: scenario.id,
+          fee: scenario.fee,
+          freqtradeVersion: environment.freqtradeVersion,
+          configIdentity: environment.configIdentity,
+          executionProfile: environment.executionProfile,
+          adapterFiles: runtimeAdapterBundle.files,
+        });
+        const runtimeArchive = archiveWalkForwardRuntimeEvidence(bundle.directory, runtimeEvidence);
+        scenarioEvidence.push({
+          scenarioId: scenario.id,
+          fee: scenario.fee,
+          freqtradeVersion: environment.freqtradeVersion,
+          configHash: environment.configHash,
+          executionProfile: environment.executionProfile,
+          executionProfileHash: walkForwardEvidenceHash(environment.executionProfile),
+          adapterHash: `sha256:${record.strategyHash}`,
+          runtimeEvidenceFile: runtimeArchive.file,
+          runtimeEvidenceHash: runtimeArchive.hash,
+          resultFile: archiveWalkForwardEvidence(
+            bundle.directory,
+            resultPath,
+            verified.resultHash,
+            resultSuffix,
+          ),
+          resultHash: verified.resultHash,
+          resultMetaFile: archiveWalkForwardEvidence(
+            bundle.directory,
+            resultMetaPath,
+            verified.resultMetaHash,
+            '.meta.json',
+          ),
+          resultMetaHash: verified.resultMetaHash,
+          reconciliation: verified.reconciliation,
+          feeObservations: verified.feeObservations,
+          metrics: verified.metrics,
+        });
+      }
+      foldEvidence.push(scenarioEvidence);
+    }
+
+    const reloaded = loadWalkForwardBundle(runFile, sourceDatasetFile);
+    if (reloaded.plan.planHash !== bundle.plan.planHash || reloaded.run.runHash !== bundle.run.runHash) {
+      throw new Error('walk-forward Core bundle changed during Freqtrade execution.');
+    }
+    const coreEvidence = archiveWalkForwardCoreBundle(reloaded);
+    const report = createWalkForwardReport(reloaded, foldEvidence, coreEvidence);
+    verifyWalkForwardReport(report, reloaded, reloaded.directory);
+    const reportFile = writeImmutableWalkForwardReport(reloaded.directory, report);
+    recordWalkForwardReport({ file: reportFile, report });
+    return {
+      ok: true,
+      planHash: report.planHash,
+      runHash: report.runHash,
+      reportHash: report.reportHash,
+      reportFile,
+      folds: report.folds.length,
+      scenarios: report.aggregate.scenarios.length,
+      promotable: report.gate.ok,
+      gate: report.gate,
     };
   },
 
@@ -1543,10 +3435,12 @@ const actions = {
   },
 
   // ── remove ─────────────────────────────────────────────────────
-  remove: async () => {
+  remove: async () => withDeploymentLock(USER_DATA, 'remove', async () => {
+    const forwardRuntime = forwardRuntimeFromConfig(readJsonFile(CONFIG_PATH));
     if (IS_DOCKER) {
       dockerCompose(['down'], { timeout: 60_000 });
-      return { removed: true, mode: 'docker', note: 'Container removed. User data and config preserved.' };
+      const workerPid = await stopForwardWorker(forwardRuntime);
+      return { removed: true, mode: 'docker', forward_worker_pid: workerPid, note: 'Container removed. User data and config preserved.' };
     }
     if (ENV) {
       return {
@@ -1555,21 +3449,32 @@ const actions = {
       };
     }
     const pid = getHostPid();
-    if (pid) { try { process.kill(pid, 'SIGTERM'); } catch {} }
-    try { writeFileSync(HOST.pidFile, ''); } catch {}
-    return { removed: true, mode: 'host', note: `Process stopped. Config preserved.` };
-  },
+    if (pid) await stopHostDaemon();
+    const workerPid = await stopForwardWorker(forwardRuntime);
+    return { removed: true, mode: 'host', forward_worker_pid: workerPid, note: `Process stopped. Config preserved.` };
+  }),
 
   // ── backtest_results ───────────────────────────────────────────
   backtest_results: async () => {
     const resultsDir = resolve(USER_DATA, 'backtest_results');
     const currentHashes = new Map();
+    const reportCache = new Map();
     const evidence = readBacktestEvidence().map((record) => {
       if (!currentHashes.has(record.strategy)) {
         currentHashes.set(record.strategy, strategyFingerprint(record.strategy));
       }
       let verifiedResult = null;
       try { verifiedResult = verifyBacktestEvidenceResult(record); } catch {}
+      let walkForwardReport = null;
+      if (verifiedResult?.signalArtifact) {
+        const artifactHash = verifiedResult.signalArtifact.artifactHash;
+        if (!reportCache.has(artifactHash)) {
+          reportCache.set(artifactHash, findWalkForwardReportForArtifact(
+            loadArchivedSignalArtifact(artifactHash).artifact,
+          ));
+        }
+        walkForwardReport = reportCache.get(artifactHash);
+      }
       return {
         id: record.id,
         strategy: record.strategy,
@@ -1582,12 +3487,17 @@ const actions = {
         resultMetaHash: record.resultMetaHash || null,
         metrics: verifiedResult?.metrics || {},
         createdAt: record.createdAt,
-        signalArtifact: record.signalArtifact || null,
+        signalArtifact: verifiedResult?.signalArtifact || null,
+        walkForwardReport: walkForwardReport ? {
+          reportHash: walkForwardReport.report.reportHash,
+          reportFile: walkForwardReport.file,
+        } : null,
         reconciliation: verifiedResult?.reconciliation || null,
         current: Boolean(
           verifiedResult
           && record.strategyHash
           && currentHashes.get(record.strategy) === record.strategyHash
+          && (record.strategy !== HELIX_SIGNAL_STRATEGY || hasSignalExecutionEnvironment(record))
         ),
         fingerprint: typeof record.strategyHash === 'string' ? record.strategyHash.slice(0, 12) : '',
       };
