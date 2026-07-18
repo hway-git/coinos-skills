@@ -528,6 +528,54 @@ test('deduplicates evaluated entry gate reasons by Thesis and counts pre-entry e
   assert.equal(expiringEvaluator.statistics().expiredBeforeFirstEntry, 1)
 })
 
+test('records LOCATION_MISSING only for an entry-eligible Thesis', () => {
+  const evaluator = new SwingHistoricalEvaluator(config)
+  const candidate = createSwingTradeThesis({
+    id: 'BTC-THESIS-LOCATION-GATE',
+    symbol: 'BTC/USDT:USDT',
+    type: 'STRUCTURAL_REVERSAL',
+    direction: 'LONG',
+    contextId: 'context-1',
+    locationId: 'missing-location',
+    score: 60,
+    invalidation: {
+      policyId: 'thesis_invalidation_v1', type: 'H4_CLOSE_BELOW_LEVEL', timeframe: '4h', level: 90,
+    },
+    expectedMove: { targetLocationId: 'target-location', target: 110 },
+    createdAt: 0,
+    expiresAt: 14 * 24 * 60 * 60 * 1000,
+    reasonCodes: ['THESIS_CREATED'],
+  })
+  const active = transitionSwingTradeThesis(candidate, {
+    toState: 'ACTIVE', occurredAt: 0, reasonCodes: ['THESIS_ACTIVATED'],
+  }).thesis
+  const eligible = transitionSwingTradeThesis(active, {
+    toState: 'ENTRY_ELIGIBLE', occurredAt: fifteenMinutes, reasonCodes: ['ENTRY_ELIGIBLE'],
+  }).thesis
+  const internal = evaluator as unknown as { thesis?: SwingTradeThesis }
+  const fifteenMinute = baseCandles(15)
+  const evaluate = () => evaluator.evaluate({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '15m',
+    decisionTime: 15 * fifteenMinutes,
+    sourceCandle: fifteenMinute.at(-1)!,
+    candles: { '15m': fifteenMinute, '1h': [], '4h': [], '1d': [] },
+  })
+
+  internal.thesis = transitionSwingTradeThesis(
+    transitionSwingTradeThesis(eligible, {
+      toState: 'TRIGGERED', occurredAt: 2 * fifteenMinutes, reasonCodes: ['EXECUTION_TRIGGERED'],
+    }).thesis,
+    { toState: 'CLOSED', occurredAt: 3 * fifteenMinutes, reasonCodes: ['THESIS_CLOSED'] },
+  ).thesis
+  evaluate()
+  assert.equal(evaluator.statistics().entryGateRejectionsByReason.LOCATION_MISSING, undefined)
+
+  internal.thesis = eligible
+  evaluate()
+  assert.equal(evaluator.statistics().entryGateRejectionsByReason.LOCATION_MISSING, 1)
+})
+
 test('freezes creation-time Context through ENTER and clears it when the Thesis closes', () => {
   const riskEntries: StrategyHistoricalSwingRiskTraceEntry[] = []
   const evaluator = new SwingHistoricalEvaluator(config, (entry) => riskEntries.push(entry))

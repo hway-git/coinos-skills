@@ -447,11 +447,11 @@ export class SwingHistoricalEvaluator {
     fifteenMinute: readonly Candle[],
   ): HistoricalSignalDecision | null {
     if (!this.thesis || this.position || fifteenMinute.length < 15) return null
+    if (this.thesis.state !== 'ENTRY_ELIGIBLE' || this.thesis.score < ENTRY_ELIGIBLE_SCORE) return null
     if (!this.thesisLocation) {
       this.recordEntryGateRejection(this.thesis.id, ['LOCATION_MISSING'])
       return null
     }
-    if (this.thesis.state !== 'ENTRY_ELIGIBLE' || this.thesis.score < ENTRY_ELIGIBLE_SCORE) return null
     const candle = latest(fifteenMinute)!
     const previous = fifteenMinute.at(-2)!
     const atr = latestAtr(fifteenMinute)
