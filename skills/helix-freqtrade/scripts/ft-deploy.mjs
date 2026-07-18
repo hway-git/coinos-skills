@@ -555,6 +555,47 @@ function runBacktestSubprocess(params) {
   }
 }
 
+function reusableWalkForwardEvidence({
+  fold,
+  scenario,
+  adapterHash,
+  freqtradeVersion,
+  riskUnitRatio,
+  accountEquity,
+}) {
+  const artifact = fold.executionArtifact;
+  for (const record of readBacktestEvidence()) {
+    const environment = record?.executionEnvironment;
+    if (record?.strategy !== HELIX_SIGNAL_STRATEGY
+      || `sha256:${record.strategyHash}` !== adapterHash
+      || record.timeframe !== artifact.baseTimeframe
+      || !isDeepStrictEqual(record.pairs, [artifact.symbol])
+      || record.signalArtifact?.artifactHash !== artifact.artifactHash
+      || record.marketDataset?.datasetHash !== fold.dataset.datasetHash
+      || environment?.riskTraceHash !== fold.executionRiskTrace.traceHash
+      || environment?.riskUnitRatio !== riskUnitRatio
+      || environment?.fee !== scenario.fee
+      || typeof environment?.freqtradeVersion !== 'string'
+      || environment.freqtradeVersion.trim() !== freqtradeVersion.trim()
+      || environment?.configIdentity?.dryRunWallet !== accountEquity
+      || environment?.executionProfile?.dryRunWallet !== accountEquity
+      || environment?.executionProfile?.fee !== scenario.fee) continue;
+    try {
+      const verified = verifyBacktestEvidenceResult(record, artifact, scenario.fee, {
+        signalArtifact: artifact,
+        riskTrace: fold.executionRiskTrace,
+        marketDataset: fold.dataset,
+        riskUnitRatio,
+        accountEquity,
+      });
+      if (verified.feeObservations.status !== 'OBSERVED'
+        || !verified.feeObservations.matchesRequested) continue;
+      return { record, verified };
+    } catch {}
+  }
+  return null;
+}
+
 function archiveWalkForwardEvidence(directory, sourceFile, expectedHash, suffix) {
   if (fileHash(sourceFile) !== expectedHash) throw new Error(`walk-forward evidence changed: ${sourceFile}`);
   const evidenceDirectory = resolve(directory, 'evidence');
@@ -3264,11 +3305,20 @@ const actions = {
       ?? UNVERSIONED_WALK_FORWARD_RISK_UNIT_RATIO;
     const accountEquity = bundle.plan.walkForwardPolicy?.plan.referenceAccountEquity
       ?? UNVERSIONED_WALK_FORWARD_ACCOUNT_EQUITY;
+    const freqtradeVersion = currentFreqtradeVersion();
     const foldEvidence = [];
     for (const [foldIndex, fold] of bundle.folds.entries()) {
       const scenarioEvidence = [];
       for (const scenario of bundle.plan.executionScenarios) {
-        const result = runBacktestSubprocess({
+        const reusable = reusableWalkForwardEvidence({
+          fold,
+          scenario,
+          adapterHash: runtimeAdapterBundle.adapterHash,
+          freqtradeVersion,
+          riskUnitRatio,
+          accountEquity,
+        });
+        const result = reusable ? null : runBacktestSubprocess({
           signal_artifact: resolve(bundle.directory, fold.run.executionArtifactFile),
           historical_risk_trace: resolve(bundle.directory, fold.run.executionRiskTraceFile),
           risk_unit_ratio: riskUnitRatio,
@@ -3277,13 +3327,13 @@ const actions = {
           fee: scenario.fee,
         });
         const evidenceId = result?.evidence?.id;
-        const record = typeof evidenceId === 'string'
+        const record = reusable?.record ?? (typeof evidenceId === 'string'
           ? readBacktestEvidence().find((item) => item.id === evidenceId)
-          : null;
+          : null);
         if (!record) {
           throw new Error(`walk-forward fold ${foldIndex} scenario ${scenario.id} has no stored backtest evidence.`);
         }
-        const verified = verifyBacktestEvidenceResult(
+        const verified = reusable?.verified ?? verifyBacktestEvidenceResult(
           record,
           fold.executionArtifact,
           scenario.fee,
@@ -3295,6 +3345,9 @@ const actions = {
             accountEquity: record.executionEnvironment?.configIdentity?.dryRunWallet,
           },
         );
+        if (reusable) {
+          console.error(`Reusing verified walk-forward evidence: fold=${foldIndex}, scenario=${scenario.id}`);
+        }
         if (!hasSignalExecutionEnvironment(record)) {
           throw new Error(`walk-forward fold ${foldIndex} scenario ${scenario.id} has no execution identity.`);
         }

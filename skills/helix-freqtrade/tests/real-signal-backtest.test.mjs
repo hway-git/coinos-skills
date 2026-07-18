@@ -346,4 +346,28 @@ dockerTest('real Freqtrade executes a fee-stressed walk-forward bundle with exac
     assert.equal(record.marketDataset.warmupCandles, 2);
     assert.equal(record.marketDataset.activationCandleOpenTime, artifact.marketData.firstCandleOpenTime);
   }
+
+  const resumed = await execFileAsync(process.execPath, [DEPLOY, 'walk_forward', JSON.stringify({
+    walk_forward_run: runFile,
+    source_dataset: datasetFile,
+  })], {
+    cwd: SKILL_DIR,
+    env: {
+      ...process.env,
+      HOME: home,
+      DOCKER_CONFIG: process.env.DOCKER_CONFIG || join(process.env.HOME || '', '.docker'),
+      HELIX_FREQTRADE_RUNTIME: 'docker',
+      FREQTRADE_PASSWORD: sentinel,
+      FREQTRADE_JWT_SECRET: sentinel,
+    },
+    timeout: 60_000,
+  });
+  assert.equal(JSON.parse(resumed.stdout).reportHash, report.reportHash);
+  assert.match(resumed.stderr, /Reusing verified walk-forward evidence: fold=0, scenario=base/);
+  assert.match(resumed.stderr, /Reusing verified walk-forward evidence: fold=0, scenario=fee_stress/);
+  const resumedEvidence = JSON.parse(await readFile(
+    join(home, '.freqtrade', 'user_data', 'backtest_results', '.helix-evidence.json'),
+    'utf8',
+  )).records;
+  assert.equal(resumedEvidence.length, 2);
 });
