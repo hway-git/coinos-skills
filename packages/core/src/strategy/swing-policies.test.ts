@@ -7,6 +7,7 @@ import { evaluateSwingExecution, evaluateSwingInvalidation, evaluateSwingRiskPol
 const riskConfig: SwingRiskPolicyConfig = {
   thesisRiskBudgetR: 1,
   maximumLeverage: 50,
+  riskUnitRatio: 0.01,
   riskByStageR: { EARLY: 0.25, STANDARD: 0.35, CONFIRMED: 0.4 },
 }
 

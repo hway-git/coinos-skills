@@ -74,7 +74,7 @@ const config: ScalpHistoricalEvaluatorConfig = {
   breakoutFailure: { minZoneScore: 40, maxReturnBars: 3, maxFollowThroughAtr: 1 },
   momentumBurst: { minZoneScore: 40, minBodyRatio: 0.2, minCandleRangeAtr: 0.5, maxDistanceFromMeanAtr: 10 },
   execution: { minRr: 1 },
-  risk: { dailyLossLimitR: 10, maxConsecutiveLosses: 20, maximumLeverage: 50, riskByGradeR: { A_PLUS: 0.35, A: 0.25, B: 0.15 } },
+  risk: { dailyLossLimitR: 10, maxConsecutiveLosses: 20, maximumLeverage: 50, riskUnitRatio: 0.01, riskByGradeR: { A_PLUS: 0.35, A: 0.25, B: 0.15 } },
   time: {
     maxHoldingMs: { LIQUIDITY_SWEEP: 30 * minute, BREAKOUT_FAILURE: 30 * minute, MOMENTUM_BURST: 15 * minute },
     responseWindowMs: { LIQUIDITY_SWEEP: 10 * minute, BREAKOUT_FAILURE: 10 * minute, MOMENTUM_BURST: 5 * minute },

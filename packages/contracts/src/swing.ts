@@ -181,6 +181,7 @@ export type SwingTradeResult = {
 export type SwingRiskPolicyConfig = {
   thesisRiskBudgetR: number
   maximumLeverage: number
+  riskUnitRatio?: number
   riskByStageR: Record<SwingExecutionStage, number>
 }
 

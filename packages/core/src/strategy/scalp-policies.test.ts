@@ -7,6 +7,7 @@ const riskConfig: ScalpRiskPolicyConfig = {
   dailyLossLimitR: 1,
   maxConsecutiveLosses: 3,
   maximumLeverage: 50,
+  riskUnitRatio: 0.01,
   riskByGradeR: { A_PLUS: 0.35, A: 0.25, B: 0.15 },
 }
 

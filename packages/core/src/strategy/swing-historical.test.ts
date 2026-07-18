@@ -69,7 +69,7 @@ const config: SwingHistoricalEvaluatorConfig = {
     maxTestCount: 20, maxAgeBars: 90, minLocationScore: 40,
   },
   execution: { minRrByStage: { EARLY: 1, STANDARD: 1.2, CONFIRMED: 1.5 }, maxAttemptsPerThesis: 3 },
-  risk: { thesisRiskBudgetR: 1, maximumLeverage: 50, riskByStageR: { EARLY: 0.25, STANDARD: 0.35, CONFIRMED: 0.4 } },
+  risk: { thesisRiskBudgetR: 1, maximumLeverage: 50, riskUnitRatio: 0.01, riskByStageR: { EARLY: 0.25, STANDARD: 0.35, CONFIRMED: 0.4 } },
 }
 
 test('produces deterministic Swing trades and permits repeated entries only under one Thesis budget', () => {

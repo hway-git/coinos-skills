@@ -42,7 +42,9 @@ export function evaluateSwingRiskPolicy(
   let leverageTooHigh = false
   if (input.priceRiskRatio !== undefined) {
     positiveFinite(input.priceRiskRatio, 'input.priceRiskRatio')
-    leverageTooHigh = requestedRiskR / input.priceRiskRatio > config.maximumLeverage
+    if (config.riskUnitRatio !== undefined) positiveFinite(config.riskUnitRatio, 'config.riskUnitRatio')
+    leverageTooHigh = config.riskUnitRatio !== undefined
+      && config.riskUnitRatio * requestedRiskR / input.priceRiskRatio > config.maximumLeverage
   }
   const allowed = requestedRiskR <= remainingThesisRiskR && requestedRiskR <= availablePortfolioRiskR && !leverageTooHigh
   return {

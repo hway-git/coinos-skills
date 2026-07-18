@@ -182,6 +182,7 @@ export type ScalpRiskPolicyConfig = {
   dailyLossLimitR: number
   maxConsecutiveLosses: number
   maximumLeverage: number
+  riskUnitRatio?: number
   riskByGradeR: Record<ScalpGrade, number>
 }
 

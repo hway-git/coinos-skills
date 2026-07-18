@@ -39,7 +39,9 @@ export function evaluateScalpRiskPolicy(
   if (input.consecutiveLosses >= config.maxConsecutiveLosses) reasonCodes.push('MAX_CONSECUTIVE_LOSSES')
   if (input.priceRiskRatio !== undefined) {
     positiveFinite(input.priceRiskRatio, 'input.priceRiskRatio')
-    if (config.riskByGradeR[input.grade] / input.priceRiskRatio > config.maximumLeverage) {
+    if (config.riskUnitRatio !== undefined) positiveFinite(config.riskUnitRatio, 'config.riskUnitRatio')
+    if (config.riskUnitRatio !== undefined
+      && config.riskUnitRatio * config.riskByGradeR[input.grade] / input.priceRiskRatio > config.maximumLeverage) {
       reasonCodes.push('LEVERAGE_TOO_HIGH')
     }
   }
