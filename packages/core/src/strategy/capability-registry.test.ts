@@ -65,6 +65,44 @@ test('rejects misspelled or incomplete capability configuration', () => {
   assert.deepEqual(valid.invalidConfiguration, [])
 })
 
+test('requires the versioned Swing Stop buffer in staged execution configuration', () => {
+  const base: StrategyManifestIdentity = {
+    schemaVersion: 'helix.strategy/v1',
+    id: 'helix_swing_hunter',
+    name: 'Helix Swing Hunter',
+    family: 'swing',
+    version: '1.0.4',
+    lifecycle: 'proposal',
+    objectModel: 'TRADE_THESIS',
+    timeframes: [{ role: 'execution', timeframe: '15m' }],
+    manifestPath: 'strategies/swing/strategy.yaml',
+    configHash: `sha256:${'c'.repeat(64)}`,
+    requiredEngineCapabilities: ['staged_execution_v1'],
+    capabilityConfigurations: {
+      staged_execution_v1: {
+        min_rr_by_stage: { EARLY: 1.5, STANDARD: 1.8, CONFIRMED: 2 },
+        max_attempts_per_thesis: 1,
+      },
+    },
+    reasonCodes: ['RR_TOO_LOW'],
+  }
+  const missing = evaluateStrategyEngineCompatibility(base, 'engine-commit-001')
+  assert.deepEqual(missing.invalidConfiguration, ['staged_execution_v1'])
+
+  const valid = evaluateStrategyEngineCompatibility({
+    ...base,
+    capabilityConfigurations: {
+      staged_execution_v1: {
+        min_rr_by_stage: { EARLY: 1.5, STANDARD: 1.8, CONFIRMED: 2 },
+        max_attempts_per_thesis: 1,
+        stop_buffer_atr: 0.1,
+      },
+    },
+  }, 'engine-commit-001')
+  assert.equal(valid.compatible, true)
+  assert.deepEqual(valid.invalidConfiguration, [])
+})
+
 test('requires exact configuration for all four high-level context capabilities', () => {
   const capabilityIds = new Set(listEngineCapabilities().map((capability) => capability.id))
   assert.equal(capabilityIds.has('market_regime_v1'), true)

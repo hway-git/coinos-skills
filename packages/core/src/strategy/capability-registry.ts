@@ -251,9 +251,10 @@ const ENGINE_CAPABILITIES: EngineCapabilityDefinition[] = [
     validateConfiguration: (value) => {
       const data = record(value)
       return Boolean(data
-        && exactKeys(data, ['min_rr_by_stage', 'max_attempts_per_thesis'])
+        && exactKeys(data, ['min_rr_by_stage', 'max_attempts_per_thesis', 'stop_buffer_atr'])
         && exactPositiveRecord(data.min_rr_by_stage, ['EARLY', 'STANDARD', 'CONFIRMED'])
-        && positiveInteger(data.max_attempts_per_thesis))
+        && positiveInteger(data.max_attempts_per_thesis)
+        && positive(data.stop_buffer_atr))
     },
   },
   { id: 'swing_thesis_lifecycle_v1', kind: 'policy', family: 'swing', requiresConfiguration: false },
