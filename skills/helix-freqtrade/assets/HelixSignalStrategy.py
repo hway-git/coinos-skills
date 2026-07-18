@@ -51,6 +51,13 @@ class HelixSignalStrategy(IStrategy):
     _helix_historical_risks = None
     _helix_stake_headroom = 1.01
 
+    def _leverage_cache(self):
+        cache = getattr(self, "_helix_leverage_by_entry", None)
+        if cache is None:
+            cache = {}
+            self._helix_leverage_by_entry = cache
+        return cache
+
     def _artifact_path(self) -> Path:
         environment_path = os.environ.get("HELIX_SIGNAL_ARTIFACT_PATH", "").strip()
         if self._artifact_override_enabled():
@@ -220,7 +227,26 @@ class HelixSignalStrategy(IStrategy):
     ) -> bool:
         try:
             self._require_forward_health()
-            return entry_tag in self._risk_index(pair)
+            risk_index = self._risk_index(pair)
+            if entry_tag not in risk_index:
+                return False
+            # Freqtrade may fall back to max_stake when custom_stake_amount
+            # cannot fit the requested risk budget. Reject that under-sized
+            # entry instead of silently recording less than the intended R.
+            if not isinstance(amount, (int, float)) or not math.isfinite(amount) \
+                    or not isinstance(rate, (int, float)) or not math.isfinite(rate):
+                return True
+            risk, equity, price_risk_ratio = self._risk_context(pair, rate, entry_tag, side)
+            leverage = kwargs.get("leverage")
+            if not isinstance(leverage, (int, float)) or not math.isfinite(leverage) or leverage < 1:
+                leverage = self._leverage_cache().get((pair, entry_tag, side))
+            if not isinstance(leverage, (int, float)) or not math.isfinite(leverage) or leverage < 1:
+                return False
+            expected_budget = equity * float(risk["riskUnitRatio"]) * float(risk["riskR"])
+            actual_budget = float(amount) * float(rate) * price_risk_ratio
+            tolerance = max(1e-8, expected_budget * 0.025)
+            return actual_budget <= expected_budget + 1e-8 \
+                and actual_budget >= expected_budget - tolerance
         except (SignalArtifactError, ValueError):
             return False
 
@@ -258,14 +284,27 @@ class HelixSignalStrategy(IStrategy):
             tradable_ratio = float(self.config.get("tradable_balance_ratio", 1.0))
             if not math.isfinite(tradable_ratio) or tradable_ratio <= 0 or tradable_ratio > 1:
                 return 1.0
+            stake_currency = str(self.config.get("stake_currency", "")).strip()
             available_stake = equity * tradable_ratio
+            get_available = getattr(self.wallets, "get_available_stake_amount", None)
+            get_free = getattr(self.wallets, "get_free", None)
+            wallet_available = (
+                float(get_available()) if callable(get_available)
+                else float(get_free(stake_currency)) if callable(get_free)
+                else available_stake
+            )
+            if math.isfinite(wallet_available) and wallet_available > 0:
+                available_stake = min(available_stake, wallet_available)
             risk_budget = equity * float(risk["riskUnitRatio"]) * float(risk["riskR"])
             required_at_one_x = risk_budget / price_risk_ratio
             required_leverage = (required_at_one_x / available_stake) * self._helix_stake_headroom
             selected = max(1.0, required_leverage)
             selected = math.ceil(selected * 100) / 100
-            return min(float(max_leverage), selected)
+            selected = min(float(max_leverage), selected)
+            self._leverage_cache()[(pair, entry_tag, side)] = selected
+            return selected
         except (AttributeError, KeyError, SignalArtifactError, TypeError, ValueError):
+            self._leverage_cache()[(pair, entry_tag, side)] = 1.0
             return 1.0
 
     def custom_stake_amount(
