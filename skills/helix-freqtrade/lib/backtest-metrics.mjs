@@ -3,7 +3,7 @@ import { verifyHistoricalRiskTrace } from './historical-risk.mjs';
 import { marketTimeframeMilliseconds, verifyMarketDataset } from './market-dataset.mjs';
 import { verifySignalArtifact } from './signal-artifact.mjs';
 
-export const RISK_BUDGET_TOLERANCE_RATIO = 0.01;
+export const RISK_BUDGET_TOLERANCE_RATIO = 0.025;
 
 function firstField(summary, fields, name) {
   for (const field of fields) {
@@ -149,7 +149,7 @@ function riskNormalizedMetrics(summary, context) {
     const expectedStakeAmount = expectedRiskBudget / ((executionRiskDistance / openRate) * leverage);
     const actualRiskBudget = stakeAmount * leverage * (executionRiskDistance / openRate);
     const tolerance = Math.max(1e-8, expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO);
-    if (actualRiskBudget > expectedRiskBudget + tolerance
+    if (actualRiskBudget > expectedRiskBudget + 1e-8
       || actualRiskBudget < expectedRiskBudget - tolerance) {
       throw new Error(`${name}.stake_amount does not match its account-equity risk budget within execution precision`);
     }

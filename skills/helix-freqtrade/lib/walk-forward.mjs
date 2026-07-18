@@ -1350,8 +1350,9 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
         riskNormalized.available
         && riskNormalized.observations.every((observation) => (
           observation.riskUnitRatio === policy.plan.riskUnitRatio
-          && Math.abs(observation.actualRiskBudget - observation.expectedRiskBudget)
-            <= Math.max(1e-8, observation.expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO)
+          && observation.actualRiskBudget <= observation.expectedRiskBudget + 1e-8
+          && observation.actualRiskBudget >= observation.expectedRiskBudget
+            - Math.max(1e-8, observation.expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO)
         ))
       )),
       scenarios.map(({ scenarioId, riskNormalized }) => ({
@@ -1359,8 +1360,9 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
         observations: riskNormalized.available ? riskNormalized.observations.length : 0,
         valid: riskNormalized.available && riskNormalized.observations.every((observation) => (
           policy && observation.riskUnitRatio === policy.plan.riskUnitRatio
-          && Math.abs(observation.actualRiskBudget - observation.expectedRiskBudget)
-            <= Math.max(1e-8, observation.expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO)
+          && observation.actualRiskBudget <= observation.expectedRiskBudget + 1e-8
+          && observation.actualRiskBudget >= observation.expectedRiskBudget
+            - Math.max(1e-8, observation.expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO)
         )),
       })),
       policy ? { riskUnitRatio: policy.plan.riskUnitRatio, valid: true } : { policy: 'required' },
