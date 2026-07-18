@@ -874,6 +874,7 @@ forward = adapter.HelixSignalStrategy()
 forward.timeframe = '1m'
 forward.config = {
     'stake_currency': 'USDT',
+    'fee': 0.001,
     'helix_signal_forward_deployment_path': sys.argv[4],
     'helix_signal_forward_deployment_hash': sys.argv[5],
     'helix_signal_batch_path': sys.argv[6],
@@ -882,15 +883,25 @@ forward.config = {
 
 historical = adapter.HelixSignalStrategy()
 historical.timeframe = '1m'
-historical.config = {'stake_currency': 'USDT'}
+historical.config = {'stake_currency': 'USDT', 'fee': 0.001}
+
+historical_zero_fee = adapter.HelixSignalStrategy()
+historical_zero_fee.timeframe = '1m'
+historical_zero_fee.config = {'stake_currency': 'USDT', 'fee': 0}
+
+historical_missing_fee = adapter.HelixSignalStrategy()
+historical_missing_fee.timeframe = '1m'
+historical_missing_fee.config = {'stake_currency': 'USDT'}
 
 os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = ''
 forward_result = stake(forward, 'enter-forward-1')
-forward_max_reject = stake(forward, 'enter-forward-1', 499)
+forward_max_reject = stake(forward, 'enter-forward-1', 480)
 forward_leverage_reject = stake(forward, 'enter-forward-1', leverage=2)
 forward_missing_reject = stake(forward, 'missing')
 os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = '1'
 historical_result = stake(historical, 'btc-scalp-enter-001')
+historical_zero_fee_result = stake(historical_zero_fee, 'btc-scalp-enter-001')
+historical_missing_fee_result = stake(historical_missing_fee, 'btc-scalp-enter-001')
 os.environ['HELIX_SIGNAL_RISK_TRACE_FILE_HASH'] = 'sha256:' + ('0' * 64)
 print(json.dumps({
     'forward': forward_result,
@@ -898,6 +909,8 @@ print(json.dumps({
     'forward_leverage_reject': forward_leverage_reject,
     'forward_missing_reject': forward_missing_reject,
     'historical': historical_result,
+    'historical_zero_fee': historical_zero_fee_result,
+    'historical_missing_fee': historical_missing_fee_result,
     'historical_wrong_file_pin': stake(historical, 'btc-scalp-enter-001'),
 }))
 `;
@@ -918,11 +931,13 @@ print(json.dumps({
     },
   });
   assert.deepEqual(JSON.parse(stdout), {
-    forward: 500,
+    forward: 481.2319538017324,
     forward_max_reject: 0,
-    forward_leverage_reject: 250,
+    forward_leverage_reject: 240.6159769008662,
     forward_missing_reject: 0,
-    historical: 500,
+    historical: 481.2319538017324,
+    historical_zero_fee: 500,
+    historical_missing_fee: 0,
     historical_wrong_file_pin: 0,
   });
 });

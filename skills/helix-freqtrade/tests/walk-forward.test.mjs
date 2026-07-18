@@ -467,7 +467,11 @@ function backtestResultFixture(plan, fold, scenario, index) {
   const accountEquity = plan.walkForwardPolicy?.plan.referenceAccountEquity ?? 1000;
   const stakeAmount = tradeCount
     ? (accountEquity * riskUnitRatio * risk.riskR)
-      / (Math.abs(openRate - risk.initialStop) / openRate)
+      / (
+        (Math.abs(openRate - risk.initialStop) / openRate)
+        + scenario.fee
+        + (risk.initialStop / openRate) * scenario.fee
+      )
     : null;
   const profitAbs = tradeCount ? stakeAmount * profitRatio : 0;
   const summary = {
@@ -759,6 +763,12 @@ test('rebuilds every versioned policy gate from archived trade-level R evidence'
   assert.throws(
     () => createWalkForwardReport(bundle, wrongEquity, coreEvidence),
     /executionProfile does not match the plan scenario/,
+  );
+  const wrongRiskComponents = structuredClone(evidence);
+  wrongRiskComponents[0][0].metrics.riskNormalized.observations[0].feeRiskBudget = 0;
+  assert.throws(
+    () => createWalkForwardReport(bundle, wrongRiskComponents, coreEvidence),
+    /risk budget components are inconsistent/,
   );
   const report = createWalkForwardReport(bundle, evidence, coreEvidence);
   assert.equal(report.gate.ok, true);

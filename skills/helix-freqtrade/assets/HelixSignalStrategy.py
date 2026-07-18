@@ -236,14 +236,16 @@ class HelixSignalStrategy(IStrategy):
             if not isinstance(amount, (int, float)) or not math.isfinite(amount) \
                     or not isinstance(rate, (int, float)) or not math.isfinite(rate):
                 return True
-            risk, equity, price_risk_ratio = self._risk_context(pair, rate, entry_tag, side)
+            risk, equity, _price_risk_ratio, total_risk_ratio = self._risk_context(
+                pair, rate, entry_tag, side
+            )
             leverage = kwargs.get("leverage")
             if not isinstance(leverage, (int, float)) or not math.isfinite(leverage) or leverage < 1:
                 leverage = self._leverage_cache().get((pair, entry_tag, side))
             if not isinstance(leverage, (int, float)) or not math.isfinite(leverage) or leverage < 1:
                 return False
             expected_budget = equity * float(risk["riskUnitRatio"]) * float(risk["riskR"])
-            actual_budget = float(amount) * float(rate) * price_risk_ratio
+            actual_budget = float(amount) * float(rate) * total_risk_ratio
             tolerance = max(1e-8, expected_budget * 0.025)
             return actual_budget <= expected_budget + 1e-8 \
                 and actual_budget >= expected_budget - tolerance
@@ -268,11 +270,20 @@ class HelixSignalStrategy(IStrategy):
         price_risk_ratio = abs(current_rate - initial_stop) / current_rate
         if not math.isfinite(price_risk_ratio) or price_risk_ratio <= 0:
             raise SignalArtifactError("price risk ratio is invalid")
+        configured_fee = self.config.get("fee")
+        if not isinstance(configured_fee, (int, float)) or not math.isfinite(configured_fee) \
+                or configured_fee < 0:
+            raise SignalArtifactError("Signal risk sizing requires an explicit non-negative fee")
+        stop_rate_ratio = initial_stop / current_rate
+        total_risk_ratio = price_risk_ratio + float(configured_fee) \
+            + stop_rate_ratio * float(configured_fee)
+        if not math.isfinite(total_risk_ratio) or total_risk_ratio <= 0:
+            raise SignalArtifactError("fee-inclusive risk ratio is invalid")
         stake_currency = str(self.config.get("stake_currency", "")).strip()
         equity = float(self.wallets.get_total(stake_currency))
         if not math.isfinite(equity) or equity <= 0:
             raise SignalArtifactError("wallet equity is invalid")
-        return risk, equity, price_risk_ratio
+        return risk, equity, price_risk_ratio, total_risk_ratio
 
     def leverage(
         self, pair, current_time, current_rate, proposed_leverage, max_leverage, entry_tag, side, **kwargs,
@@ -280,7 +291,9 @@ class HelixSignalStrategy(IStrategy):
         try:
             if not isinstance(max_leverage, (int, float)) or not math.isfinite(max_leverage) or max_leverage < 1:
                 return 1.0
-            risk, equity, price_risk_ratio = self._risk_context(pair, current_rate, entry_tag, side)
+            risk, equity, _price_risk_ratio, total_risk_ratio = self._risk_context(
+                pair, current_rate, entry_tag, side
+            )
             tradable_ratio = float(self.config.get("tradable_balance_ratio", 1.0))
             if not math.isfinite(tradable_ratio) or tradable_ratio <= 0 or tradable_ratio > 1:
                 return 1.0
@@ -296,7 +309,7 @@ class HelixSignalStrategy(IStrategy):
             if math.isfinite(wallet_available) and wallet_available > 0:
                 available_stake = min(available_stake, wallet_available)
             risk_budget = equity * float(risk["riskUnitRatio"]) * float(risk["riskR"])
-            required_at_one_x = risk_budget / price_risk_ratio
+            required_at_one_x = risk_budget / total_risk_ratio
             required_leverage = (required_at_one_x / available_stake) * self._helix_stake_headroom
             selected = max(1.0, required_leverage)
             selected = math.ceil(selected * 100) / 100
@@ -314,9 +327,11 @@ class HelixSignalStrategy(IStrategy):
         try:
             if not isinstance(leverage, (int, float)) or not math.isfinite(leverage) or leverage < 1:
                 return 0.0
-            risk, equity, price_risk_ratio = self._risk_context(pair, current_rate, entry_tag, side)
+            risk, equity, _price_risk_ratio, total_risk_ratio = self._risk_context(
+                pair, current_rate, entry_tag, side
+            )
             risk_budget = equity * float(risk["riskUnitRatio"]) * float(risk["riskR"])
-            stake_amount = risk_budget / (price_risk_ratio * float(leverage))
+            stake_amount = risk_budget / (total_risk_ratio * float(leverage))
             if not math.isfinite(stake_amount) or stake_amount <= 0:
                 return 0.0
             if min_stake is not None and stake_amount < float(min_stake):

@@ -16,7 +16,7 @@ import { verifySignalArtifact } from './signal-artifact.mjs';
 
 export const WALK_FORWARD_PLAN_SCHEMA_VERSION = 'helix.walk-forward-plan/v1';
 export const WALK_FORWARD_RUN_SCHEMA_VERSION = 'helix.walk-forward-run/v1';
-export const WALK_FORWARD_REPORT_SCHEMA_VERSION = 'helix.walk-forward-report/v2';
+export const WALK_FORWARD_REPORT_SCHEMA_VERSION = 'helix.walk-forward-report/v3';
 
 const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const COMMIT_PATTERN = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
@@ -857,7 +857,8 @@ function normalizeBacktestMetrics(value, name) {
       const observationName = `${name}.riskNormalized.observations[${index}]`;
       const observation = exactRecord(value, observationName, [
         'entrySignalId', 'openTime', 'closeTime', 'realizedR', 'mfeR', 'maeR',
-        'riskUnitRatio', 'riskR', 'leverage', 'accountEquity', 'expectedRiskBudget', 'actualRiskBudget',
+        'riskUnitRatio', 'riskR', 'leverage', 'accountEquity', 'expectedRiskBudget',
+        'priceRiskBudget', 'feeRiskBudget', 'actualRiskBudget',
         'expectedStakeAmount', 'stakeAmount', 'segments',
       ]);
       const segments = jsonRecord(observation.segments, `${observationName}.segments`);
@@ -865,7 +866,7 @@ function normalizeBacktestMetrics(value, name) {
         if (!/^[a-z][a-z0-9_.]*$/.test(dimension)) throw new Error(`${observationName}.segments has invalid dimension`);
         return [dimension, text(segmentValue, `${observationName}.segments.${dimension}`)];
       }));
-      return {
+      const normalizedObservation = {
         entrySignalId: text(observation.entrySignalId, `${observationName}.entrySignalId`),
         openTime: integer(observation.openTime, `${observationName}.openTime`),
         closeTime: integer(observation.closeTime, `${observationName}.closeTime`),
@@ -877,11 +878,23 @@ function normalizeBacktestMetrics(value, name) {
         leverage: finite(observation.leverage, `${observationName}.leverage`),
         accountEquity: finite(observation.accountEquity, `${observationName}.accountEquity`),
         expectedRiskBudget: finite(observation.expectedRiskBudget, `${observationName}.expectedRiskBudget`),
+        priceRiskBudget: finite(observation.priceRiskBudget, `${observationName}.priceRiskBudget`),
+        feeRiskBudget: finite(observation.feeRiskBudget, `${observationName}.feeRiskBudget`),
         actualRiskBudget: finite(observation.actualRiskBudget, `${observationName}.actualRiskBudget`),
         expectedStakeAmount: finite(observation.expectedStakeAmount, `${observationName}.expectedStakeAmount`),
         stakeAmount: finite(observation.stakeAmount, `${observationName}.stakeAmount`),
         segments: normalizedSegments,
       };
+      if (normalizedObservation.priceRiskBudget <= 0
+        || normalizedObservation.feeRiskBudget < 0
+        || Math.abs(
+          normalizedObservation.priceRiskBudget
+            + normalizedObservation.feeRiskBudget
+            - normalizedObservation.actualRiskBudget
+        ) > 1e-8) {
+        throw new Error(`${observationName} risk budget components are inconsistent`);
+      }
+      return normalizedObservation;
     });
     if (normalizedRisk.observations.length !== trades
       || new Set(normalizedRisk.observations.map(({ entrySignalId }) => entrySignalId)).size !== trades) {

@@ -1047,6 +1047,18 @@ function walkForwardReferenceAccountEquity(evidence) {
   return value;
 }
 
+function walkForwardDeploymentFee(evidence) {
+  const scenarios = evidence?.walkForwardPolicy?.plan?.executionScenarios;
+  if (!Array.isArray(scenarios) || scenarios.length < 2) {
+    throw new Error('walk-forward report has no valid fee scenarios.');
+  }
+  const fees = scenarios.map((scenario) => scenario?.fee);
+  if (fees.some((fee) => typeof fee !== 'number' || !Number.isFinite(fee) || fee < 0)) {
+    throw new Error('walk-forward report has an invalid fee scenario.');
+  }
+  return Math.max(...fees);
+}
+
 function requireStoredWalkForwardReport(config, artifact) {
   const file = config?.helix_signal_walk_forward_report_path;
   const reportHash = config?.helix_signal_walk_forward_report_hash;
@@ -2070,6 +2082,7 @@ function generateHostConfig(exchangeInfo, apiPassword, params = {}) {
       helix_signal_artifact_path: params.helix_signal_artifact_path,
       helix_signal_artifact_hash: params.helix_signal_artifact_hash,
     } : {}),
+    ...(params.fee !== undefined ? { fee: params.fee } : {}),
     trading_mode: params.trading_mode || 'futures',
     margin_mode: params.margin_mode || 'isolated',
     max_open_trades: params.max_open_trades || 2,
@@ -2304,6 +2317,7 @@ const actions = {
           next.timeframe = signalArtifact.baseTimeframe;
           next.tradable_balance_ratio = 1;
           next.dry_run_wallet = walkForwardReferenceAccountEquity(walkForwardEvidence);
+          next.fee = walkForwardDeploymentFee(walkForwardEvidence);
           next.helix_signal_artifact_path = dockerCliPath(archivedArtifact.hashFile);
           next.helix_signal_artifact_hash = signalArtifact.artifactHash;
           if (forwardDeployment) configureForwardRuntime(next, forwardDeployment, forwardPaths);
@@ -2540,6 +2554,7 @@ const actions = {
           dry_run: targetDryRun,
           ...(signalArtifact ? {
             dry_run_wallet: walkForwardReferenceAccountEquity(walkForwardEvidence),
+            fee: walkForwardDeploymentFee(walkForwardEvidence),
           } : {}),
           max_open_trades: maxOpenTrades,
           ...(signalArtifact ? {

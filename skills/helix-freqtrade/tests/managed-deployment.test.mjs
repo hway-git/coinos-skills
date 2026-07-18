@@ -280,7 +280,7 @@ async function setupManagedDeployment(t, {
         riskTraceHash: sha256('managed-risk-trace'),
         riskTraceFileHash: sha256('managed-risk-trace-file'),
         riskUnitRatio: 0.01,
-        fee: null,
+        fee: 0.001,
         dataFormatOhlcv: 'json',
         executionProfile: {
           schemaVersion: 'helix.freqtrade-execution-profile/v1',
@@ -295,7 +295,7 @@ async function setupManagedDeployment(t, {
           stakeAmount: null,
           tradableBalanceRatio: 1,
           dryRunWallet: 1000,
-          fee: null,
+          fee: 0.001,
           entryPricing: null,
           exitPricing: null,
           orderTypes: null,
@@ -424,6 +424,7 @@ test('managed deployment commits an immutable artifact pointer only after the fl
   assert.equal(result.signal_artifact.hash, setup.artifact.artifactHash);
   const config = JSON.parse(await readFile(setup.configFile, 'utf8'));
   assert.equal(config.strategy, 'HelixSignalStrategy');
+  assert.equal(config.fee, 0.001);
   assert.equal(config.helix_signal_artifact_hash, setup.artifact.artifactHash);
   assert.equal(config.helix_signal_walk_forward_report_hash, result.walk_forward_report.hash);
   assert.equal(

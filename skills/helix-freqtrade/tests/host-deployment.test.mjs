@@ -370,7 +370,7 @@ setInterval(() => {}, 1000);
           riskTraceHash: sha256('host-risk-trace'),
           riskTraceFileHash: sha256('host-risk-trace-file'),
           riskUnitRatio: 0.01,
-          fee: null,
+          fee: 0.001,
           dataFormatOhlcv: 'json',
           executionProfile: {
             schemaVersion: 'helix.freqtrade-execution-profile/v1',
@@ -385,7 +385,7 @@ setInterval(() => {}, 1000);
             stakeAmount: 'unlimited',
             tradableBalanceRatio: 1,
             dryRunWallet: 1000,
-            fee: null,
+            fee: 0.001,
             entryPricing: { price_side: 'same', use_order_book: true, order_book_top: 1 },
             exitPricing: { price_side: 'same', use_order_book: true, order_book_top: 1 },
             orderTypes: null,
@@ -486,6 +486,7 @@ test('host Signal deployment manages its forward worker across stop and start', 
   assert.equal(deployed.strategy, 'HelixSignalStrategy');
   assert.equal(deployed.forward_runtime.state, 'waiting');
   assert.equal(processIsAlive(deployed.forward_runtime.worker_pid), true);
+  assert.equal(JSON.parse(await readFile(setup.configFile, 'utf8')).fee, 0.001);
 
   const status = JSON.parse((await setup.runAction('status')).stdout);
   assert.equal(status.forward_runtime.running, true);

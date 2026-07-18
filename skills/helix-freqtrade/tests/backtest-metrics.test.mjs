@@ -245,12 +245,15 @@ function riskMetricFixture() {
   const riskTrace = { ...riskPayload, traceHash: historicalRiskTraceHash(riskPayload) };
   const accountEquity = 1000;
   const riskUnitRatio = 0.01;
+  const fee = 0.001;
   const longProfitRatio = 0.8 * (7 / 102);
-  const longStake = (accountEquity * riskUnitRatio * 0.35) / (7 / 102);
+  const longStake = (accountEquity * riskUnitRatio * 0.35)
+    / ((7 / 102) + fee + (95 / 102) * fee);
   const longProfitAbs = longStake * longProfitRatio;
   const shortAccountEquity = accountEquity + longProfitAbs;
   const shortProfitRatio = -0.6 * (7 / 108);
-  const shortStake = (shortAccountEquity * riskUnitRatio * 0.25) / (7 / 108);
+  const shortStake = (shortAccountEquity * riskUnitRatio * 0.25)
+    / ((7 / 108) + fee + (115 / 108) * fee);
   const summary = {
     total_trades: 2, wins: 1, draws: 0, losses: 1,
     trades: [
@@ -261,6 +264,7 @@ function riskMetricFixture() {
         open_rate: 102, close_rate: 109,
         // Freqtrade's net return is 0.8 times the actual fill-to-stop risk return.
         profit_ratio: longProfitRatio, profit_abs: longProfitAbs, stake_amount: longStake, leverage: 1,
+        fee_open: fee, fee_close: fee,
       },
       {
         pair: marketDataset.source.symbol, is_open: false, is_short: true,
@@ -269,6 +273,7 @@ function riskMetricFixture() {
         open_rate: 108, close_rate: 109,
         profit_ratio: shortProfitRatio, profit_abs: shortStake * shortProfitRatio,
         stake_amount: shortStake, leverage: 1,
+        fee_open: fee, fee_close: fee,
       },
     ],
   };
@@ -280,14 +285,19 @@ test('computes net realized R and exact-dataset MFE/MAE in account-equity risk u
   const metrics = backtestMetrics(fixture.summary, fixture);
   assert.equal(metrics.riskNormalized.available, true);
   assert.equal(metrics.riskNormalized.reason, 'NET_ACCOUNT_R_EXECUTION');
-  assert.ok(Math.abs(metrics.riskNormalized.expectancyR - 0.065) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.maxDrawdownR - 0.15) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.mfeR - (29 / 140)) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.maeR - (12 / 35)) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.observations[0].realizedR - 0.28) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.observations[1].realizedR + 0.15) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.expectancyR - 0.06348336758141664) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.maxDrawdownR - 0.14536896026581755) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.mfeR - 0.20109771998581638) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.maeR - 0.33297212555933875) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.observations[0].realizedR - 0.2723356954286508) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.observations[1].realizedR + 0.14536896026581755) < 1e-12);
   assert.ok(Math.abs(metrics.riskNormalized.observations[0].expectedRiskBudget - 3.5) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.observations[0].stakeAmount - 51) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.observations[0].stakeAmount - 49.604001667361395) < 1e-12);
+  assert.ok(Math.abs(
+    metrics.riskNormalized.observations[0].priceRiskBudget
+      + metrics.riskNormalized.observations[0].feeRiskBudget
+      - metrics.riskNormalized.observations[0].actualRiskBudget,
+  ) < 1e-12);
 });
 
 test('requires bounded leverage and exact trace/dataset linkage for risk-normalized metrics', () => {

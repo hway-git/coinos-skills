@@ -72,7 +72,11 @@ function resultFixture(fold, scenario, stressed) {
   const risk = fold.executionRiskTrace.entries[0];
   const openRate = tradeCount ? candles.find(({ time }) => time === entry.decisionTime).open : null;
   const stakeAmount = tradeCount
-    ? (1000 * 0.01 * risk.riskR) / (Math.abs(openRate - risk.initialStop) / openRate)
+    ? (1000 * 0.01 * risk.riskR) / (
+      (Math.abs(openRate - risk.initialStop) / openRate)
+      + scenario.fee
+      + (risk.initialStop / openRate) * scenario.fee
+    )
     : null;
   const profitAbs = tradeCount ? stakeAmount * profitRatio : 0;
   const summary = {

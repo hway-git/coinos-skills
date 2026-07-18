@@ -145,9 +145,17 @@ function riskNormalizedMetrics(summary, context) {
     const executionRiskDistance = Math.abs(openRate - risk.initialStop);
     const stakeAmount = requiredFinite(trade.stake_amount, `${name}.stake_amount`);
     if (stakeAmount <= 0) throw new Error(`${name}.stake_amount must be positive`);
+    const feeOpen = requiredFinite(trade.fee_open, `${name}.fee_open`);
+    const feeClose = requiredFinite(trade.fee_close, `${name}.fee_close`);
+    if (feeOpen < 0 || feeClose < 0) throw new Error(`${name} fees must be non-negative`);
     const expectedRiskBudget = accountEquity * riskUnitRatio * risk.riskR;
-    const expectedStakeAmount = expectedRiskBudget / ((executionRiskDistance / openRate) * leverage);
-    const actualRiskBudget = stakeAmount * leverage * (executionRiskDistance / openRate);
+    const priceRiskRatio = executionRiskDistance / openRate;
+    const stopRateRatio = risk.initialStop / openRate;
+    const feeRiskRatio = feeOpen + stopRateRatio * feeClose;
+    const expectedStakeAmount = expectedRiskBudget / ((priceRiskRatio + feeRiskRatio) * leverage);
+    const priceRiskBudget = stakeAmount * leverage * priceRiskRatio;
+    const feeRiskBudget = stakeAmount * leverage * feeRiskRatio;
+    const actualRiskBudget = priceRiskBudget + feeRiskBudget;
     const tolerance = Math.max(1e-8, expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO);
     if (actualRiskBudget > expectedRiskBudget + 1e-8
       || actualRiskBudget < expectedRiskBudget - tolerance) {
@@ -173,6 +181,8 @@ function riskNormalizedMetrics(summary, context) {
       leverage,
       accountEquity,
       expectedRiskBudget,
+      priceRiskBudget,
+      feeRiskBudget,
       actualRiskBudget,
       expectedStakeAmount,
       stakeAmount,
