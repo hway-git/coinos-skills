@@ -192,11 +192,33 @@ function evaluateScalpPosition(evaluator: ScalpHistoricalEvaluator, candle: Cand
   return evaluator.evaluate({
     symbol: 'BTC/USDT:USDT',
     baseTimeframe: '1m',
-    decisionTime: 3 * minute,
+    decisionTime: candle.time + minute,
     sourceCandle: candle,
     candles: { '1m': [candle], '5m': [], '15m': [], '1h': [] },
   })
 }
+
+test('exits at the risk engine when a confirmed response closes back through entry', () => {
+  const cases: readonly { side: 'LONG' | 'SHORT'; response: Candle; failure: Candle }[] = [
+    {
+      side: 'LONG',
+      response: { time: 2 * minute, open: 100, high: 104, low: 99, close: 103, volume: 100 },
+      failure: { time: 3 * minute, open: 103, high: 103, low: 99, close: 99.5, volume: 100 },
+    },
+    {
+      side: 'SHORT',
+      response: { time: 2 * minute, open: 100, high: 101, low: 96, close: 97, volume: 100 },
+      failure: { time: 3 * minute, open: 97, high: 101, low: 97, close: 100.5, volume: 100 },
+    },
+  ]
+  for (const { side, response, failure } of cases) {
+    const evaluator = new ScalpHistoricalEvaluator(config)
+    primeScalpPosition(evaluator, side)
+    assert.deepEqual(evaluateScalpPosition(evaluator, response), [])
+    assert.equal(evaluator.checkpoint().position?.responseState, 'RESPONSE_OK')
+    assert.deepEqual(evaluateScalpPosition(evaluator, failure)[0]?.reasonCodes, ['RISK_ENGINE_EXIT'])
+  }
+})
 
 test('exits a Scalp when a closed execution candle wick touches its Target', () => {
   const cases: readonly { side: 'LONG' | 'SHORT'; candle: Candle }[] = [

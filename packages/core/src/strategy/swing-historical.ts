@@ -47,7 +47,14 @@ type OpenSwingPosition = {
   riskR: number
 }
 
-export const SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION = 'helix.swing-evaluator-checkpoint/v1' as const
+type SwingStructureBreak = {
+  thesisId: string
+  side: 'LONG' | 'SHORT'
+  level: number
+  occurredAt: number
+}
+
+export const SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION = 'helix.swing-evaluator-checkpoint/v2' as const
 
 export type SwingHistoricalEvaluatorCheckpoint = Readonly<{
   schemaVersion: typeof SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION
@@ -56,6 +63,7 @@ export type SwingHistoricalEvaluatorCheckpoint = Readonly<{
   thesis: SwingTradeThesis | null
   thesisLocation: SwingLocationCandidate | null
   thesisContext: StrategyHistoricalSwingRiskTraceEntry['swing']['context'] | null
+  structureBreak: SwingStructureBreak | null
   position: OpenSwingPosition | null
   lastDailyCandleTime: number
   lastLocationCandleTime: number
@@ -148,6 +156,7 @@ export class SwingHistoricalEvaluator {
   private thesis?: SwingTradeThesis
   private thesisLocation?: SwingLocationCandidate
   private thesisContext?: StrategyHistoricalSwingRiskTraceEntry['swing']['context']
+  private structureBreak?: SwingStructureBreak
   private position?: OpenSwingPosition
   private lastDailyCandleTime = -1
   private lastLocationCandleTime = -1
@@ -183,6 +192,7 @@ export class SwingHistoricalEvaluator {
       thesis: this.thesis ?? null,
       thesisLocation: this.thesisLocation ?? null,
       thesisContext: this.thesisContext ?? null,
+      structureBreak: this.structureBreak ?? null,
       position: this.position ?? null,
       lastDailyCandleTime: this.lastDailyCandleTime,
       lastLocationCandleTime: this.lastLocationCandleTime,
@@ -230,11 +240,21 @@ export class SwingHistoricalEvaluator {
     if (checkpoint.thesis && (!checkpoint.thesisLocation || !checkpoint.thesisContext)) {
       throw new Error('Swing evaluator checkpoint Thesis is missing its frozen Context')
     }
+    if (checkpoint.structureBreak && (
+      !checkpoint.thesis
+      || checkpoint.structureBreak.thesisId !== checkpoint.thesis.id
+      || (checkpoint.structureBreak.side !== 'LONG' && checkpoint.structureBreak.side !== 'SHORT')
+      || !Number.isFinite(checkpoint.structureBreak.level) || checkpoint.structureBreak.level <= 0
+      || !Number.isSafeInteger(checkpoint.structureBreak.occurredAt) || checkpoint.structureBreak.occurredAt < 0
+    )) {
+      throw new Error('Swing evaluator checkpoint structure break is invalid')
+    }
     this.context = structuredClone(checkpoint.context ?? undefined)
     this.locations = structuredClone([...checkpoint.locations])
     this.thesis = structuredClone(checkpoint.thesis ?? undefined)
     this.thesisLocation = structuredClone(checkpoint.thesisLocation ?? undefined)
     this.thesisContext = structuredClone(checkpoint.thesisContext ?? undefined)
+    this.structureBreak = structuredClone(checkpoint.structureBreak ?? undefined)
     this.position = structuredClone(checkpoint.position ?? undefined)
     this.lastDailyCandleTime = checkpointInteger(checkpoint.lastDailyCandleTime, 'lastDailyCandleTime', -1)
     this.lastLocationCandleTime = checkpointInteger(checkpoint.lastLocationCandleTime, 'lastLocationCandleTime', -1)
@@ -324,6 +344,7 @@ export class SwingHistoricalEvaluator {
       this.thesis = undefined
       this.thesisLocation = undefined
       this.thesisContext = undefined
+      this.structureBreak = undefined
     }
 
     const latestHour = latest(hourly)
@@ -379,6 +400,7 @@ export class SwingHistoricalEvaluator {
       state: this.context.state,
       bias: this.context.bias,
     }
+    this.structureBreak = undefined
     this.attempts = 0
     this.thesisRiskUsedR = 0
     this.createdTheses += 1
@@ -443,7 +465,17 @@ export class SwingHistoricalEvaluator {
     const rejection = side === 'LONG'
       ? candle.close > candle.open && candle.low <= location.boundaries.upper
       : candle.close < candle.open && candle.high >= location.boundaries.lower
-    const structureConfirmed = side === 'LONG' ? candle.close > previous.high : candle.close < previous.low
+    const structureConfirmedNow = side === 'LONG' ? candle.close > previous.high : candle.close < previous.low
+    const priorBreak = this.structureBreak?.thesisId === this.thesis.id
+      && this.structureBreak.side === side
+      ? this.structureBreak
+      : undefined
+    const breakRetestConfirmed = Boolean(priorBreak)
+      && decision.decisionTime > priorBreak!.occurredAt
+      && (side === 'LONG'
+        ? candle.low <= priorBreak!.level && candle.close > priorBreak!.level
+        : candle.high >= priorBreak!.level && candle.close < priorBreak!.level)
+    const structureConfirmed = structureConfirmedNow || Boolean(priorBreak)
     const followThrough = side === 'LONG' ? candle.close > previous.close : candle.close < previous.close
     const evidence: SwingStageEvidence = {
       locationAligned,
@@ -451,8 +483,20 @@ export class SwingHistoricalEvaluator {
       rejection,
       displacement,
       structureConfirmed,
-      breakRetestConfirmed: structureConfirmed && rejection,
+      breakRetestConfirmed,
       followThrough,
+    }
+    if (priorBreak && decision.decisionTime > priorBreak.occurredAt
+      && (side === 'LONG' ? candle.close <= priorBreak.level : candle.close >= priorBreak.level)) {
+      this.structureBreak = undefined
+    }
+    if (structureConfirmedNow) {
+      this.structureBreak = {
+        thesisId: this.thesis.id,
+        side,
+        level: side === 'LONG' ? previous.high : previous.low,
+        occurredAt: decision.decisionTime,
+      }
     }
     const stage = swingStageForEvidence(evidence)
     const entryPrice = candle.close
@@ -561,6 +605,7 @@ export class SwingHistoricalEvaluator {
       }).thesis
       this.thesisLocation = undefined
       this.thesisContext = undefined
+      this.structureBreak = undefined
     }
     const thesisId = position.thesis.id
     this.position = undefined
@@ -596,6 +641,7 @@ export class SwingHistoricalEvaluator {
     this.position = undefined
     this.thesisLocation = undefined
     this.thesisContext = undefined
+    this.structureBreak = undefined
     if (!position) return null
     this.exitedTrades += 1
     return {

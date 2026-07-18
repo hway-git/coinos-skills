@@ -407,6 +407,8 @@ export class ScalpHistoricalEvaluator {
     }
     const stopped = position.side === 'LONG' ? candle.low <= position.stop : candle.high >= position.stop
     const targeted = position.side === 'LONG' ? candle.high >= position.target : candle.low <= position.target
+    const responseFailedAfterConfirmation = position.responseState === 'RESPONSE_OK'
+      && (position.side === 'LONG' ? candle.close <= position.entryPrice : candle.close >= position.entryPrice)
     const time = evaluateScalpTimePolicy(this.config.time, {
       eventType: position.event.type,
       triggeredAt: position.triggeredAt,
@@ -416,6 +418,7 @@ export class ScalpHistoricalEvaluator {
     let reasonCode: string | null = null
     if (stopped) reasonCode = 'STOP_HIT'
     else if (targeted) reasonCode = 'TARGET_HIT'
+    else if (responseFailedAfterConfirmation) reasonCode = 'RISK_ENGINE_EXIT'
     else if (time.action === 'EXIT') {
       reasonCode = time.reasonCodes.includes('TIME_STOP') ? 'TIME_STOP' : 'RESPONSE_FAILURE_EXIT'
     }

@@ -280,6 +280,99 @@ test('derives Entry Stage from current execution Evidence rather than Thesis sco
   }), 'CONFIRMED')
 })
 
+test('requires a later held retest before classifying an Entry as CONFIRMED', () => {
+  const riskEntries: StrategyHistoricalSwingRiskTraceEntry[] = []
+  const evaluator = new SwingHistoricalEvaluator({
+    ...config,
+    execution: {
+      minRrByStage: { EARLY: 1, STANDARD: 100, CONFIRMED: 1 },
+      maxAttemptsPerThesis: 3,
+    },
+  }, (entry) => riskEntries.push(entry))
+  const source = location({ direction: 'LONG', boundaries: { lower: 100, upper: 101 } })
+  const candidate = createSwingTradeThesis({
+    id: 'ordered-retest-thesis',
+    symbol: 'BTC/USDT:USDT',
+    type: 'STRUCTURAL_REVERSAL',
+    direction: 'LONG',
+    contextId: 'context-1',
+    locationId: source.id,
+    score: 60,
+    invalidation: {
+      policyId: 'thesis_invalidation_v1', type: 'H4_CLOSE_BELOW_LEVEL', timeframe: '4h', level: 95,
+    },
+    expectedMove: { targetLocationId: 'target-location', target: 110 },
+    createdAt: 0,
+    expiresAt: 100 * fifteenMinutes,
+    reasonCodes: ['THESIS_CREATED'],
+  })
+  const active = transitionSwingTradeThesis(candidate, {
+    toState: 'ACTIVE', occurredAt: fifteenMinutes, reasonCodes: ['THESIS_ACTIVATED'],
+  }).thesis
+  const supported = appendSwingEvidence(active, {
+    id: 'ordered-retest-evidence',
+    thesisId: active.id,
+    type: 'DIRECTIONAL_PROGRESS',
+    time: 2 * fifteenMinutes,
+    direction: 'LONG',
+    effect: 'SUPPORTING',
+    scoreDelta: 8,
+    reasonCodes: ['EVIDENCE_STRENGTHENED'],
+    featureSnapshot: { body_ratio: 0.8 },
+  })
+  const eligible = transitionSwingTradeThesis(supported, {
+    toState: 'ENTRY_ELIGIBLE', occurredAt: 2 * fifteenMinutes, reasonCodes: ['ENTRY_ELIGIBLE'],
+  }).thesis
+  const internal = evaluator as unknown as {
+    thesis?: SwingTradeThesis
+    thesisLocation?: SwingLocationCandidate
+    thesisContext?: StrategyHistoricalSwingRiskTraceEntry['swing']['context']
+    evaluateEntry(decision: HistoricalDecisionContext, candles: readonly Candle[]): unknown
+  }
+  internal.thesis = eligible
+  internal.thesisLocation = source
+  internal.thesisContext = { id: 'context-1', state: 'RANGE', bias: 'NEUTRAL' }
+
+  const prefix = Array.from({ length: 13 }, (_, index): Candle => ({
+    time: index * fifteenMinutes, open: 100, high: 101, low: 99, close: 100, volume: 100,
+  }))
+  const previous: Candle = {
+    time: 13 * fifteenMinutes, open: 100, high: 101, low: 99, close: 100, volume: 100,
+  }
+  const structuralBreak: Candle = {
+    time: 14 * fifteenMinutes, open: 100, high: 102.5, low: 99.5, close: 102, volume: 100,
+  }
+  const breakDecision: HistoricalDecisionContext = {
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '15m',
+    decisionTime: structuralBreak.time + fifteenMinutes,
+    sourceCandle: structuralBreak,
+    candles: { '15m': [...prefix, previous, structuralBreak], '1h': [], '4h': [], '1d': [] },
+  }
+  assert.equal(internal.evaluateEntry(breakDecision, breakDecision.candles['15m']!), null)
+  assert.deepEqual(evaluator.checkpoint().structureBreak, {
+    thesisId: eligible.id,
+    side: 'LONG',
+    level: previous.high,
+    occurredAt: breakDecision.decisionTime,
+  })
+
+  const heldRetest: Candle = {
+    time: 15 * fifteenMinutes, open: 101, high: 103, low: 100.8, close: 102.6, volume: 100,
+  }
+  const retestDecision: HistoricalDecisionContext = {
+    ...breakDecision,
+    decisionTime: heldRetest.time + fifteenMinutes,
+    sourceCandle: heldRetest,
+    candles: { ...breakDecision.candles, '15m': [...prefix, previous, structuralBreak, heldRetest] },
+  }
+  const entry = internal.evaluateEntry(retestDecision, retestDecision.candles['15m']!) as {
+    action: string
+  } | null
+  assert.equal(entry?.action, 'ENTER')
+  assert.equal(riskEntries[0]?.swing.stage, 'CONFIRMED')
+})
+
 test('invalidates an active Thesis on its closed 4H condition before any position exists', () => {
   const evaluator = new SwingHistoricalEvaluator(config)
   const candidate = createSwingTradeThesis({
@@ -524,7 +617,7 @@ test('freezes creation-time Context through ENTER and clears it when the Thesis 
   assert.deepEqual(riskEntries[0]!.swing.context, {
     id: 'context-at-creation', state: 'RANGE', bias: 'NEUTRAL',
   })
-  assert.equal(riskEntries[0]!.swing.stage, 'CONFIRMED')
+  assert.equal(riskEntries[0]!.swing.stage, 'STANDARD')
 
   const exitCandle: Candle = {
     time: entryDecisionTime, open: 101.2, high: 111.2, low: 101, close: 111, volume: 100,
