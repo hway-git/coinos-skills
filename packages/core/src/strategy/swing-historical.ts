@@ -121,6 +121,21 @@ function rejectionCounts(rejections: Map<string, Set<string>>) {
   return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)))
 }
 
+function rejectionClusters(rejections: Map<string, Set<string>>) {
+  const clusters = new Map<string, { reasonCodes: string[]; theses: number }>()
+  for (const reasons of rejections.values()) {
+    const reasonCodes = [...reasons].sort()
+    const key = JSON.stringify(reasonCodes)
+    const cluster = clusters.get(key) ?? { reasonCodes, theses: 0 }
+    cluster.theses += 1
+    clusters.set(key, cluster)
+  }
+  return [...clusters.values()].sort((left, right) => (
+    right.theses - left.theses
+    || JSON.stringify(left.reasonCodes).localeCompare(JSON.stringify(right.reasonCodes))
+  ))
+}
+
 function stageRejectionMap() {
   return new Map<SwingExecutionStage, Map<string, Set<string>>>(
     EXECUTION_STAGES.map((stage) => [stage, new Map<string, Set<string>>()]),
@@ -344,6 +359,12 @@ export class SwingHistoricalEvaluator {
           rejectionCounts(this.entryGateRejectionsByStage.get(stage)!),
         ]),
       ) as Record<SwingExecutionStage, Record<string, number>>,
+      entryGateRejectionClustersByStage: Object.fromEntries(
+        EXECUTION_STAGES.map((stage) => [
+          stage,
+          rejectionClusters(this.entryGateRejectionsByStage.get(stage)!),
+        ]),
+      ) as Record<SwingExecutionStage, Array<{ reasonCodes: string[]; theses: number }>>,
     }
   }
 
