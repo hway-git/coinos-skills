@@ -204,7 +204,8 @@ function normalizeWalkForwardPolicy(value) {
     throw new Error('walkForwardPolicy.policyPath is invalid');
   }
   const plan = exactRecord(policy.plan, 'walkForwardPolicy.plan', [
-    'foldCount', 'entryWindowMs', 'observationTailMs', 'riskUnitRatio', 'executionScenarios',
+    'foldCount', 'entryWindowMs', 'observationTailMs', 'riskUnitRatio', 'referenceAccountEquity',
+    'executionScenarios',
   ]);
   const executionScenarios = normalizeScenarios(plan.executionScenarios);
   const gates = exactRecord(policy.gates, 'walkForwardPolicy.gates', [
@@ -242,6 +243,11 @@ function normalizeWalkForwardPolicy(value) {
       entryWindowMs: policyInteger(plan.entryWindowMs, 'walkForwardPolicy.plan.entryWindowMs', 1),
       observationTailMs: policyInteger(plan.observationTailMs, 'walkForwardPolicy.plan.observationTailMs', 1),
       riskUnitRatio: policyNumber(plan.riskUnitRatio, 'walkForwardPolicy.plan.riskUnitRatio', Number.MIN_VALUE, 1),
+      referenceAccountEquity: policyNumber(
+        plan.referenceAccountEquity,
+        'walkForwardPolicy.plan.referenceAccountEquity',
+        Number.MIN_VALUE,
+      ),
       executionScenarios,
     },
     gates: {
@@ -1042,7 +1048,9 @@ function normalizeExecutionEvidence(value, name, plan, fold) {
     || executionProfile.strategy !== 'HelixSignalStrategy'
     || executionProfile.timeframe !== plan.baseTimeframe
     || !isDeepStrictEqual(executionProfile.pairs, [plan.sourceDataset.source.symbol])
-    || executionProfile.fee !== fee) {
+    || executionProfile.fee !== fee
+    || (plan.walkForwardPolicy
+      && executionProfile.dryRunWallet !== plan.walkForwardPolicy.plan.referenceAccountEquity)) {
     throw new Error(`${name}.executionProfile does not match the plan scenario`);
   }
   const executionProfileHash = hash(evidence.executionProfileHash, `${name}.executionProfileHash`);
@@ -1365,8 +1373,16 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
             - Math.max(1e-8, observation.expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO)
         )),
       })),
-      policy ? { riskUnitRatio: policy.plan.riskUnitRatio, valid: true } : { policy: 'required' },
-      ['walkForwardPolicy.plan.riskUnitRatio', 'folds.*.executionEvidence.*.metrics.riskNormalized.observations'],
+      policy ? {
+        riskUnitRatio: policy.plan.riskUnitRatio,
+        referenceAccountEquity: policy.plan.referenceAccountEquity,
+        valid: true,
+      } : { policy: 'required' },
+      [
+        'walkForwardPolicy.plan.riskUnitRatio',
+        'walkForwardPolicy.plan.referenceAccountEquity',
+        'folds.*.executionEvidence.*.metrics.riskNormalized.observations',
+      ],
     ),
     gateCheck(
       'VERSIONED_GATE_POLICY_PRESENT',
@@ -1624,7 +1640,8 @@ export function verifyWalkForwardReport(value, bundle = null, reportDirectory = 
 
 export function loadPromotableWalkForwardReport(reportFile, artifact) {
   const file = resolve(text(reportFile, 'walk_forward_report'));
-  const report = verifyWalkForwardReport(readJson(file, 'walk-forward report'), null, dirname(file));
+  const reportDirectory = dirname(file);
+  const report = verifyWalkForwardReport(readJson(file, 'walk-forward report'), null, reportDirectory);
   const expectedName = `walk-forward-report-${report.reportHash.replace(':', '-')}.json`;
   if (basename(file) !== expectedName) throw new Error(`walk-forward report file must equal ${expectedName}`);
   if (!report.gate.ok) throw new Error(`walk-forward report ${report.reportHash} did not pass its versioned policy`);
@@ -1641,5 +1658,11 @@ export function loadPromotableWalkForwardReport(reportFile, artifact) {
   }
   const policyCheck = report.gate.checks.find(({ code }) => code === 'VERSIONED_GATE_POLICY_PRESENT');
   if (!policyCheck?.ok) throw new Error('walk-forward report has no accepted versioned policy');
-  return { file, report };
+  const coreEvidence = normalizeCoreEvidence(report.coreEvidence, report.runHash);
+  const bundle = loadWalkForwardBundle(
+    resolve(reportDirectory, coreEvidence.runFile),
+    resolve(reportDirectory, coreEvidence.sourceDatasetFile),
+  );
+  if (!bundle.plan.walkForwardPolicy) throw new Error('walk-forward report archive has no versioned policy');
+  return { file, report, walkForwardPolicy: bundle.plan.walkForwardPolicy };
 }

@@ -258,10 +258,16 @@ function safeClone(value) {
   return value === undefined ? undefined : structuredClone(value);
 }
 
-export function createSecretFreeBacktestConfig(config, { timeframe, pairs }) {
+export function createSecretFreeBacktestConfig(config, { timeframe, pairs, dryRunWallet = null }) {
   const identity = executionConfigIdentity(config);
   if (!identity.exchange || !identity.tradingMode || !identity.marginMode || !identity.stakeCurrency) {
     throw new Error('Freqtrade config is missing required Signal backtest execution fields');
+  }
+  const resolvedDryRunWallet = dryRunWallet === null
+    ? identity.dryRunWallet
+    : configNumber(dryRunWallet);
+  if (resolvedDryRunWallet === null || resolvedDryRunWallet <= 0) {
+    throw new Error('Signal backtest dry-run wallet must be positive');
   }
   if (identity.maxOpenTrades === null || identity.dryRunWallet === null) {
     throw new Error('Freqtrade config is missing max_open_trades or dry_run_wallet');
@@ -278,7 +284,7 @@ export function createSecretFreeBacktestConfig(config, { timeframe, pairs }) {
     // leverage, rather than a reduced wallet slice, limits the stake.
     tradable_balance_ratio: 1,
     dry_run: true,
-    dry_run_wallet: identity.dryRunWallet,
+    dry_run_wallet: resolvedDryRunWallet,
     entry_pricing: safeClone(identity.entryPricing),
     exit_pricing: safeClone(identity.exitPricing),
     exchange: {

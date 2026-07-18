@@ -383,7 +383,7 @@ setInterval(() => {}, 1000);
             maxOpenTrades: 1,
             stakeCurrency: 'USDT',
             stakeAmount: 'unlimited',
-            tradableBalanceRatio: 0.5,
+            tradableBalanceRatio: 1,
             dryRunWallet: 1000,
             fee: null,
             entryPricing: { price_side: 'same', use_order_book: true, order_book_top: 1 },

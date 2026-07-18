@@ -135,6 +135,7 @@ function parseWalkForwardPolicy(
     'entry_window_ms',
     'observation_tail_ms',
     'risk_unit_ratio',
+    'reference_account_equity',
     'execution_scenarios',
   ])
   if (!Array.isArray(plan.execution_scenarios) || plan.execution_scenarios.length < 2) {
@@ -198,6 +199,11 @@ function parseWalkForwardPolicy(
       entryWindowMs: integer(plan.entry_window_ms, `${policyPath}.plan.entry_window_ms`, 1),
       observationTailMs: integer(plan.observation_tail_ms, `${policyPath}.plan.observation_tail_ms`, 1),
       riskUnitRatio: finite(plan.risk_unit_ratio, `${policyPath}.plan.risk_unit_ratio`, Number.MIN_VALUE, 1),
+      referenceAccountEquity: finite(
+        plan.reference_account_equity,
+        `${policyPath}.plan.reference_account_equity`,
+        Number.MIN_VALUE,
+      ),
       executionScenarios,
     },
     gates: {

@@ -146,6 +146,7 @@ function policyFixture(): StrategyWalkForwardPolicy {
       entryWindowMs: 2 * day,
       observationTailMs: day,
       riskUnitRatio: 0.01,
+      referenceAccountEquity: 10_000,
       executionScenarios: [
         { id: 'base', fee: 0.0005 },
         { id: 'stressed', fee: 0.001 },

@@ -993,6 +993,14 @@ function configureWalkForwardReport(config, evidence) {
   config.helix_signal_walk_forward_report_hash = evidence.report.reportHash;
 }
 
+function walkForwardReferenceAccountEquity(evidence) {
+  const value = evidence?.walkForwardPolicy?.plan?.referenceAccountEquity;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new Error('walk-forward report has no valid reference account equity.');
+  }
+  return value;
+}
+
 function requireStoredWalkForwardReport(config, artifact) {
   const file = config?.helix_signal_walk_forward_report_path;
   const reportHash = config?.helix_signal_walk_forward_report_hash;
@@ -2023,7 +2031,7 @@ function generateHostConfig(exchangeInfo, apiPassword, params = {}) {
     stake_amount: params.stake_amount || 'unlimited',
     tradable_balance_ratio: params.tradable_balance_ratio ?? (params.helix_signal_artifact_path ? 1 : 0.5),
     dry_run: params.dry_run !== false,
-    dry_run_wallet: 1000,
+    dry_run_wallet: params.dry_run_wallet ?? 1000,
     cancel_open_orders_on_exit: false,
     exchange: {
       name: exchangeInfo.name,
@@ -2249,6 +2257,7 @@ const actions = {
         if (signalArtifact) {
           next.timeframe = signalArtifact.baseTimeframe;
           next.tradable_balance_ratio = 1;
+          next.dry_run_wallet = walkForwardReferenceAccountEquity(walkForwardEvidence);
           next.helix_signal_artifact_path = dockerCliPath(archivedArtifact.hashFile);
           next.helix_signal_artifact_hash = signalArtifact.artifactHash;
           if (forwardDeployment) configureForwardRuntime(next, forwardDeployment, forwardPaths);
@@ -2483,6 +2492,9 @@ const actions = {
         const config = generateHostConfig(exchangeInfo, apiPassword, {
           ...params,
           dry_run: targetDryRun,
+          ...(signalArtifact ? {
+            dry_run_wallet: walkForwardReferenceAccountEquity(walkForwardEvidence),
+          } : {}),
           max_open_trades: maxOpenTrades,
           ...(signalArtifact ? {
             timeframe: signalArtifact.baseTimeframe,
@@ -3011,6 +3023,15 @@ const actions = {
     if (!signalArtifact && (params.historical_risk_trace != null || params.risk_unit_ratio != null)) {
       throw new Error('historical_risk_trace and risk_unit_ratio require a signal_artifact backtest.');
     }
+    const accountEquity = signalArtifact && params.account_equity != null
+      ? Number(params.account_equity)
+      : null;
+    if (accountEquity !== null && (!Number.isFinite(accountEquity) || accountEquity <= 0)) {
+      throw new Error('account_equity must be a positive number.');
+    }
+    if (!signalArtifact && params.account_equity != null) {
+      throw new Error('account_equity requires a signal_artifact backtest.');
+    }
     const archivedRiskTrace = signalArtifact
       ? archiveHistoricalRiskTrace(params.historical_risk_trace, signalArtifact)
       : null;
@@ -3044,7 +3065,11 @@ const actions = {
     }
     const timerange = signalArtifact ? '' : params.timerange || '';
     const safeBacktestConfig = signalArtifact
-      ? createSecretFreeBacktestConfig(backtestConfig, { timeframe, pairs: pairList })
+      ? createSecretFreeBacktestConfig(backtestConfig, {
+          timeframe,
+          pairs: pairList,
+          dryRunWallet: accountEquity,
+        })
       : null;
     const backtestConfigPath = safeBacktestConfig
       ? resolve(USER_DATA, 'helix', 'backtest-runtime', `${process.pid}-${randomBytes(8).toString('hex')}.json`)
@@ -3238,6 +3263,7 @@ const actions = {
           signal_artifact: resolve(bundle.directory, fold.run.executionArtifactFile),
           historical_risk_trace: resolve(bundle.directory, fold.run.executionRiskTraceFile),
           risk_unit_ratio: bundle.plan.walkForwardPolicy?.plan.riskUnitRatio,
+          account_equity: bundle.plan.walkForwardPolicy?.plan.referenceAccountEquity,
           market_dataset: resolve(bundle.directory, fold.run.datasetFile),
           fee: scenario.fee,
         });

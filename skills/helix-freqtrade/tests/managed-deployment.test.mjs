@@ -194,6 +194,8 @@ async function setupManagedDeployment(t, {
     initial_state: initialEntryState,
     timeframe: '5m',
     max_open_trades: 1,
+    tradable_balance_ratio: 1,
+    dry_run_wallet: 1000,
     exchange: { name: 'okx', pair_whitelist: ['ETH/USDT:USDT'] },
   };
   const initialConfigContent = `${JSON.stringify(initialConfig, null, 2)}\n`;
@@ -291,8 +293,8 @@ async function setupManagedDeployment(t, {
           maxOpenTrades: 1,
           stakeCurrency: '',
           stakeAmount: null,
-          tradableBalanceRatio: null,
-          dryRunWallet: null,
+          tradableBalanceRatio: 1,
+          dryRunWallet: 1000,
           fee: null,
           entryPricing: null,
           exitPricing: null,

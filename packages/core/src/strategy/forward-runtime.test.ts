@@ -149,6 +149,7 @@ function snapshot(): StrategyRepositorySnapshot {
           entryWindowMs: 7 * 24 * 60 * minute,
           observationTailMs: 24 * 60 * minute,
           riskUnitRatio: 0.01,
+          referenceAccountEquity: 10_000,
           executionScenarios: [{ id: 'base', fee: 0.0005 }, { id: 'stressed', fee: 0.001 }],
         },
         gates: {

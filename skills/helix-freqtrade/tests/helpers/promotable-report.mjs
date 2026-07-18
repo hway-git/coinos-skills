@@ -162,6 +162,7 @@ export async function createPromotableWalkForwardReport(root, artifact) {
         entryWindowMs: 2 * minute,
         observationTailMs: 2 * minute,
         riskUnitRatio: 0.01,
+        referenceAccountEquity: 1000,
         executionScenarios,
       },
       gates: {

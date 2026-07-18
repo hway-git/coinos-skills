@@ -80,8 +80,15 @@ test('builds a Signal backtest config and child environment without sentinel sec
   sourceConfig.exchange.ccxt_config = { proxies: { http: proxyUrl, https: proxyUrl } };
   sourceConfig.exchange.ccxt_async_config = { aiohttp_proxy: proxyUrl };
   const config = createSecretFreeBacktestConfig(sourceConfig, {
-    timeframe: '1m', pairs: ['BTC/USDT:USDT'],
+    timeframe: '1m', pairs: ['BTC/USDT:USDT'], dryRunWallet: 10_000,
   });
+  assert.equal(config.dry_run_wallet, 10_000);
+  assert.throws(
+    () => createSecretFreeBacktestConfig(sourceConfig, {
+      timeframe: '1m', pairs: ['BTC/USDT:USDT'], dryRunWallet: 0,
+    }),
+    /dry-run wallet must be positive/,
+  );
   const environment = secretFreeBacktestEnvironment({
     PATH: '/bin',
     HTTPS_PROXY: proxyUrl,

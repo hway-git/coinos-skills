@@ -12,6 +12,8 @@ import { reconcileSignalBacktest } from '../lib/backtest-reconciliation.mjs';
 import {
   createExecutionRuntimeEvidence,
   executionConfigIdentity,
+  executionConfigIdentityHash,
+  executionProfileHash,
   signalExecutionProfile,
 } from '../lib/execution-runtime-evidence.mjs';
 import {
@@ -95,6 +97,7 @@ function walkForwardPolicyFixture({ entryWindowMs, observationTailMs, executionS
       entryWindowMs,
       observationTailMs,
       riskUnitRatio: 0.01,
+      referenceAccountEquity: 1000,
       executionScenarios: structuredClone(executionScenarios),
     },
     gates: {
@@ -461,8 +464,9 @@ function backtestResultFixture(plan, fold, scenario, index) {
     : null;
   const risk = fold.executionRiskTrace.entries[0];
   const riskUnitRatio = plan.walkForwardPolicy?.plan.riskUnitRatio ?? 0.01;
+  const accountEquity = plan.walkForwardPolicy?.plan.referenceAccountEquity ?? 1000;
   const stakeAmount = tradeCount
-    ? (1000 * riskUnitRatio * risk.riskR)
+    ? (accountEquity * riskUnitRatio * risk.riskR)
       / (Math.abs(openRate - risk.initialStop) / openRate)
     : null;
   const profitAbs = tradeCount ? stakeAmount * profitRatio : 0;
@@ -515,7 +519,8 @@ function executionConfig(plan) {
   return {
     trading_mode: 'futures', margin_mode: 'isolated', max_open_trades: 2,
     stake_currency: 'USDT', stake_amount: 'unlimited', tradable_balance_ratio: 0.5,
-    dry_run: true, dry_run_wallet: 1000,
+    dry_run: true,
+    dry_run_wallet: plan.walkForwardPolicy?.plan.referenceAccountEquity ?? 1000,
     entry_pricing: { price_side: 'same', use_order_book: true, order_book_top: 1 },
     exit_pricing: { price_side: 'same', use_order_book: true, order_book_top: 1 },
     exchange: { name: plan.sourceDataset.source.provider },
@@ -575,7 +580,7 @@ function executionEvidence(plan, fold, scenario, index) {
       riskTrace: fold.executionRiskTrace,
       marketDataset: fold.dataset,
       riskUnitRatio: plan.walkForwardPolicy?.plan.riskUnitRatio ?? 0.01,
-      accountEquity: 1000,
+      accountEquity: plan.walkForwardPolicy?.plan.referenceAccountEquity ?? 1000,
     }),
   };
 }
@@ -743,6 +748,18 @@ test('rebuilds every versioned policy gate from archived trade-level R evidence'
     (scenario, index) => executionEvidence(bundle.plan, fold, scenario, index),
   ));
   const coreEvidence = await writeReportArchives(directory, bundle, evidence);
+  const wrongEquity = structuredClone(evidence);
+  const wrongConfig = executionConfig(bundle.plan);
+  wrongConfig.dry_run_wallet = 2000;
+  const wrongConfigHash = executionConfigIdentityHash(executionConfigIdentity(wrongConfig));
+  wrongEquity[0][0].configHash = wrongConfigHash;
+  wrongEquity[0][0].executionProfile.configHash = wrongConfigHash;
+  wrongEquity[0][0].executionProfile.dryRunWallet = 2000;
+  wrongEquity[0][0].executionProfileHash = executionProfileHash(wrongEquity[0][0].executionProfile);
+  assert.throws(
+    () => createWalkForwardReport(bundle, wrongEquity, coreEvidence),
+    /executionProfile does not match the plan scenario/,
+  );
   const report = createWalkForwardReport(bundle, evidence, coreEvidence);
   assert.equal(report.gate.ok, true);
   assert.equal(report.gate.checks.find(({ code }) => code === 'VERSIONED_GATE_POLICY_PRESENT').ok, true);

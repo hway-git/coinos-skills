@@ -26,6 +26,7 @@ export type StrategyWalkForwardPolicy = {
     entryWindowMs: number
     observationTailMs: number
     riskUnitRatio: number
+    referenceAccountEquity: number
     executionScenarios: StrategyWalkForwardExecutionScenario[]
   }
   gates: {
