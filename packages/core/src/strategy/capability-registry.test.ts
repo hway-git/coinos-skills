@@ -20,7 +20,9 @@ test('reports Engine capabilities from the exact current Engine registry', () =>
       'evidence_accumulation_v1',
       'staged_execution_v1',
     ],
-    capabilityConfigurations: {},
+    capabilityConfigurations: {
+      trade_thesis_v1: { max_location_distance_atr: 2 },
+    },
     reasonCodes: ['TEST_REASON'],
   }
 
@@ -101,6 +103,38 @@ test('requires the versioned Swing Stop buffer in staged execution configuration
   }, 'engine-commit-001')
   assert.equal(valid.compatible, true)
   assert.deepEqual(valid.invalidConfiguration, [])
+})
+
+test('requires a positive versioned Swing Thesis Location distance', () => {
+  const base: StrategyManifestIdentity = {
+    schemaVersion: 'helix.strategy/v1',
+    id: 'helix_swing_hunter',
+    name: 'Helix Swing Hunter',
+    family: 'swing',
+    version: '1.0.5',
+    lifecycle: 'proposal',
+    objectModel: 'TRADE_THESIS',
+    timeframes: [{ role: 'execution', timeframe: '15m' }],
+    manifestPath: 'strategies/swing/strategy.yaml',
+    configHash: `sha256:${'d'.repeat(64)}`,
+    requiredEngineCapabilities: ['trade_thesis_v1'],
+    capabilityConfigurations: {},
+    reasonCodes: ['THESIS_CREATED'],
+  }
+  const missing = evaluateStrategyEngineCompatibility(base, 'engine-commit-001')
+  assert.deepEqual(missing.unconfigured, ['trade_thesis_v1'])
+
+  const invalid = evaluateStrategyEngineCompatibility({
+    ...base,
+    capabilityConfigurations: { trade_thesis_v1: { max_location_distance_atr: 0 } },
+  }, 'engine-commit-001')
+  assert.deepEqual(invalid.invalidConfiguration, ['trade_thesis_v1'])
+
+  const valid = evaluateStrategyEngineCompatibility({
+    ...base,
+    capabilityConfigurations: { trade_thesis_v1: { max_location_distance_atr: 2 } },
+  }, 'engine-commit-001')
+  assert.equal(valid.compatible, true)
 })
 
 test('requires exact configuration for all four high-level context capabilities', () => {

@@ -54,6 +54,9 @@ function snapshot(): StrategyRepositorySnapshot {
       mean_reversion_distance_atr: 1, max_test_count: 3,
       max_age_bars: 20, min_location_score: 40,
     },
+    trade_thesis_v1: {
+      max_location_distance_atr: 2,
+    },
     staged_execution_v1: {
       min_rr_by_stage: { EARLY: 1, STANDARD: 1, CONFIRMED: 1 },
       max_attempts_per_thesis: 2,

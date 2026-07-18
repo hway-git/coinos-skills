@@ -9,6 +9,7 @@ import type {
 } from '@helix/contracts/swing'
 import { createStrategyHistoricalDataset } from './historical-dataset'
 import { runHistoricalStrategy, type HistoricalDecisionContext } from './historical-runner'
+import { average, trueRanges } from './market-structure'
 import {
   SwingHistoricalEvaluator,
   selectSwingStructuralTarget,
@@ -68,6 +69,7 @@ const config: SwingHistoricalEvaluatorConfig = {
     reactionDistanceAtr: 0.3, reactionBars: 4, meanReversionDistanceAtr: 1.5,
     maxTestCount: 20, maxAgeBars: 90, minLocationScore: 40,
   },
+  thesis: { maxLocationDistanceAtr: 2 },
   execution: {
     minRrByStage: { EARLY: 1, STANDARD: 1.2, CONFIRMED: 1.5 },
     maxAttemptsPerThesis: 3,
@@ -83,6 +85,16 @@ test('requires a positive configured Swing Stop buffer', () => {
       execution: { ...config.execution, stopBufferAtr: 0 },
     }),
     /config.execution.stopBufferAtr must be positive/,
+  )
+})
+
+test('requires a positive configured Swing Thesis Location distance', () => {
+  assert.throws(
+    () => new SwingHistoricalEvaluator({
+      ...config,
+      thesis: { maxLocationDistanceAtr: 0 },
+    }),
+    /config.thesis.maxLocationDistanceAtr must be positive/,
   )
 })
 
@@ -277,6 +289,79 @@ test('freezes the nearest opposing structural Location as Expected Move', () => 
   assert.equal(selectSwingStructuralTarget(source, [source]), null)
 })
 
+test('creates a Thesis from the highest-scored Location inside the configured 4H ATR distance', () => {
+  const evaluator = new SwingHistoricalEvaluator(config)
+  const fourHourly = baseCandles(config.location.atrPeriod + 1)
+  const current = fourHourly.at(-1)!
+  const atr = average(trueRanges(fourHourly).slice(-config.location.atrPeriod))
+  const near = location({
+    id: 'near-source',
+    score: 70,
+    boundaries: { lower: current.close - atr * 2.2, upper: current.close - atr * 2 },
+  })
+  const far = location({
+    id: 'far-higher-score',
+    score: 90,
+    boundaries: { lower: current.close - atr * 4.2, upper: current.close - atr * 4 },
+  })
+  const target = location({
+    id: 'target-location',
+    score: 60,
+    direction: 'SHORT',
+    boundaries: { lower: current.close + atr * 4, upper: current.close + atr * 4.2 },
+  })
+  const internal = evaluator as unknown as {
+    context?: SwingDailyMarketContextDecision
+    locations: SwingLocationCandidate[]
+    thesis?: SwingTradeThesis
+    thesisLocation?: SwingLocationCandidate
+    createThesis(decision: HistoricalDecisionContext, candles: readonly Candle[]): void
+  }
+  internal.context = {
+    context: {
+      id: 'context-1', symbol: 'BTC/USDT:USDT', daily: 'RANGE', h4: 'RANGE',
+      reasonCodes: ['DAILY_CONTEXT_RANGE'], observedAt: 0,
+    },
+    state: 'RANGE',
+    bias: 'NEUTRAL',
+    score: 70,
+    reasonCodes: ['DAILY_CONTEXT_RANGE'],
+    featureSnapshot: {},
+  }
+  internal.locations = [far, near, target]
+  const decisionTime = current.time + fifteenMinutes
+  internal.createThesis({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '15m',
+    decisionTime,
+    sourceCandle: current,
+    candles: { '15m': [], '1h': [], '4h': fourHourly, '1d': [] },
+  }, fourHourly)
+
+  assert.equal(internal.thesisLocation?.id, near.id)
+  assert.equal(internal.thesis?.locationId, near.id)
+  assert.equal(internal.thesis?.expectedMove.targetLocationId, target.id)
+
+  const blocked = new SwingHistoricalEvaluator(config)
+  const blockedInternal = blocked as unknown as {
+    context?: SwingDailyMarketContextDecision
+    locations: SwingLocationCandidate[]
+    thesis?: SwingTradeThesis
+    createThesis(decision: HistoricalDecisionContext, candles: readonly Candle[]): void
+  }
+  blockedInternal.context = internal.context
+  blockedInternal.locations = [far, target]
+  blockedInternal.createThesis({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '15m',
+    decisionTime,
+    sourceCandle: current,
+    candles: { '15m': [], '1h': [], '4h': fourHourly, '1d': [] },
+  }, fourHourly)
+  assert.equal(blockedInternal.thesis, undefined)
+  assert.equal(blocked.statistics().createdTheses, 0)
+})
+
 test('derives Entry Stage from current execution Evidence rather than Thesis score', () => {
   const base = {
     locationAligned: true,
@@ -442,7 +527,10 @@ test('invalidates an active Thesis on its closed 4H condition before any positio
 })
 
 test('reports missing Expected Move decisions without creating a Thesis', () => {
-  const evaluator = new SwingHistoricalEvaluator(config)
+  const evaluator = new SwingHistoricalEvaluator({
+    ...config,
+    thesis: { maxLocationDistanceAtr: Number.MAX_SAFE_INTEGER },
+  })
   const fourHourly = baseCandles(config.location.atrPeriod + 1)
   const decisionTime = fourHourly.at(-1)!.time + fifteenMinutes
   const internal = evaluator as unknown as {
@@ -600,7 +688,10 @@ test('records LOCATION_MISSING only for an entry-eligible Thesis', () => {
 
 test('freezes creation-time Context through ENTER and clears it when the Thesis closes', () => {
   const riskEntries: StrategyHistoricalSwingRiskTraceEntry[] = []
-  const evaluator = new SwingHistoricalEvaluator(config, (entry) => riskEntries.push(entry))
+  const evaluator = new SwingHistoricalEvaluator({
+    ...config,
+    thesis: { maxLocationDistanceAtr: Number.MAX_SAFE_INTEGER },
+  }, (entry) => riskEntries.push(entry))
   const source = location({ score: 100 })
   const target = location({
     id: 'target-location',
