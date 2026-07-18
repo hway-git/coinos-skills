@@ -275,6 +275,9 @@ async function setupManagedDeployment(t, {
         freqtradeVersion: 'freqtrade test',
         configHash: sha256(initialConfigContent),
         artifactFileHash: sha256(artifactContent),
+        riskTraceHash: sha256('managed-risk-trace'),
+        riskTraceFileHash: sha256('managed-risk-trace-file'),
+        riskUnitRatio: 0.01,
         fee: null,
         dataFormatOhlcv: 'json',
         executionProfile: {

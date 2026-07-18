@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +14,6 @@ from helix_signal_artifact import (
     COMMIT_PATTERN,
     HASH_PATTERN,
     REASON_CODE_PATTERN,
-    _canonical_json,
     _exact_record,
     _integer,
     _reject_duplicate_keys,
@@ -22,7 +23,7 @@ from helix_signal_artifact import (
 
 
 FORWARD_SCHEMA_VERSION = "helix.forward-deployment/v1"
-BATCH_SCHEMA_VERSION = "helix.signal-batch/v1"
+BATCH_SCHEMA_VERSION = "helix.signal-batch/v2"
 FORWARD_FIELDS = (
     "schemaVersion", "deploymentId", "mode", "activatedAt", "provider",
     "instrumentId", "symbol", "strategy", "deploymentHash",
@@ -36,7 +37,7 @@ BATCH_FIELDS = (
     "schemaVersion", "deploymentHash", "batchSequence", "previousBatchHash",
     "previousDecisionStateHash", "evaluatorStateHash", "decisionStateHash",
     "identity", "strategyLifecycle", "objectModel", "symbol", "baseTimeframe",
-    "positionBefore", "positionAfter", "signal", "batchHash",
+    "positionBefore", "positionAfter", "riskIntent", "signal", "batchHash",
 )
 BATCH_PAYLOAD_FIELDS = BATCH_FIELDS[:-1]
 IDENTITY_FIELDS = (
@@ -52,14 +53,62 @@ DRY_RUN_LIFECYCLES = {"shadow", "canary", "production"}
 OBJECT_MODELS = {"PRICE_EVENT", "TRADE_THESIS"}
 SIDES = {"LONG", "SHORT"}
 ACTIONS = {"ENTER", "EXIT"}
+RISK_INTENT_FIELDS = (
+    "entryPrice", "initialStop", "initialTarget", "riskDistance", "riskR", "riskUnitRatio",
+)
 
 
 class SignalBatchError(ValueError):
     pass
 
 
+def _canonical_number(value: int | float) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise SignalBatchError("signal batch canonical numbers must be finite")
+    if isinstance(value, int):
+        _integer(value, "canonical number")
+        return str(value)
+    if value == 0:
+        return "0"
+    rendered = repr(value).lower()
+    magnitude = abs(value)
+    if 1e-6 <= magnitude < 1e21:
+        rendered = format(Decimal(rendered), "f")
+        if "." in rendered:
+            rendered = rendered.rstrip("0").rstrip(".")
+        return rendered
+    if "e" not in rendered:
+        return rendered[:-2] if rendered.endswith(".0") else rendered
+    mantissa, exponent = rendered.split("e", 1)
+    if mantissa.endswith(".0"):
+        mantissa = mantissa[:-2]
+    normalized_exponent = int(exponent)
+    return f"{mantissa}e{'+' if normalized_exponent >= 0 else ''}{normalized_exponent}"
+
+
+def _canonical_batch_json(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, (int, float)):
+        return _canonical_number(value)
+    if isinstance(value, list):
+        return "[" + ",".join(_canonical_batch_json(item) for item in value) + "]"
+    if isinstance(value, dict):
+        entries = (
+            json.dumps(key, ensure_ascii=False, separators=(",", ":"))
+            + ":" + _canonical_batch_json(value[key])
+            for key in sorted(value)
+        )
+        return "{" + ",".join(entries) + "}"
+    raise SignalBatchError(f"unsupported signal batch canonical value {type(value).__name__}")
+
+
 def _hash(payload: dict[str, Any]) -> str:
-    return "sha256:" + hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    return "sha256:" + hashlib.sha256(_canonical_batch_json(payload).encode("utf-8")).hexdigest()
 
 
 def _load_json(path: Path) -> Any:
@@ -119,6 +168,39 @@ def _position(value: Any, name: str, object_model: str) -> dict[str, Any] | None
     return position
 
 
+def _positive(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise SignalBatchError(f"{name} must be finite and positive")
+    return float(value)
+
+
+def _risk_intent(value: Any, action: str, side: str) -> dict[str, Any] | None:
+    if action == "EXIT":
+        if value is not None:
+            raise SignalBatchError("EXIT batch riskIntent must be null")
+        return None
+    risk = _exact_record(value, "riskIntent", RISK_INTENT_FIELDS)
+    entry_price = _positive(risk["entryPrice"], "riskIntent.entryPrice")
+    initial_stop = _positive(risk["initialStop"], "riskIntent.initialStop")
+    initial_target = _positive(risk["initialTarget"], "riskIntent.initialTarget")
+    risk_distance = _positive(risk["riskDistance"], "riskIntent.riskDistance")
+    _positive(risk["riskR"], "riskIntent.riskR")
+    risk_unit_ratio = _positive(risk["riskUnitRatio"], "riskIntent.riskUnitRatio")
+    if risk_unit_ratio > 1:
+        raise SignalBatchError("riskIntent.riskUnitRatio must be at most 1")
+    if risk_distance != abs(entry_price - initial_stop):
+        raise SignalBatchError("riskIntent.riskDistance must equal the entry-to-stop distance")
+    if side == "LONG" and not initial_stop < entry_price < initial_target:
+        raise SignalBatchError("LONG riskIntent must have initialStop < entryPrice < initialTarget")
+    if side == "SHORT" and not initial_target < entry_price < initial_stop:
+        raise SignalBatchError("SHORT riskIntent must have initialTarget < entryPrice < initialStop")
+    return risk
+
+
+def validate_risk_intent(value: Any, action: str, side: str) -> dict[str, Any] | None:
+    return _risk_intent(value, action, side)
+
+
 def validate_signal_batch(value: Any) -> dict[str, Any]:
     batch = _exact_record(value, "signal batch", BATCH_FIELDS)
     if batch["schemaVersion"] != BATCH_SCHEMA_VERSION:
@@ -171,6 +253,7 @@ def validate_signal_batch(value: Any) -> dict[str, Any]:
         raise SignalBatchError("signal.reasonCodes must be unique registered-style codes")
     before = _position(batch["positionBefore"], "positionBefore", object_model)
     after = _position(batch["positionAfter"], "positionAfter", object_model)
+    _risk_intent(batch["riskIntent"], action, side)
     if action == "ENTER":
         expected = {"object": reference, "side": side, "entrySignalId": signal["signalId"]}
         if before is not None or after != expected:
@@ -234,6 +317,7 @@ def load_batch_chain(deployment_path: str | Path, batches_path: str | Path) -> t
             "previousDecisionStateHash": batch["previousDecisionStateHash"],
             "evaluatorStateHash": batch["evaluatorStateHash"],
             "position": batch["positionAfter"],
+            "riskIntent": batch["riskIntent"],
             "signal": {
                 "signalId": signal["signalId"],
                 "decisionId": signal["decisionId"],
@@ -273,6 +357,21 @@ def signals_for_batches(
             continue
         signal = batch["signal"]
         result[(signal["action"], signal["side"])][signal["sourceCandleOpenTime"]] = signal["signalId"]
+    return result
+
+
+def risk_intents_for_batches(
+    batches: list[dict[str, Any]], symbol: str, timeframe: str
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for batch in batches:
+        if batch["symbol"] != symbol or batch["baseTimeframe"] != timeframe:
+            continue
+        if batch["signal"]["action"] == "ENTER":
+            result[batch["signal"]["signalId"]] = {
+                "side": batch["signal"]["side"],
+                "riskIntent": batch["riskIntent"],
+            }
     return result
 
 

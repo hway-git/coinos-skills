@@ -13,6 +13,7 @@ import {
 } from '../lib/signal-artifact.mjs';
 import { marketDatasetHash } from '../lib/market-dataset.mjs';
 import { reconcileSignalBacktest } from '../lib/backtest-reconciliation.mjs';
+import { historicalRiskTraceHash } from '../lib/historical-risk.mjs';
 
 const execFileAsync = promisify(execFile);
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,6 +21,25 @@ const VALIDATOR = resolve(SKILL_DIR, 'assets', 'helix_signal_artifact.py');
 const BATCH_VALIDATOR = resolve(SKILL_DIR, 'assets', 'helix_signal_batch.py');
 const ADAPTER = resolve(SKILL_DIR, 'assets', 'HelixSignalStrategy.py');
 const DEPLOY = resolve(SKILL_DIR, 'scripts', 'ft-deploy.mjs');
+
+function canonicalBatchJson(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('batch fixture numbers must be finite');
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalBatchJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => (
+      `${JSON.stringify(key)}:${canonicalBatchJson(value[key])}`
+    )).join(',')}}`;
+  }
+  throw new Error(`unsupported batch fixture value ${typeof value}`);
+}
+
+function batchHash(payload) {
+  return `sha256:${createHash('sha256').update(canonicalBatchJson(payload)).digest('hex')}`;
+}
 
 function fixture(marketDataSnapshotId = 'okx-btc-2026-07-01') {
   const first = 1_782_864_000_000;
@@ -97,8 +117,16 @@ function forwardBatchFixture() {
     side: 'LONG',
     entrySignalId: 'enter-forward-1',
   };
+  const riskIntent = {
+    entryPrice: 100,
+    initialStop: 95,
+    initialTarget: 110,
+    riskDistance: 5,
+    riskR: 0.25,
+    riskUnitRatio: 0.01,
+  };
   const enterPayload = {
-    schemaVersion: 'helix.signal-batch/v1',
+    schemaVersion: 'helix.signal-batch/v2',
     deploymentHash: deployment.deploymentHash,
     batchSequence: 0,
     previousBatchHash: null,
@@ -119,6 +147,7 @@ function forwardBatchFixture() {
     baseTimeframe: '1m',
     positionBefore: null,
     positionAfter: position,
+    riskIntent,
     signal: {
       sequence: 0,
       signalId: position.entrySignalId,
@@ -131,7 +160,7 @@ function forwardBatchFixture() {
       reasonCodes: ['EXECUTION_TRIGGERED'],
     },
   };
-  enterPayload.decisionStateHash = signalArtifactHash({
+  enterPayload.decisionStateHash = batchHash({
     schemaVersion: 'helix.forward-decision-state/v1',
     deploymentHash: enterPayload.deploymentHash,
     decisionTime: enterPayload.signal.decisionTime,
@@ -139,6 +168,7 @@ function forwardBatchFixture() {
     previousDecisionStateHash: enterPayload.previousDecisionStateHash,
     evaluatorStateHash: enterPayload.evaluatorStateHash,
     position: enterPayload.positionAfter,
+    riskIntent: enterPayload.riskIntent,
     signal: {
       signalId: enterPayload.signal.signalId,
       decisionId: enterPayload.signal.decisionId,
@@ -148,7 +178,7 @@ function forwardBatchFixture() {
       reasonCodes: enterPayload.signal.reasonCodes,
     },
   });
-  const enter = { ...enterPayload, batchHash: signalArtifactHash(enterPayload) };
+  const enter = { ...enterPayload, batchHash: batchHash(enterPayload) };
   const exitPayload = {
     ...enterPayload,
     batchSequence: 1,
@@ -159,6 +189,7 @@ function forwardBatchFixture() {
     identity: { ...enterPayload.identity, marketDataSnapshotId: `sha256:${'e'.repeat(64)}` },
     positionBefore: position,
     positionAfter: null,
+    riskIntent: null,
     signal: {
       ...enterPayload.signal,
       sequence: 1,
@@ -170,7 +201,7 @@ function forwardBatchFixture() {
       reasonCodes: ['TIME_STOP'],
     },
   };
-  exitPayload.decisionStateHash = signalArtifactHash({
+  exitPayload.decisionStateHash = batchHash({
     schemaVersion: 'helix.forward-decision-state/v1',
     deploymentHash: exitPayload.deploymentHash,
     decisionTime: exitPayload.signal.decisionTime,
@@ -178,6 +209,7 @@ function forwardBatchFixture() {
     previousDecisionStateHash: exitPayload.previousDecisionStateHash,
     evaluatorStateHash: exitPayload.evaluatorStateHash,
     position: exitPayload.positionAfter,
+    riskIntent: exitPayload.riskIntent,
     signal: {
       signalId: exitPayload.signal.signalId,
       decisionId: exitPayload.signal.decisionId,
@@ -187,7 +219,7 @@ function forwardBatchFixture() {
       reasonCodes: exitPayload.signal.reasonCodes,
     },
   });
-  const exit = { ...exitPayload, batchHash: signalArtifactHash(exitPayload) };
+  const exit = { ...exitPayload, batchHash: batchHash(exitPayload) };
   return { deployment, batches: [enter, exit] };
 }
 
@@ -458,6 +490,7 @@ test('Freqtrade adapter preserves LONG tags when the second side has no signal',
   const harness = `
 import importlib.util
 import json
+import os
 import sys
 import types
 
@@ -543,6 +576,8 @@ batch.batch_path_fingerprint = lambda _deployment, _batches: None
 batch.load_batch_chain = lambda _deployment, _batches: ({}, [])
 batch.require_worker_heartbeat = lambda _status, _deployment_hash: {}
 batch.signals_for_batches = lambda _batches, _pair, _timeframe: {}
+batch.risk_intents_for_batches = lambda _batches, _pair, _timeframe: {}
+batch.validate_risk_intent = lambda value, _action, _side: value
 sys.modules['helix_signal_batch'] = batch
 
 spec = importlib.util.spec_from_file_location('HelixSignalStrategy', sys.argv[1])
@@ -591,6 +626,7 @@ test('adapter pins the configured hash and uses an explicit backtest override', 
   const harness = String.raw`
 import importlib.util
 import json
+import os
 import sys
 import types
 
@@ -717,7 +753,9 @@ strategy.timeframe = '1m'
 first = strategy._signal_index('BTC/USDT:USDT')
 Path(sys.argv[6]).write_text(Path(sys.argv[5]).read_text())
 second = strategy._signal_index('BTC/USDT:USDT')
-healthy_entry = strategy.confirm_trade_entry(None, None, None, None, None, None, None, None)
+healthy_entry = strategy.confirm_trade_entry(
+    'BTC/USDT:USDT', None, None, None, None, None, 'enter-forward-1', None
+)
 status = json.loads(Path(sys.argv[7]).read_text())
 status['updatedAt'] = 0
 Path(sys.argv[7]).write_text(json.dumps(status))
@@ -752,11 +790,150 @@ print(json.dumps({
   });
 });
 
+test('adapter sizes both forward and historical ENTERs from exact risk intent', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'helix-adapter-risk-sizing-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const deploymentFile = join(home, 'deployment.json');
+  const batchesDir = join(home, 'batches');
+  await mkdir(batchesDir);
+  const { deployment, batches } = forwardBatchFixture();
+  await writeFile(deploymentFile, JSON.stringify(deployment));
+  const batchName = `${String(batches[0].batchSequence).padStart(12, '0')}-${batches[0].batchHash.replace(':', '-')}.json`;
+  await writeFile(join(batchesDir, batchName), JSON.stringify(batches[0]));
+
+  const artifact = fixture();
+  const artifactFile = join(home, 'artifact.json');
+  await writeFile(artifactFile, JSON.stringify(artifact));
+  const riskPayload = {
+    schemaVersion: 'helix.historical-risk-trace/v1',
+    signalArtifactHash: artifact.artifactHash,
+    entries: [{
+      entrySignalId: artifact.signals[0].signalId,
+      family: 'scalp',
+      object: artifact.signals[0].object,
+      side: artifact.signals[0].side,
+      entryPrice: { source: 'DECISION_CANDLE_CLOSE', price: 100 },
+      initialStop: 95,
+      initialTarget: 110,
+      riskDistance: 5,
+      riskR: 0.25,
+      scalp: {
+        eventType: 'LIQUIDITY_SWEEP',
+        grade: 'A',
+        regime: { id: 'regime-risk-test', type: 'RANGING' },
+      },
+    }],
+  };
+  const riskTrace = { ...riskPayload, traceHash: historicalRiskTraceHash(riskPayload) };
+  const riskFile = join(home, 'risk-trace.json');
+  const riskContent = `${JSON.stringify(riskTrace, null, 2)}\n`;
+  await writeFile(riskFile, riskContent);
+  const riskFileHash = `sha256:${createHash('sha256').update(riskContent).digest('hex')}`;
+
+  const harness = String.raw`
+import importlib.util
+import json
+import os
+import sys
+import types
+
+pandas = types.ModuleType('pandas')
+pandas.DataFrame = type('DataFrame', (), {})
+sys.modules['pandas'] = pandas
+freqtrade = types.ModuleType('freqtrade')
+freqtrade_strategy = types.ModuleType('freqtrade.strategy')
+freqtrade_strategy.IStrategy = type('IStrategy', (), {})
+freqtrade.strategy = freqtrade_strategy
+sys.modules['freqtrade'] = freqtrade
+sys.modules['freqtrade.strategy'] = freqtrade_strategy
+
+artifact_spec = importlib.util.spec_from_file_location('helix_signal_artifact', sys.argv[1])
+artifact = importlib.util.module_from_spec(artifact_spec)
+sys.modules['helix_signal_artifact'] = artifact
+artifact_spec.loader.exec_module(artifact)
+batch_spec = importlib.util.spec_from_file_location('helix_signal_batch', sys.argv[2])
+batch = importlib.util.module_from_spec(batch_spec)
+sys.modules['helix_signal_batch'] = batch
+batch_spec.loader.exec_module(batch)
+adapter_spec = importlib.util.spec_from_file_location('HelixSignalStrategy', sys.argv[3])
+adapter = importlib.util.module_from_spec(adapter_spec)
+adapter_spec.loader.exec_module(adapter)
+
+class Wallets:
+    def get_total(self, currency):
+        assert currency == 'USDT'
+        return 10000
+
+def stake(strategy, tag, maximum=1000, leverage=1):
+    strategy.wallets = Wallets()
+    return strategy.custom_stake_amount(
+        'BTC/USDT:USDT', None, 100, None, 10, maximum, leverage, tag, 'long'
+    )
+
+forward = adapter.HelixSignalStrategy()
+forward.timeframe = '1m'
+forward.config = {
+    'stake_currency': 'USDT',
+    'helix_signal_forward_deployment_path': sys.argv[4],
+    'helix_signal_forward_deployment_hash': sys.argv[5],
+    'helix_signal_batch_path': sys.argv[6],
+    'helix_signal_forward_status_path': sys.argv[7],
+}
+
+historical = adapter.HelixSignalStrategy()
+historical.timeframe = '1m'
+historical.config = {'stake_currency': 'USDT'}
+
+os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = ''
+forward_result = stake(forward, 'enter-forward-1')
+forward_max_reject = stake(forward, 'enter-forward-1', 499)
+forward_leverage_reject = stake(forward, 'enter-forward-1', leverage=2)
+forward_missing_reject = stake(forward, 'missing')
+os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = '1'
+historical_result = stake(historical, 'btc-scalp-enter-001')
+os.environ['HELIX_SIGNAL_RISK_TRACE_FILE_HASH'] = 'sha256:' + ('0' * 64)
+print(json.dumps({
+    'forward': forward_result,
+    'forward_max_reject': forward_max_reject,
+    'forward_leverage_reject': forward_leverage_reject,
+    'forward_missing_reject': forward_missing_reject,
+    'historical': historical_result,
+    'historical_wrong_file_pin': stake(historical, 'btc-scalp-enter-001'),
+}))
+`;
+  const statusFile = join(home, 'unused-status.json');
+  const { stdout } = await execFileAsync('python3', [
+    '-c', harness, VALIDATOR, BATCH_VALIDATOR, ADAPTER, deploymentFile,
+    deployment.deploymentHash, batchesDir, statusFile,
+  ], {
+    env: {
+      ...process.env,
+      HELIX_SIGNAL_ARTIFACT_OVERRIDE: '1',
+      HELIX_SIGNAL_ARTIFACT_PATH: artifactFile,
+      HELIX_SIGNAL_ARTIFACT_HASH: artifact.artifactHash,
+      HELIX_SIGNAL_RISK_TRACE_PATH: riskFile,
+      HELIX_SIGNAL_RISK_TRACE_HASH: riskTrace.traceHash,
+      HELIX_SIGNAL_RISK_TRACE_FILE_HASH: riskFileHash,
+      HELIX_SIGNAL_RISK_UNIT_RATIO: '0.01',
+    },
+  });
+  assert.deepEqual(JSON.parse(stdout), {
+    forward: 500,
+    forward_max_reject: 0,
+    forward_leverage_reject: 0,
+    forward_missing_reject: 0,
+    historical: 500,
+    historical_wrong_file_pin: 0,
+  });
+});
+
 test('Docker backtests pass the exact artifact override and hash into the one-shot container', async () => {
   const compose = await readFile(resolve(SKILL_DIR, '..', '..', 'docker', 'freqtrade', 'compose.yaml'), 'utf8');
   assert.match(compose, /HELIX_SIGNAL_ARTIFACT_PATH: \$\{HELIX_SIGNAL_ARTIFACT_PATH:-\}/);
   assert.match(compose, /HELIX_SIGNAL_ARTIFACT_HASH: \$\{HELIX_SIGNAL_ARTIFACT_HASH:-\}/);
   assert.match(compose, /HELIX_SIGNAL_ARTIFACT_OVERRIDE: \$\{HELIX_SIGNAL_ARTIFACT_OVERRIDE:-\}/);
+  assert.match(compose, /HELIX_SIGNAL_RISK_TRACE_PATH: \$\{HELIX_SIGNAL_RISK_TRACE_PATH:-\}/);
+  assert.match(compose, /HELIX_SIGNAL_RISK_UNIT_RATIO: \$\{HELIX_SIGNAL_RISK_UNIT_RATIO:-\}/);
 });
 
 test('Freqtrade result reconciles every artifact entry and exit by identity, time, pair, and side', () => {
@@ -902,6 +1079,29 @@ test('backtest resolves an immutable signal artifact without activating daemon i
   assert.match(deploy, /helix_signal_artifact_path/);
 });
 
+test('signal backtest requires a pinned historical risk trace', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'helix-signal-risk-trace-gate-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dataset = marketDatasetFixture();
+  const artifactFile = join(home, 'artifact.json');
+  const datasetFile = join(home, 'dataset.json');
+  await writeFile(artifactFile, JSON.stringify(fixture(dataset.datasetHash)));
+  await writeFile(datasetFile, JSON.stringify(dataset));
+
+  await assert.rejects(
+    runDeployAction(home, 'backtest', {
+      signal_artifact: artifactFile,
+      market_dataset: datasetFile,
+      risk_unit_ratio: 0.01,
+      fee: 0.001,
+    }),
+    (error) => {
+      assert.match(error.stderr, /requires historical_risk_trace/);
+      return true;
+    },
+  );
+});
+
 test('deploy requires matching pinned backtest identity and a deployable lifecycle', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'helix-signal-deploy-gate-'));
   t.after(() => rm(home, { recursive: true, force: true }));
@@ -939,6 +1139,9 @@ test('deploy requires matching pinned backtest identity and a deployable lifecyc
         freqtradeVersion: 'freqtrade test',
         configHash: `sha256:${'e'.repeat(64)}`,
         artifactFileHash: `sha256:${'f'.repeat(64)}`,
+        riskTraceHash: `sha256:${'1'.repeat(64)}`,
+        riskTraceFileHash: `sha256:${'2'.repeat(64)}`,
+        riskUnitRatio: 0.01,
         fee: null,
         dataFormatOhlcv: 'json',
         executionProfile: {

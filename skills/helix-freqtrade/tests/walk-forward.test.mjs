@@ -94,6 +94,7 @@ function walkForwardPolicyFixture({ entryWindowMs, observationTailMs, executionS
       foldCount: 2,
       entryWindowMs,
       observationTailMs,
+      riskUnitRatio: 0.01,
       executionScenarios: structuredClone(executionScenarios),
     },
     gates: {
@@ -170,6 +171,10 @@ test('verifies a policy-pinned plan and rejects policy/plan divergence', () => {
   const { planHash: _oldHash, ...payload } = plan;
   plan.planHash = walkForwardPlanHash(payload);
   assert.deepEqual(verifyWalkForwardPlan(plan), plan);
+
+  const changedRiskUnit = structuredClone(plan);
+  changedRiskUnit.walkForwardPolicy.plan.riskUnitRatio = 0.02;
+  assert.throws(() => verifyWalkForwardPlan(changedRiskUnit), /plan hash mismatch/);
 
   const mismatched = structuredClone(plan);
   mismatched.walkForwardPolicy.plan.foldCount = 3;
@@ -441,11 +446,10 @@ test('treats an EXIT at observationEndTime as censored instead of executable', a
   assert.deepEqual(bundle.folds[0].executionRiskTrace.entries, []);
 });
 
-function backtestResultFixture(fold, scenario, index) {
+function backtestResultFixture(plan, fold, scenario, index) {
   const tradeCount = fold.run.tradeIds.length;
   const stressed = index > 0;
   const profitRatio = stressed ? -0.002 : 0.01;
-  const profitAbs = profitRatio * 1000;
   const [entry, exit] = fold.executionArtifact.signals;
   const openRate = tradeCount
     ? fold.dataset.timeframes[fold.executionArtifact.baseTimeframe]
@@ -455,6 +459,13 @@ function backtestResultFixture(fold, scenario, index) {
     ? fold.dataset.timeframes[fold.executionArtifact.baseTimeframe]
       .find(({ time }) => time === exit.decisionTime).open
     : null;
+  const risk = fold.executionRiskTrace.entries[0];
+  const riskUnitRatio = plan.walkForwardPolicy?.plan.riskUnitRatio ?? 0.01;
+  const stakeAmount = tradeCount
+    ? (1000 * riskUnitRatio * risk.riskR)
+      / (Math.abs(openRate - risk.initialStop) / openRate)
+    : null;
+  const profitAbs = tradeCount ? stakeAmount * profitRatio : 0;
   const summary = {
     total_trades: tradeCount,
     wins: tradeCount && !stressed ? tradeCount : 0,
@@ -480,6 +491,8 @@ function backtestResultFixture(fold, scenario, index) {
       open_rate: openRate,
       close_rate: closeRate,
       profit_ratio: profitRatio,
+      profit_abs: profitAbs,
+      stake_amount: stakeAmount,
       leverage: 1,
       fee_open: scenario.fee,
       fee_close: scenario.fee,
@@ -516,6 +529,8 @@ function runtimeEvidence(plan, fold, scenario, resultHash, resultMetaHash) {
     resultMetaHash,
     datasetHash: fold.dataset.datasetHash,
     executionArtifactHash: fold.executionArtifact.artifactHash,
+    riskTraceHash: fold.executionRiskTrace.traceHash,
+    riskUnitRatio: plan.walkForwardPolicy?.plan.riskUnitRatio ?? 0.01,
     scenarioId: scenario.id,
     fee: scenario.fee,
     freqtradeVersion: 'freqtrade 2026.6',
@@ -530,7 +545,7 @@ function runtimeEvidence(plan, fold, scenario, resultHash, resultMetaHash) {
 }
 
 function executionEvidence(plan, fold, scenario, index) {
-  const { summary, resultContent, resultMetaContent } = backtestResultFixture(fold, scenario, index);
+  const { summary, resultContent, resultMetaContent } = backtestResultFixture(plan, fold, scenario, index);
   const resultHash = `sha256:${createHash('sha256').update(resultContent).digest('hex')}`;
   const resultMetaHash = `sha256:${createHash('sha256').update(resultMetaContent).digest('hex')}`;
   const runtime = runtimeEvidence(plan, fold, scenario, resultHash, resultMetaHash);
@@ -545,6 +560,8 @@ function executionEvidence(plan, fold, scenario, index) {
     adapterHash: runtime.adapterHash,
     executionProfile: runtime.executionProfile,
     executionProfileHash: runtime.executionProfileHash,
+    riskTraceHash: fold.executionRiskTrace.traceHash,
+    riskUnitRatio: plan.walkForwardPolicy?.plan.riskUnitRatio ?? 0.01,
     runtimeEvidenceFile: `evidence/${runtimeEvidenceHash.replace(':', '-')}.runtime.json`,
     runtimeEvidenceHash,
     resultFile: `evidence/${resultHash.replace(':', '-')}.json`,
@@ -557,6 +574,8 @@ function executionEvidence(plan, fold, scenario, index) {
       signalArtifact: fold.executionArtifact,
       riskTrace: fold.executionRiskTrace,
       marketDataset: fold.dataset,
+      riskUnitRatio: plan.walkForwardPolicy?.plan.riskUnitRatio ?? 0.01,
+      accountEquity: 1000,
     }),
   };
 }
@@ -591,7 +610,7 @@ async function writeReportArchives(directory, bundle, evidence) {
   for (const [foldIndex, foldEvidence] of evidence.entries()) {
     for (const [scenarioIndex, item] of foldEvidence.entries()) {
       const scenario = bundle.plan.executionScenarios[scenarioIndex];
-      const fixture = backtestResultFixture(bundle.folds[foldIndex], scenario, scenarioIndex);
+      const fixture = backtestResultFixture(bundle.plan, bundle.folds[foldIndex], scenario, scenarioIndex);
       await writeFile(
         join(directory, item.resultFile),
         fixture.resultContent,
@@ -653,7 +672,10 @@ test('builds a hash-pinned R-normalized research report but requires a versioned
     for (const item of fold) delete item.metrics.riskNormalized.observations;
   }
   const legacyReport = createWalkForwardReport(bundle, legacyEvidence, coreEvidence);
-  assert.deepEqual(verifyWalkForwardReport(legacyReport, bundle, directory), legacyReport);
+  assert.throws(
+    () => verifyWalkForwardReport(legacyReport, bundle, directory),
+    /metrics does not match archived result/,
+  );
 
   const changedAdapter = structuredClone(evidence);
   changedAdapter[0][1].adapterHash = `sha256:${'9'.repeat(64)}`;
@@ -724,6 +746,7 @@ test('rebuilds every versioned policy gate from archived trade-level R evidence'
   const report = createWalkForwardReport(bundle, evidence, coreEvidence);
   assert.equal(report.gate.ok, true);
   assert.equal(report.gate.checks.find(({ code }) => code === 'VERSIONED_GATE_POLICY_PRESENT').ok, true);
+  assert.equal(report.gate.checks.find(({ code }) => code === 'RISK_SIZING_VALID').ok, true);
   assert.equal(report.gate.checks.find(({ code }) => code === 'SEGMENT_STABILITY').ok, true);
   assert.equal(report.aggregate.scenarios[0].riskNormalized.observations.length, 1);
   assert.deepEqual(verifyWalkForwardReport(report, bundle, directory), report);

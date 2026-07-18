@@ -214,7 +214,7 @@ function normalizeWalkForwardPolicy(value: unknown): StrategyWalkForwardPolicy {
     throw new Error('walkForwardPolicy.policyPath is invalid')
   }
   const plan = exactRecord(policy.plan, 'walkForwardPolicy.plan', [
-    'foldCount', 'entryWindowMs', 'observationTailMs', 'executionScenarios',
+    'foldCount', 'entryWindowMs', 'observationTailMs', 'riskUnitRatio', 'executionScenarios',
   ])
   if (!Array.isArray(plan.executionScenarios) || plan.executionScenarios.length < 2) {
     throw new Error('walkForwardPolicy.plan.executionScenarios must contain at least two scenarios')
@@ -267,6 +267,7 @@ function normalizeWalkForwardPolicy(value: unknown): StrategyWalkForwardPolicy {
       foldCount: policyInteger(plan.foldCount, 'walkForwardPolicy.plan.foldCount', 2),
       entryWindowMs: policyInteger(plan.entryWindowMs, 'walkForwardPolicy.plan.entryWindowMs', 1),
       observationTailMs: policyInteger(plan.observationTailMs, 'walkForwardPolicy.plan.observationTailMs', 1),
+      riskUnitRatio: policyNumber(plan.riskUnitRatio, 'walkForwardPolicy.plan.riskUnitRatio', Number.MIN_VALUE, 1),
       executionScenarios,
     },
     gates: {

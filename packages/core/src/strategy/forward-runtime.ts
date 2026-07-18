@@ -5,6 +5,7 @@ import type {
   StrategyObjectModel,
   StrategyPositionSide,
   StrategyRepositorySnapshot,
+  StrategySignalRiskIntent,
   StrategySignalPosition,
 } from '@helix/contracts/strategy'
 import { assertStrategyHistoricalDataset } from './historical-dataset'
@@ -53,6 +54,7 @@ export type StrategyForwardDecisionStatePayload = Readonly<{
   previousDecisionStateHash: string | null
   evaluatorStateHash: string
   position: StrategySignalPosition | null
+  riskIntent: StrategySignalRiskIntent | null
   signal: Readonly<{
     signalId: string
     decisionId: string
@@ -86,8 +88,8 @@ function exactRecord(value: unknown, name: string, fields: readonly string[]): U
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value)
   if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value)) throw new Error('forward deployment canonical numbers must be safe integers')
-    return String(value)
+    if (!Number.isFinite(value)) throw new Error('forward runtime canonical numbers must be finite')
+    return JSON.stringify(value)
   }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   if (value && typeof value === 'object') {

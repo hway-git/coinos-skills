@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
-export const EXECUTION_RUNTIME_EVIDENCE_SCHEMA_VERSION = 'helix.freqtrade-execution-runtime/v1';
+export const EXECUTION_RUNTIME_EVIDENCE_SCHEMA_VERSION = 'helix.freqtrade-execution-runtime/v2';
 export const EXECUTION_CONFIG_IDENTITY_SCHEMA_VERSION = 'helix.freqtrade-config-identity/v1';
 export const EXECUTION_PROFILE_SCHEMA_VERSION = 'helix.freqtrade-execution-profile/v1';
 
@@ -379,6 +379,12 @@ export function createExecutionRuntimeEvidence(value) {
     resultMetaHash: hash(value.resultMetaHash, 'resultMetaHash'),
     datasetHash: hash(value.datasetHash, 'datasetHash'),
     executionArtifactHash: hash(value.executionArtifactHash, 'executionArtifactHash'),
+    riskTraceHash: hash(value.riskTraceHash, 'riskTraceHash'),
+    riskUnitRatio: (() => {
+      const ratio = finite(value.riskUnitRatio, 'riskUnitRatio');
+      if (ratio <= 0 || ratio > 1) throw new Error('riskUnitRatio must be in (0, 1]');
+      return ratio;
+    })(),
     scenarioId: text(value.scenarioId, 'scenarioId'),
     fee: finite(value.fee, 'fee'),
     freqtradeVersion: text(value.freqtradeVersion, 'freqtradeVersion'),
@@ -394,6 +400,7 @@ export function createExecutionRuntimeEvidence(value) {
 export function verifyExecutionRuntimeEvidence(value, expected = null) {
   const source = exactRecord(value, 'execution runtime evidence', [
     'schemaVersion', 'resultHash', 'resultMetaHash', 'datasetHash', 'executionArtifactHash',
+    'riskTraceHash', 'riskUnitRatio',
     'scenarioId', 'fee', 'freqtradeVersion', 'configIdentity', 'configHash',
     'executionProfile', 'executionProfileHash', 'adapterFiles', 'adapterHash',
   ]);
@@ -410,7 +417,8 @@ export function verifyExecutionRuntimeEvidence(value, expected = null) {
   }
   if (expected) {
     for (const field of [
-      'resultHash', 'resultMetaHash', 'datasetHash', 'executionArtifactHash', 'scenarioId', 'fee',
+      'resultHash', 'resultMetaHash', 'datasetHash', 'executionArtifactHash',
+      'riskTraceHash', 'riskUnitRatio', 'scenarioId', 'fee',
     ]) {
       if (normalized[field] !== expected[field]) {
         throw new Error(`execution runtime ${field} does not match its report evidence`);

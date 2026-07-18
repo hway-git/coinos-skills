@@ -8,6 +8,7 @@ import {
   type StrategySignalBatchPayload,
   type StrategySignalPosition,
   type StrategySignalRecord,
+  type StrategySignalRiskIntent,
 } from '@helix/contracts/strategy'
 import {
   assertStrategyForwardDeployment,
@@ -49,8 +50,8 @@ function integer(value: unknown, name: string) {
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value)
   if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value)) throw new Error('signal batch canonical numbers must be safe integers')
-    return String(value)
+    if (!Number.isFinite(value)) throw new Error('signal batch canonical numbers must be finite')
+    return JSON.stringify(value)
   }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   if (value && typeof value === 'object') {
@@ -58,6 +59,44 @@ function canonicalJson(value: unknown): string {
     return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
   }
   throw new Error(`unsupported signal batch value ${typeof value}`)
+}
+
+function positiveNumber(value: unknown, name: string) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be finite and positive`)
+  }
+  return value
+}
+
+function normalizeRiskIntent(
+  value: unknown,
+  action: StrategySignalRecord['action'],
+  side: StrategySignalRecord['side'],
+): StrategySignalRiskIntent | null {
+  if (action === 'EXIT') {
+    if (value !== null) throw new Error('EXIT batch riskIntent must be null')
+    return null
+  }
+  const source = exactRecord(value, 'riskIntent', [
+    'entryPrice', 'initialStop', 'initialTarget', 'riskDistance', 'riskR', 'riskUnitRatio',
+  ])
+  const entryPrice = positiveNumber(source.entryPrice, 'riskIntent.entryPrice')
+  const initialStop = positiveNumber(source.initialStop, 'riskIntent.initialStop')
+  const initialTarget = positiveNumber(source.initialTarget, 'riskIntent.initialTarget')
+  const riskDistance = positiveNumber(source.riskDistance, 'riskIntent.riskDistance')
+  const riskR = positiveNumber(source.riskR, 'riskIntent.riskR')
+  const riskUnitRatio = positiveNumber(source.riskUnitRatio, 'riskIntent.riskUnitRatio')
+  if (riskUnitRatio > 1) throw new Error('riskIntent.riskUnitRatio must be at most 1')
+  if (riskDistance !== Math.abs(entryPrice - initialStop)) {
+    throw new Error('riskIntent.riskDistance must equal the entry-to-stop distance')
+  }
+  if (side === 'LONG' && !(initialStop < entryPrice && entryPrice < initialTarget)) {
+    throw new Error('LONG riskIntent must have initialStop < entryPrice < initialTarget')
+  }
+  if (side === 'SHORT' && !(initialTarget < entryPrice && entryPrice < initialStop)) {
+    throw new Error('SHORT riskIntent must have initialTarget < entryPrice < initialStop')
+  }
+  return { entryPrice, initialStop, initialTarget, riskDistance, riskR, riskUnitRatio }
 }
 
 function normalizeIdentity(value: unknown): StrategyDecisionIdentity {
@@ -154,7 +193,7 @@ function normalizePayload(value: unknown): StrategySignalBatchPayload {
   const source = exactRecord(value, 'signal batch', [
     'schemaVersion', 'deploymentHash', 'batchSequence', 'previousBatchHash',
     'previousDecisionStateHash', 'evaluatorStateHash', 'decisionStateHash', 'identity',
-    'strategyLifecycle', 'objectModel', 'symbol', 'baseTimeframe', 'positionBefore', 'positionAfter', 'signal',
+    'strategyLifecycle', 'objectModel', 'symbol', 'baseTimeframe', 'positionBefore', 'positionAfter', 'riskIntent', 'signal',
   ])
   if (source.schemaVersion !== STRATEGY_SIGNAL_BATCH_SCHEMA_VERSION) {
     throw new Error(`unsupported signal batch schema ${String(source.schemaVersion)}`)
@@ -186,6 +225,7 @@ function normalizePayload(value: unknown): StrategySignalBatchPayload {
   const signal = normalizeSignal(source.signal, batchSequence, objectModel, baseTimeframe)
   const positionBefore = normalizePosition(source.positionBefore, 'positionBefore', objectModel)
   const positionAfter = normalizePosition(source.positionAfter, 'positionAfter', objectModel)
+  const riskIntent = normalizeRiskIntent(source.riskIntent, signal.action, signal.side)
   const signalPosition = { object: signal.object, side: signal.side, entrySignalId: signal.signalId }
   if (signal.action === 'ENTER') {
     if (positionBefore !== null || !samePosition(positionAfter, signalPosition)) {
@@ -210,6 +250,7 @@ function normalizePayload(value: unknown): StrategySignalBatchPayload {
     baseTimeframe,
     positionBefore,
     positionAfter,
+    riskIntent,
     signal,
   }
 }
@@ -228,7 +269,7 @@ export function assertStrategySignalBatch(value: unknown): StrategySignalBatch {
   const source = exactRecord(value, 'signal batch envelope', [
     'schemaVersion', 'deploymentHash', 'batchSequence', 'previousBatchHash',
     'previousDecisionStateHash', 'evaluatorStateHash', 'decisionStateHash', 'identity',
-    'strategyLifecycle', 'objectModel', 'symbol', 'baseTimeframe', 'positionBefore', 'positionAfter', 'signal', 'batchHash',
+    'strategyLifecycle', 'objectModel', 'symbol', 'baseTimeframe', 'positionBefore', 'positionAfter', 'riskIntent', 'signal', 'batchHash',
   ])
   const batchHash = text(source.batchHash, 'batchHash')
   if (!HASH_PATTERN.test(batchHash)) throw new Error('batchHash must be a SHA-256 hash')
@@ -282,6 +323,7 @@ export function assertStrategySignalBatchChain(
       previousDecisionStateHash: batch.previousDecisionStateHash,
       evaluatorStateHash: batch.evaluatorStateHash,
       position: batch.positionAfter,
+      riskIntent: batch.riskIntent,
       signal: {
         signalId: batch.signal.signalId,
         decisionId: batch.signal.decisionId,

@@ -63,6 +63,8 @@ function runtimeFixture(config) {
     resultMetaHash: hash('2'),
     datasetHash: hash('3'),
     executionArtifactHash: hash('4'),
+    riskTraceHash: hash('5'),
+    riskUnitRatio: 0.01,
     scenarioId: 'base',
     fee: 0.001,
     freqtradeVersion: 'freqtrade 2026.7',
@@ -155,6 +157,8 @@ test('hash-pins the complete adapter, config profile, version, and result linkag
     resultMetaHash: runtime.resultMetaHash,
     datasetHash: runtime.datasetHash,
     executionArtifactHash: runtime.executionArtifactHash,
+    riskTraceHash: runtime.riskTraceHash,
+    riskUnitRatio: runtime.riskUnitRatio,
     scenarioId: runtime.scenarioId,
     fee: runtime.fee,
   }), runtime);
@@ -167,6 +171,8 @@ test('hash-pins the complete adapter, config profile, version, and result linkag
     resultMetaHash: runtime.resultMetaHash,
     datasetHash: runtime.datasetHash,
     executionArtifactHash: runtime.executionArtifactHash,
+    riskTraceHash: runtime.riskTraceHash,
+    riskUnitRatio: runtime.riskUnitRatio,
     scenarioId: runtime.scenarioId,
     fee: runtime.fee,
   }), /resultHash does not match/);
@@ -214,6 +220,8 @@ test('cross-checks a REDACTED ZIP config and rejects an embedded sentinel creden
     resultMetaHash: runtime.resultMetaHash,
     datasetHash: runtime.datasetHash,
     executionArtifactHash: runtime.executionArtifactHash,
+    riskTraceHash: runtime.riskTraceHash,
+    riskUnitRatio: runtime.riskUnitRatio,
     scenarioId: runtime.scenarioId,
     fee: runtime.fee,
   }), runtime);
@@ -248,6 +256,8 @@ test('cross-checks a REDACTED ZIP config and rejects an embedded sentinel creden
     resultMetaHash: runtime.resultMetaHash,
     datasetHash: runtime.datasetHash,
     executionArtifactHash: runtime.executionArtifactHash,
+    riskTraceHash: runtime.riskTraceHash,
+    riskUnitRatio: runtime.riskUnitRatio,
     scenarioId: runtime.scenarioId,
     fee: runtime.fee,
   }), /forbidden secret exchange.key/);

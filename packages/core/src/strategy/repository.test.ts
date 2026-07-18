@@ -35,6 +35,7 @@ plan:
   fold_count: 4
   entry_window_ms: 604800000
   observation_tail_ms: 86400000
+  risk_unit_ratio: 0.01
   execution_scenarios:
     - id: base
       fee: 0.0005
@@ -127,6 +128,7 @@ test('loads a referenced walk-forward policy from the pinned Git tree', async ()
     assert.equal(snapshot.ok, true)
     assert.equal(snapshot.manifests[0]?.walkForwardPolicy?.id, 'scalp_walk_forward_v1')
     assert.equal(snapshot.manifests[0]?.walkForwardPolicy?.plan.foldCount, 4)
+    assert.equal(snapshot.manifests[0]?.walkForwardPolicy?.plan.riskUnitRatio, 0.01)
     assert.match(snapshot.manifests[0]?.walkForwardPolicy?.policyHash ?? '', /^sha256:[a-f0-9]{64}$/)
   } finally {
     rmSync(root, { recursive: true, force: true })

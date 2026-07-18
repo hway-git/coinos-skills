@@ -200,7 +200,7 @@ function normalizeWalkForwardPolicy(value) {
     throw new Error('walkForwardPolicy.policyPath is invalid');
   }
   const plan = exactRecord(policy.plan, 'walkForwardPolicy.plan', [
-    'foldCount', 'entryWindowMs', 'observationTailMs', 'executionScenarios',
+    'foldCount', 'entryWindowMs', 'observationTailMs', 'riskUnitRatio', 'executionScenarios',
   ]);
   const executionScenarios = normalizeScenarios(plan.executionScenarios);
   const gates = exactRecord(policy.gates, 'walkForwardPolicy.gates', [
@@ -237,6 +237,7 @@ function normalizeWalkForwardPolicy(value) {
       foldCount: policyInteger(plan.foldCount, 'walkForwardPolicy.plan.foldCount', 2),
       entryWindowMs: policyInteger(plan.entryWindowMs, 'walkForwardPolicy.plan.entryWindowMs', 1),
       observationTailMs: policyInteger(plan.observationTailMs, 'walkForwardPolicy.plan.observationTailMs', 1),
+      riskUnitRatio: policyNumber(plan.riskUnitRatio, 'walkForwardPolicy.plan.riskUnitRatio', Number.MIN_VALUE, 1),
       executionScenarios,
     },
     gates: {
@@ -845,7 +846,9 @@ function normalizeBacktestMetrics(value, name) {
     normalizedRisk.observations = risk.observations.map((value, index) => {
       const observationName = `${name}.riskNormalized.observations[${index}]`;
       const observation = exactRecord(value, observationName, [
-        'entrySignalId', 'openTime', 'closeTime', 'realizedR', 'mfeR', 'maeR', 'segments',
+        'entrySignalId', 'openTime', 'closeTime', 'realizedR', 'mfeR', 'maeR',
+        'riskUnitRatio', 'riskR', 'accountEquity', 'expectedRiskBudget', 'actualRiskBudget',
+        'expectedStakeAmount', 'stakeAmount', 'segments',
       ]);
       const segments = jsonRecord(observation.segments, `${observationName}.segments`);
       const normalizedSegments = Object.fromEntries(Object.entries(segments).map(([dimension, segmentValue]) => {
@@ -859,6 +862,13 @@ function normalizeBacktestMetrics(value, name) {
         realizedR: finite(observation.realizedR, `${observationName}.realizedR`),
         mfeR: finite(observation.mfeR, `${observationName}.mfeR`),
         maeR: finite(observation.maeR, `${observationName}.maeR`),
+        riskUnitRatio: finite(observation.riskUnitRatio, `${observationName}.riskUnitRatio`),
+        riskR: finite(observation.riskR, `${observationName}.riskR`),
+        accountEquity: finite(observation.accountEquity, `${observationName}.accountEquity`),
+        expectedRiskBudget: finite(observation.expectedRiskBudget, `${observationName}.expectedRiskBudget`),
+        actualRiskBudget: finite(observation.actualRiskBudget, `${observationName}.actualRiskBudget`),
+        expectedStakeAmount: finite(observation.expectedStakeAmount, `${observationName}.expectedStakeAmount`),
+        stakeAmount: finite(observation.stakeAmount, `${observationName}.stakeAmount`),
         segments: normalizedSegments,
       };
     });
@@ -1013,7 +1023,7 @@ function normalizeCoreEvidence(value, runHash) {
 function normalizeExecutionEvidence(value, name, plan, fold) {
   const evidence = exactRecord(value, name, [
     'scenarioId', 'fee', 'freqtradeVersion', 'configHash', 'adapterHash', 'executionProfile',
-    'executionProfileHash', 'runtimeEvidenceFile', 'runtimeEvidenceHash', 'resultFile',
+    'executionProfileHash', 'riskTraceHash', 'riskUnitRatio', 'runtimeEvidenceFile', 'runtimeEvidenceHash', 'resultFile',
     'resultHash', 'resultMetaFile', 'resultMetaHash', 'reconciliation', 'feeObservations',
     'metrics',
   ]);
@@ -1036,6 +1046,13 @@ function normalizeExecutionEvidence(value, name, plan, fold) {
   }
   const resultHash = hash(evidence.resultHash, `${name}.resultHash`);
   const resultMetaHash = hash(evidence.resultMetaHash, `${name}.resultMetaHash`);
+  const riskTraceHash = hash(evidence.riskTraceHash, `${name}.riskTraceHash`);
+  if (riskTraceHash !== fold.executionRiskTraceHash) throw new Error(`${name}.riskTraceHash does not match its fold`);
+  const riskUnitRatio = finite(evidence.riskUnitRatio, `${name}.riskUnitRatio`);
+  if (riskUnitRatio <= 0 || riskUnitRatio > 1
+    || (plan.walkForwardPolicy && riskUnitRatio !== plan.walkForwardPolicy.plan.riskUnitRatio)) {
+    throw new Error(`${name}.riskUnitRatio does not match its plan policy`);
+  }
   const metrics = normalizeBacktestMetrics(evidence.metrics, `${name}.metrics`);
   if (metrics.trades !== fold.tradeIds.length) throw new Error(`${name}.metrics trades do not match the fold cohort`);
   return {
@@ -1046,6 +1063,8 @@ function normalizeExecutionEvidence(value, name, plan, fold) {
     adapterHash: hash(evidence.adapterHash, `${name}.adapterHash`),
     executionProfile,
     executionProfileHash,
+    riskTraceHash,
+    riskUnitRatio,
     runtimeEvidenceFile: archiveFile(
       evidence.runtimeEvidenceFile,
       `${name}.runtimeEvidenceFile`,
@@ -1321,6 +1340,28 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
       ['folds.*.executionEvidence.*.metrics.riskNormalized'],
     ),
     gateCheck(
+      'RISK_SIZING_VALID',
+      Boolean(policy) && scenarios.every(({ riskNormalized }) => (
+        riskNormalized.available
+        && riskNormalized.observations.every((observation) => (
+          observation.riskUnitRatio === policy.plan.riskUnitRatio
+          && Math.abs(observation.actualRiskBudget - observation.expectedRiskBudget)
+            <= Math.max(1e-8, observation.expectedRiskBudget * 1e-8)
+        ))
+      )),
+      scenarios.map(({ scenarioId, riskNormalized }) => ({
+        scenarioId,
+        observations: riskNormalized.available ? riskNormalized.observations.length : 0,
+        valid: riskNormalized.available && riskNormalized.observations.every((observation) => (
+          policy && observation.riskUnitRatio === policy.plan.riskUnitRatio
+          && Math.abs(observation.actualRiskBudget - observation.expectedRiskBudget)
+            <= Math.max(1e-8, observation.expectedRiskBudget * 1e-8)
+        )),
+      })),
+      policy ? { riskUnitRatio: policy.plan.riskUnitRatio, valid: true } : { policy: 'required' },
+      ['walkForwardPolicy.plan.riskUnitRatio', 'folds.*.executionEvidence.*.metrics.riskNormalized.observations'],
+    ),
+    gateCheck(
       'VERSIONED_GATE_POLICY_PRESENT',
       Boolean(policy),
       policy ? { id: policy.id, version: policy.version, policyHash: policy.policyHash } : false,
@@ -1475,6 +1516,8 @@ function verifyReportArchives(report, directory) {
           resultMetaHash: evidence.resultMetaHash,
           datasetHash: archivedFold.dataset.datasetHash,
           executionArtifactHash: archivedFold.executionArtifact.artifactHash,
+          riskTraceHash: archivedFold.executionRiskTrace.traceHash,
+          riskUnitRatio: evidence.riskUnitRatio,
           scenarioId: evidence.scenarioId,
           fee: evidence.fee,
         },
@@ -1485,6 +1528,8 @@ function verifyReportArchives(report, directory) {
         ['adapterHash', runtime.adapterHash],
         ['executionProfile', runtime.executionProfile],
         ['executionProfileHash', runtime.executionProfileHash],
+        ['riskTraceHash', runtime.riskTraceHash],
+        ['riskUnitRatio', runtime.riskUnitRatio],
       ]) {
         if (!isDeepStrictEqual(evidence[field], actual)) {
           throw new Error(`walk-forward execution ${field} does not match archived runtime evidence`);
@@ -1497,13 +1542,10 @@ function verifyReportArchives(report, directory) {
           signalArtifact: archivedFold.executionArtifact,
           riskTrace: archivedFold.executionRiskTrace,
           marketDataset: archivedFold.dataset,
+          riskUnitRatio: evidence.riskUnitRatio,
+          accountEquity: evidence.executionProfile.dryRunWallet,
         }),
       };
-      if (!Object.hasOwn(evidence.metrics.riskNormalized, 'observations')
-        && Object.hasOwn(recomputed.metrics.riskNormalized, 'observations')) {
-        const { observations: _observations, ...legacyRisk } = recomputed.metrics.riskNormalized;
-        recomputed.metrics = { ...recomputed.metrics, riskNormalized: legacyRisk };
-      }
       for (const field of ['reconciliation', 'feeObservations', 'metrics']) {
         if (!isDeepStrictEqual(evidence[field], recomputed[field])) {
           throw new Error(

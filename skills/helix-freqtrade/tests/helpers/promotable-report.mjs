@@ -69,17 +69,23 @@ function resultFixture(fold, scenario, stressed) {
   const profitRatio = stressed ? -0.002 : 0.01;
   const [entry, exit] = fold.executionArtifact.signals;
   const candles = fold.dataset.timeframes['1m'];
+  const risk = fold.executionRiskTrace.entries[0];
+  const openRate = tradeCount ? candles.find(({ time }) => time === entry.decisionTime).open : null;
+  const stakeAmount = tradeCount
+    ? (1000 * 0.01 * risk.riskR) / (Math.abs(openRate - risk.initialStop) / openRate)
+    : null;
+  const profitAbs = tradeCount ? stakeAmount * profitRatio : 0;
   const summary = {
     total_trades: tradeCount,
     wins: tradeCount && !stressed ? 1 : 0,
     draws: 0,
     losses: tradeCount && stressed ? 1 : 0,
     profit_total: tradeCount ? profitRatio : 0,
-    profit_total_abs: tradeCount ? profitRatio * 1000 : 0,
+    profit_total_abs: profitAbs,
     winrate: tradeCount ? (stressed ? 0 : 1) : 0,
     max_drawdown_account: tradeCount ? Math.max(0, -profitRatio) : 0,
     max_drawdown_abs: tradeCount ? Math.max(0, -profitRatio * 1000) : 0,
-    expectancy: tradeCount ? profitRatio * 1000 : 0,
+    expectancy: profitAbs,
     expectancy_ratio: stressed && tradeCount ? 0.5 : 0,
     profit_factor: stressed && tradeCount ? 0 : 0,
     holding_avg_s: tradeCount ? (exit.decisionTime - entry.decisionTime) / 1000 : 0,
@@ -91,9 +97,11 @@ function resultFixture(fold, scenario, stressed) {
       close_timestamp: exit.decisionTime,
       enter_tag: entry.signalId,
       exit_reason: exit.signalId,
-      open_rate: candles.find(({ time }) => time === entry.decisionTime).open,
+      open_rate: openRate,
       close_rate: candles.find(({ time }) => time === exit.decisionTime).open,
       profit_ratio: profitRatio,
+      profit_abs: profitAbs,
+      stake_amount: stakeAmount,
       leverage: 1,
       fee_open: scenario.fee,
       fee_close: scenario.fee,
@@ -149,7 +157,13 @@ export async function createPromotableWalkForwardReport(root, artifact) {
       strategyVersion: candidate.strategyVersion,
       policyPath: 'strategies/scalp/validation/walk-forward-policy.yaml',
       policyHash: `sha256:${'9'.repeat(64)}`,
-      plan: { foldCount: 2, entryWindowMs: 2 * minute, observationTailMs: 2 * minute, executionScenarios },
+      plan: {
+        foldCount: 2,
+        entryWindowMs: 2 * minute,
+        observationTailMs: 2 * minute,
+        riskUnitRatio: 0.01,
+        executionScenarios,
+      },
       gates: {
         censoredEntries: 'reject',
         minimumTotalTrades: 1,
@@ -253,6 +267,8 @@ export async function createPromotableWalkForwardReport(root, artifact) {
       const runtime = createExecutionRuntimeEvidence({
         resultHash, resultMetaHash, datasetHash: fold.dataset.datasetHash,
         executionArtifactHash: fold.executionArtifact.artifactHash,
+        riskTraceHash: fold.executionRiskTrace.traceHash,
+        riskUnitRatio: 0.01,
         scenarioId: scenario.id, fee: scenario.fee, freqtradeVersion: 'freqtrade test',
         configIdentity: executionConfigIdentity(config), executionProfile, adapterFiles,
       });
@@ -268,11 +284,13 @@ export async function createPromotableWalkForwardReport(root, artifact) {
         scenarioId: scenario.id, fee: scenario.fee, freqtradeVersion: runtime.freqtradeVersion,
         configHash: runtime.configHash, adapterHash: runtime.adapterHash,
         executionProfile: runtime.executionProfile, executionProfileHash: runtime.executionProfileHash,
+        riskTraceHash: fold.executionRiskTrace.traceHash, riskUnitRatio: 0.01,
         runtimeEvidenceFile, runtimeEvidenceHash, resultFile, resultHash, resultMetaFile, resultMetaHash,
         reconciliation: reconcileSignalBacktest(fixture.summary, fold.executionArtifact),
         feeObservations: backtestFeeObservations(fixture.summary, scenario.fee),
         metrics: backtestMetrics(fixture.summary, {
           signalArtifact: fold.executionArtifact, riskTrace: fold.executionRiskTrace, marketDataset: fold.dataset,
+          riskUnitRatio: 0.01, accountEquity: 1000,
         }),
       });
     }

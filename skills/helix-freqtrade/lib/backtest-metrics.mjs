@@ -88,11 +88,18 @@ function riskNormalizedMetrics(summary, context) {
   const duration = marketTimeframeMilliseconds(artifact.baseTimeframe);
   reconcileSignalBacktest(summary, artifact);
   if (summary.trades.length === 0) return unavailableRisk('NO_COMPLETED_TRADES');
+  const riskUnitRatio = requiredFinite(context.riskUnitRatio, 'risk metric riskUnitRatio');
+  if (riskUnitRatio <= 0 || riskUnitRatio > 1) throw new Error('risk metric riskUnitRatio must be in (0, 1]');
+  let accountEquity = requiredFinite(context.accountEquity, 'risk metric accountEquity');
+  if (accountEquity <= 0) throw new Error('risk metric accountEquity must be positive');
 
   const signalsById = new Map(artifact.signals.map((signal) => [signal.signalId, signal]));
   const candlesByTime = new Map(candles.map((candle) => [candle.time, candle]));
   const risksByEntryId = new Map(riskTrace.entries.map((entry) => [entry.entrySignalId, entry]));
-  const observations = summary.trades.map((trade, index) => {
+  const orderedTrades = [...summary.trades].sort((left, right) => (
+    left.open_timestamp - right.open_timestamp || String(left.enter_tag).localeCompare(String(right.enter_tag))
+  ));
+  const observations = orderedTrades.map((trade, index) => {
     const name = `Freqtrade trades[${index}]`;
     const risk = risksByEntryId.get(trade.enter_tag);
     if (!risk) throw new Error(`${name}.enter_tag has no historical risk entry`);
@@ -134,11 +141,21 @@ function riskNormalizedMetrics(summary, context) {
       throw new Error(`${name} SHORT fill must remain between its initial target and stop`);
     }
     const executionRiskDistance = Math.abs(openRate - risk.initialStop);
+    const stakeAmount = requiredFinite(trade.stake_amount, `${name}.stake_amount`);
+    if (stakeAmount <= 0) throw new Error(`${name}.stake_amount must be positive`);
+    const expectedRiskBudget = accountEquity * riskUnitRatio * risk.riskR;
+    const expectedStakeAmount = expectedRiskBudget / (executionRiskDistance / openRate);
+    const actualRiskBudget = stakeAmount * (executionRiskDistance / openRate);
+    const tolerance = Math.max(1e-8, expectedRiskBudget * 1e-8);
+    if (Math.abs(actualRiskBudget - expectedRiskBudget) > tolerance) {
+      throw new Error(`${name}.stake_amount does not match its account-equity risk budget`);
+    }
+    const profitAbs = requiredFinite(trade.profit_abs, `${name}.profit_abs`);
     const high = Math.max(...exposure.map((candle) => candle.high));
     const low = Math.min(...exposure.map((candle) => candle.low));
     const favorableDistance = risk.side === 'LONG' ? high - openRate : openRate - low;
     const adverseDistance = risk.side === 'LONG' ? openRate - low : high - openRate;
-    return {
+    const observation = {
       entrySignalId: risk.entrySignalId,
       openTime,
       closeTime,
@@ -147,8 +164,20 @@ function riskNormalizedMetrics(summary, context) {
       realizedR: profitRatio / (executionRiskDistance / openRate),
       mfeR: Math.max(0, favorableDistance / executionRiskDistance),
       maeR: Math.max(0, adverseDistance / executionRiskDistance),
+      riskUnitRatio,
+      riskR: risk.riskR,
+      accountEquity,
+      expectedRiskBudget,
+      actualRiskBudget,
+      expectedStakeAmount,
+      stakeAmount,
       segments: riskSegments(risk),
     };
+    accountEquity += profitAbs;
+    if (!Number.isFinite(accountEquity) || accountEquity <= 0) {
+      throw new Error(`${name}.profit_abs leaves invalid account equity`);
+    }
+    return observation;
   }).sort((left, right) => left.openTime - right.openTime
     || left.entrySignalId.localeCompare(right.entrySignalId));
 

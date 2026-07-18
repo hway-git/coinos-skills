@@ -25,6 +25,7 @@ export type StrategyWalkForwardPolicy = {
     foldCount: number
     entryWindowMs: number
     observationTailMs: number
+    riskUnitRatio: number
     executionScenarios: StrategyWalkForwardExecutionScenario[]
   }
   gates: {
@@ -204,7 +205,16 @@ export type StrategyHistoricalRiskTrace = StrategyHistoricalRiskTracePayload & R
   traceHash: string
 }>
 
-export const STRATEGY_SIGNAL_BATCH_SCHEMA_VERSION = 'helix.signal-batch/v1' as const
+export const STRATEGY_SIGNAL_BATCH_SCHEMA_VERSION = 'helix.signal-batch/v2' as const
+
+export type StrategySignalRiskIntent = Readonly<{
+  entryPrice: number
+  initialStop: number
+  initialTarget: number
+  riskDistance: number
+  riskR: number
+  riskUnitRatio: number
+}>
 
 export type StrategySignalPosition = Readonly<{
   object: StrategySignalObjectReference
@@ -227,6 +237,7 @@ export type StrategySignalBatchPayload = Readonly<{
   baseTimeframe: string
   positionBefore: StrategySignalPosition | null
   positionAfter: StrategySignalPosition | null
+  riskIntent: StrategySignalRiskIntent | null
   signal: StrategySignalRecord
 }>
 

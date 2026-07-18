@@ -5,10 +5,12 @@ import type {
 } from '@helix/contracts/market'
 import type {
   StrategyHistoricalDataset,
+  StrategyHistoricalRiskTraceEntry,
   StrategyPositionSide,
   StrategyRepositorySnapshot,
   StrategySignalBatch,
   StrategySignalPosition,
+  StrategySignalRiskIntent,
 } from '@helix/contracts/strategy'
 import { assertStrategyHistoricalDataset, createStrategyHistoricalDataset } from './historical-dataset'
 import {
@@ -208,6 +210,7 @@ function normalizeNoSignalJournal(
       previousDecisionStateHash: normalized.previousDecisionStateHash,
       evaluatorStateHash: normalized.evaluatorStateHash,
       position: normalized.position,
+      riskIntent: null,
       signal: null,
     })
     if (normalized.decisionStateHash !== expectedHash) {
@@ -432,6 +435,7 @@ function nextPosition(
 export class StrategyForwardSession {
   private readonly evaluator
   private readonly registeredReasonCodes: Set<string>
+  private readonly pendingRiskEntries = new Map<string, StrategyHistoricalRiskTraceEntry>()
   private readonly batches: StrategySignalBatch[] = []
   private position: StrategySignalPosition | null = null
   private processedSnapshotHash: string | null = null
@@ -456,7 +460,12 @@ export class StrategyForwardSession {
     const checkpoint = checkpointValue
       ? assertStrategyForwardCheckpoint(checkpointValue, deployment)
       : null
-    this.evaluator = createStrategyEvaluator(manifest, undefined, checkpoint?.evaluator)
+    this.evaluator = createStrategyEvaluator(manifest, (entry) => {
+      if (this.pendingRiskEntries.has(entry.entrySignalId)) {
+        throw new Error(`forward evaluator emitted duplicate risk intent ${entry.entrySignalId}`)
+      }
+      this.pendingRiskEntries.set(entry.entrySignalId, entry)
+    }, checkpoint?.evaluator)
     this.registeredReasonCodes = new Set(manifest.reasonCodes)
     if (checkpoint) {
       this.position = structuredClone(checkpoint.position)
@@ -532,6 +541,7 @@ export class StrategyForwardSession {
       const decision = decisions[0]
       const positionBefore = this.position
       let positionAfter = positionBefore
+      let riskIntent: StrategySignalRiskIntent | null = null
       if (decision) {
         if (decision.object.model !== this.deployment.strategy.objectModel) {
           throw new Error('forward decision object model does not match the deployment')
@@ -542,6 +552,29 @@ export class StrategyForwardSession {
           }
         }
         positionAfter = nextPosition(positionBefore, decision)
+        if (decision.action === 'ENTER') {
+          const entry = this.pendingRiskEntries.get(decision.signalId)
+          const riskUnitRatio = manifest.walkForwardPolicy?.plan.riskUnitRatio
+          if (!entry || riskUnitRatio === undefined) {
+            throw new Error('forward ENTER requires a versioned policy and exact evaluator risk intent')
+          }
+          if (entry.object.model !== decision.object.model || entry.object.id !== decision.object.id
+            || entry.side !== decision.side) {
+            throw new Error('forward evaluator risk intent does not match its ENTER decision')
+          }
+          riskIntent = {
+            entryPrice: entry.entryPrice.price,
+            initialStop: entry.initialStop,
+            initialTarget: entry.initialTarget,
+            riskDistance: entry.riskDistance,
+            riskR: entry.riskR,
+            riskUnitRatio,
+          }
+          this.pendingRiskEntries.delete(decision.signalId)
+        }
+      }
+      if (this.pendingRiskEntries.size !== 0) {
+        throw new Error('forward evaluator emitted risk intent without one matching ENTER')
       }
       const evaluatorCheckpoint = this.evaluator.checkpoint()
       const evaluatorStateHash = strategyForwardEvaluatorStateHash(evaluatorCheckpoint)
@@ -553,6 +586,7 @@ export class StrategyForwardSession {
         previousDecisionStateHash: this.decisionStateHash,
         evaluatorStateHash,
         position: positionAfter,
+        riskIntent,
         signal: decision ? {
           signalId: decision.signalId,
           decisionId: decision.decisionId,
@@ -566,7 +600,7 @@ export class StrategyForwardSession {
       if (decision) {
         const batchSequence = this.batchCount
         const batch = createStrategySignalBatch({
-          schemaVersion: 'helix.signal-batch/v1',
+          schemaVersion: 'helix.signal-batch/v2',
           deploymentHash: this.deployment.deploymentHash,
           batchSequence,
           previousBatchHash: this.lastBatchHash,
@@ -580,6 +614,7 @@ export class StrategyForwardSession {
           baseTimeframe: this.evaluator.baseTimeframe,
           positionBefore,
           positionAfter,
+          riskIntent,
           signal: {
             ...decision,
             sequence: batchSequence,

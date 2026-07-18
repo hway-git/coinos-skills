@@ -135,6 +135,36 @@ function snapshot(): StrategyRepositorySnapshot {
       reasonCodes: [
         'EXECUTION_TRIGGERED', 'STOP_HIT', 'TARGET_HIT', 'TIME_STOP', 'RESPONSE_FAILURE_EXIT',
       ],
+      walkForwardPolicy: {
+        schemaVersion: 'helix.walk-forward-policy/v1',
+        id: 'scalp_walk_forward_v1',
+        version: '1.0.0',
+        strategyId: 'helix_scalp_hunter',
+        strategyVersion: '1.0.1',
+        policyPath: 'strategies/scalp/validation/walk-forward-policy.yaml',
+        policyHash: `sha256:${'9'.repeat(64)}`,
+        plan: {
+          foldCount: 8,
+          entryWindowMs: 7 * 24 * 60 * minute,
+          observationTailMs: 24 * 60 * minute,
+          riskUnitRatio: 0.01,
+          executionScenarios: [{ id: 'base', fee: 0.0005 }, { id: 'stressed', fee: 0.001 }],
+        },
+        gates: {
+          censoredEntries: 'reject',
+          minimumTotalTrades: 64,
+          minimumActiveFoldRatio: 0.75,
+          minimumPositiveFoldRatio: 0.5,
+          minimumExpectancyR: 0,
+          minimumProfitFactor: 1.1,
+          maximumDrawdownR: 8,
+          segmentStability: {
+            dimensions: ['scalp.event_type'],
+            minimumTradesPerSegment: 8,
+            minimumStableSegmentRatio: 2 / 3,
+          },
+        },
+      },
     }],
     compatibility: [{
       strategyId: 'helix_scalp_hunter', engineCommit: 'c'.repeat(40), compatible: true,
@@ -357,6 +387,7 @@ test('checkpoint recovery over a compacted market window exactly matches activat
       previousDecisionStateHash: batch.previousDecisionStateHash,
       evaluatorStateHash: batch.evaluatorStateHash,
       position: batch.positionAfter,
+      riskIntent: batch.riskIntent,
       signal: {
         signalId: batch.signal.signalId,
         decisionId: batch.signal.decisionId,

@@ -46,6 +46,7 @@ import {
 } from '../lib/market-dataset.mjs';
 import { reconcileSignalBacktest } from '../lib/backtest-reconciliation.mjs';
 import { backtestFeeObservations, backtestMetrics } from '../lib/backtest-metrics.mjs';
+import { verifyHistoricalRiskTrace } from '../lib/historical-risk.mjs';
 import { firstStrategySummary, readBacktestPayload } from '../lib/backtest-result.mjs';
 import {
   SIGNAL_ADAPTER_FILE_NAMES,
@@ -704,6 +705,14 @@ function hasSignalExecutionEnvironment(evidence) {
     && environment.configHash.startsWith('sha256:')
     && typeof environment.artifactFileHash === 'string'
     && environment.artifactFileHash.startsWith('sha256:')
+    && typeof environment.riskTraceHash === 'string'
+    && environment.riskTraceHash.startsWith('sha256:')
+    && typeof environment.riskTraceFileHash === 'string'
+    && environment.riskTraceFileHash.startsWith('sha256:')
+    && typeof environment.riskUnitRatio === 'number'
+    && Number.isFinite(environment.riskUnitRatio)
+    && environment.riskUnitRatio > 0
+    && environment.riskUnitRatio <= 1
     && environment.dataFormatOhlcv === 'json'
     && environment.executionProfile?.schemaVersion === 'helix.freqtrade-execution-profile/v1';
 }
@@ -920,6 +929,34 @@ function resolveSignalArtifact(params) {
     return loadArchivedSignalArtifact(params.signal_artifact_hash.trim());
   }
   return null;
+}
+
+function archiveHistoricalRiskTrace(file, artifact) {
+  if (typeof file !== 'string' || !file.trim()) {
+    throw new Error('HelixSignalStrategy backtest requires historical_risk_trace.');
+  }
+  const source = resolve(file.trim());
+  let riskTrace;
+  try {
+    riskTrace = verifyHistoricalRiskTrace(JSON.parse(readFileSync(source, 'utf8')), artifact);
+  } catch (error) {
+    throw new Error(`cannot read historical risk trace ${source}: ${error.message}`);
+  }
+  const directory = resolve(USER_DATA, 'helix', 'risk-traces');
+  mkdirSync(directory, { recursive: true });
+  const hashFile = resolve(directory, `${riskTrace.traceHash.replace(':', '-')}.json`);
+  const content = `${JSON.stringify(riskTrace, null, 2)}\n`;
+  const expectedFileHash = `sha256:${createHash('sha256').update(content).digest('hex')}`;
+  if (existsSync(hashFile)) {
+    if (fileHash(hashFile) !== expectedFileHash) throw new Error(`archived historical risk trace is corrupt: ${hashFile}`);
+    verifyHistoricalRiskTrace(JSON.parse(readFileSync(hashFile, 'utf8')), artifact);
+  } else {
+    const temporary = `${hashFile}.tmp.${process.pid}`;
+    writeFileSync(temporary, content, { mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, hashFile);
+  }
+  return { riskTrace, hashFile, fileHash: expectedFileHash };
 }
 
 function resolveSignalWalkForwardReport(params, artifact) {
@@ -2966,6 +3003,16 @@ const actions = {
     const stagedDataset = signalArtifact
       ? stageSignalBacktestDataset(String(params.market_dataset), signalArtifact)
       : null;
+    const riskUnitRatio = signalArtifact ? Number(params.risk_unit_ratio) : null;
+    if (signalArtifact && (!Number.isFinite(riskUnitRatio) || riskUnitRatio <= 0 || riskUnitRatio > 1)) {
+      throw new Error('HelixSignalStrategy backtest requires risk_unit_ratio in (0, 1].');
+    }
+    if (!signalArtifact && (params.historical_risk_trace != null || params.risk_unit_ratio != null)) {
+      throw new Error('historical_risk_trace and risk_unit_ratio require a signal_artifact backtest.');
+    }
+    const archivedRiskTrace = signalArtifact
+      ? archiveHistoricalRiskTrace(params.historical_risk_trace, signalArtifact)
+      : null;
     ensureHostFreqtradeInstalled();
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
@@ -3062,6 +3109,10 @@ const actions = {
       HELIX_SIGNAL_ARTIFACT_HASH: signalArtifact.artifactHash,
       HELIX_SIGNAL_ARTIFACT_OVERRIDE: '1',
       HELIX_SIGNAL_TIMEFRAME: signalArtifact.baseTimeframe,
+      HELIX_SIGNAL_RISK_TRACE_PATH: dockerCliPath(archivedRiskTrace.hashFile),
+      HELIX_SIGNAL_RISK_TRACE_HASH: archivedRiskTrace.riskTrace.traceHash,
+      HELIX_SIGNAL_RISK_TRACE_FILE_HASH: archivedRiskTrace.fileHash,
+      HELIX_SIGNAL_RISK_UNIT_RATIO: String(riskUnitRatio),
     } : proxyEnv();
     let rawOutput;
     try {
@@ -3100,6 +3151,9 @@ const actions = {
     if (archivedArtifact) {
       requireUnchangedFile(archivedArtifact.hashFile, archivedArtifactFileHash, 'Archived signal artifact');
     }
+    if (archivedRiskTrace) {
+      requireUnchangedFile(archivedRiskTrace.hashFile, archivedRiskTrace.fileHash, 'Archived historical risk trace');
+    }
     requireUnchangedFile(resultPath, resultHash, 'Freqtrade result');
     requireUnchangedFile(resultMetaPath, resultMetaHash, 'Freqtrade result metadata');
     const evidence = recordBacktestEvidence({
@@ -3117,6 +3171,9 @@ const actions = {
         freqtradeVersion,
         configHash,
         artifactFileHash: archivedArtifactFileHash,
+        riskTraceHash: archivedRiskTrace?.riskTrace.traceHash ?? null,
+        riskTraceFileHash: archivedRiskTrace?.fileHash ?? null,
+        riskUnitRatio,
         fee,
         dataFormatOhlcv: stagedDataset ? 'json' : null,
         configIdentity: safeBacktestConfig ? executionConfigIdentity(safeBacktestConfig) : null,
@@ -3178,6 +3235,8 @@ const actions = {
       for (const scenario of bundle.plan.executionScenarios) {
         const result = runBacktestSubprocess({
           signal_artifact: resolve(bundle.directory, fold.run.executionArtifactFile),
+          historical_risk_trace: resolve(bundle.directory, fold.run.executionRiskTraceFile),
+          risk_unit_ratio: bundle.plan.walkForwardPolicy?.plan.riskUnitRatio,
           market_dataset: resolve(bundle.directory, fold.run.datasetFile),
           fee: scenario.fee,
         });
@@ -3196,6 +3255,8 @@ const actions = {
             signalArtifact: fold.executionArtifact,
             riskTrace: fold.executionRiskTrace,
             marketDataset: fold.dataset,
+            riskUnitRatio: bundle.plan.walkForwardPolicy?.plan.riskUnitRatio,
+            accountEquity: record.executionEnvironment?.configIdentity?.dryRunWallet,
           },
         );
         if (!hasSignalExecutionEnvironment(record)) {
@@ -3233,6 +3294,8 @@ const actions = {
           resultMetaHash: verified.resultMetaHash,
           datasetHash: fold.dataset.datasetHash,
           executionArtifactHash: fold.executionArtifact.artifactHash,
+          riskTraceHash: fold.executionRiskTrace.traceHash,
+          riskUnitRatio: bundle.plan.walkForwardPolicy.plan.riskUnitRatio,
           scenarioId: scenario.id,
           fee: scenario.fee,
           freqtradeVersion: environment.freqtradeVersion,
@@ -3249,6 +3312,8 @@ const actions = {
           executionProfile: environment.executionProfile,
           executionProfileHash: walkForwardEvidenceHash(environment.executionProfile),
           adapterHash: `sha256:${record.strategyHash}`,
+          riskTraceHash: fold.executionRiskTrace.traceHash,
+          riskUnitRatio: bundle.plan.walkForwardPolicy.plan.riskUnitRatio,
           runtimeEvidenceFile: runtimeArchive.file,
           runtimeEvidenceHash: runtimeArchive.hash,
           resultFile: archiveWalkForwardEvidence(

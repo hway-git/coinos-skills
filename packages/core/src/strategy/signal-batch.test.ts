@@ -18,6 +18,14 @@ import {
 import { reconcileStrategyForwardBatchStore } from './forward-worker'
 
 const minute = 60_000
+const riskIntent = {
+  entryPrice: 100,
+  initialStop: 95,
+  initialTarget: 110,
+  riskDistance: 5,
+  riskR: 0.25,
+  riskUnitRatio: 0.01,
+} as const
 
 function deployment() {
   const payload: StrategyForwardDeploymentPayload = {
@@ -51,6 +59,7 @@ function decisionStateHash(
   previousDecisionStateHash: string | null,
   evaluatorStateHash: string,
   position: ReturnType<typeof createStrategySignalBatch>['positionAfter'],
+  risk: ReturnType<typeof createStrategySignalBatch>['riskIntent'],
   signal: ReturnType<typeof createStrategySignalBatch>['signal'],
 ) {
   return strategyForwardDecisionStateHash({
@@ -61,6 +70,7 @@ function decisionStateHash(
     previousDecisionStateHash,
     evaluatorStateHash,
     position,
+    riskIntent: risk,
     signal: {
       signalId: signal.signalId,
       decisionId: signal.decisionId,
@@ -84,15 +94,16 @@ test('builds an immutable ENTER/EXIT batch chain with per-decision market identi
   }
   const enterEvaluatorStateHash = `sha256:${'1'.repeat(64)}`
   const enterDecisionStateHash = decisionStateHash(
-    forward, 'd', null, enterEvaluatorStateHash, position, enterSignal,
+    forward, 'd', null, enterEvaluatorStateHash, position, riskIntent, enterSignal,
   )
   const enter = createStrategySignalBatch({
-    schemaVersion: 'helix.signal-batch/v1', deploymentHash: forward.deploymentHash,
+    schemaVersion: 'helix.signal-batch/v2', deploymentHash: forward.deploymentHash,
     batchSequence: 0, previousBatchHash: null, identity: identity('d'), strategyLifecycle: 'shadow',
     previousDecisionStateHash: null, evaluatorStateHash: enterEvaluatorStateHash,
     decisionStateHash: enterDecisionStateHash,
     objectModel: 'PRICE_EVENT', symbol: forward.symbol, baseTimeframe: '1m',
     positionBefore: null, positionAfter: position,
+    riskIntent,
     signal: enterSignal,
   })
   const exitSignal = {
@@ -102,14 +113,15 @@ test('builds an immutable ENTER/EXIT batch chain with per-decision market identi
   }
   const exitEvaluatorStateHash = `sha256:${'3'.repeat(64)}`
   const exit = createStrategySignalBatch({
-    schemaVersion: 'helix.signal-batch/v1', deploymentHash: forward.deploymentHash,
+    schemaVersion: 'helix.signal-batch/v2', deploymentHash: forward.deploymentHash,
     batchSequence: 1, previousBatchHash: enter.batchHash, identity: identity('e'), strategyLifecycle: 'shadow',
     previousDecisionStateHash: enter.decisionStateHash, evaluatorStateHash: exitEvaluatorStateHash,
     decisionStateHash: decisionStateHash(
-      forward, 'e', enter.decisionStateHash, exitEvaluatorStateHash, null, exitSignal,
+      forward, 'e', enter.decisionStateHash, exitEvaluatorStateHash, null, null, exitSignal,
     ),
     objectModel: 'PRICE_EVENT', symbol: forward.symbol, baseTimeframe: '1m',
     positionBefore: position, positionAfter: null,
+    riskIntent: null,
     signal: exitSignal,
   })
 
@@ -139,12 +151,13 @@ test('rejects batch tampering and broken hash or position continuity', () => {
   }
   const evaluatorStateHash = `sha256:${'1'.repeat(64)}`
   const enter = createStrategySignalBatch({
-    schemaVersion: 'helix.signal-batch/v1', deploymentHash: forward.deploymentHash,
+    schemaVersion: 'helix.signal-batch/v2', deploymentHash: forward.deploymentHash,
     batchSequence: 0, previousBatchHash: null, identity: identity('d'), strategyLifecycle: 'shadow',
     previousDecisionStateHash: null, evaluatorStateHash,
-    decisionStateHash: decisionStateHash(forward, 'd', null, evaluatorStateHash, position, enterSignal),
+    decisionStateHash: decisionStateHash(forward, 'd', null, evaluatorStateHash, position, riskIntent, enterSignal),
     objectModel: 'PRICE_EVENT', symbol: forward.symbol, baseTimeframe: '1m',
     positionBefore: null, positionAfter: position,
+    riskIntent,
     signal: enterSignal,
   })
   const tampered = {
@@ -160,6 +173,7 @@ test('rejects batch tampering and broken hash or position continuity', () => {
     previousBatchHash: `sha256:${'f'.repeat(64)}`,
     positionBefore: position,
     positionAfter: null,
+    riskIntent: null,
     signal: {
       ...enter.signal, sequence: 1, signalId: 'exit-1', decisionId: 'decision-2', action: 'EXIT',
       sourceCandleOpenTime: 2 * minute, decisionTime: 3 * minute, reasonCodes: ['TIME_STOP'],
@@ -168,6 +182,7 @@ test('rejects batch tampering and broken hash or position continuity', () => {
   assert.throws(() => assertStrategySignalBatchChain(forward, [enter, wrongPrevious]), /chain is broken/)
   assert.throws(() => createStrategySignalBatch({
     ...enterPayload, batchSequence: 1, previousBatchHash: enter.batchHash,
+    riskIntent: null,
     signal: { ...enter.signal, sequence: 1, signalId: 'exit-1', decisionId: 'decision-2', action: 'EXIT' },
   }), /EXIT batch must close/)
 })
@@ -186,12 +201,13 @@ test('batch store appends deterministic replay once and rejects disk tampering',
   }
   const evaluatorStateHash = `sha256:${'1'.repeat(64)}`
   const enter = createStrategySignalBatch({
-    schemaVersion: 'helix.signal-batch/v1', deploymentHash: forward.deploymentHash,
+    schemaVersion: 'helix.signal-batch/v2', deploymentHash: forward.deploymentHash,
     batchSequence: 0, previousBatchHash: null, identity: identity('d'), strategyLifecycle: 'shadow',
     previousDecisionStateHash: null, evaluatorStateHash,
-    decisionStateHash: decisionStateHash(forward, 'd', null, evaluatorStateHash, position, enterSignal),
+    decisionStateHash: decisionStateHash(forward, 'd', null, evaluatorStateHash, position, riskIntent, enterSignal),
     objectModel: 'PRICE_EVENT', symbol: forward.symbol, baseTimeframe: '1m',
     positionBefore: null, positionAfter: position,
+    riskIntent,
     signal: enterSignal,
   })
 

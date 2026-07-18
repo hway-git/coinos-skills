@@ -144,6 +144,7 @@ function policyFixture(): StrategyWalkForwardPolicy {
       foldCount: 2,
       entryWindowMs: 2 * day,
       observationTailMs: day,
+      riskUnitRatio: 0.01,
       executionScenarios: [
         { id: 'base', fee: 0.0005 },
         { id: 'stressed', fee: 0.001 },
@@ -223,6 +224,10 @@ test('pins the versioned policy and rejects plan parameters that diverge from it
   const plan = createStrategyWalkForwardPlan(options)
   assert.deepEqual(plan.walkForwardPolicy, policyFixture())
   assert.deepEqual(assertStrategyWalkForwardPlan(plan), plan)
+
+  const changedRiskUnit = structuredClone(plan)
+  changedRiskUnit.walkForwardPolicy!.plan.riskUnitRatio = 0.02
+  assert.throws(() => assertStrategyWalkForwardPlan(changedRiskUnit), /plan hash mismatch/)
 
   const wrongWindow = planOptions()
   wrongWindow.snapshot.manifests[0]!.walkForwardPolicy = policyFixture()

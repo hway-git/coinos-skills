@@ -367,6 +367,9 @@ setInterval(() => {}, 1000);
           freqtradeVersion: 'freqtrade test',
           configHash: sha256(originalConfig),
           artifactFileHash: sha256(artifactContent),
+          riskTraceHash: sha256('host-risk-trace'),
+          riskTraceFileHash: sha256('host-risk-trace-file'),
+          riskUnitRatio: 0.01,
           fee: null,
           dataFormatOhlcv: 'json',
           executionProfile: {
