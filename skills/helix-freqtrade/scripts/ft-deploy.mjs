@@ -2021,7 +2021,7 @@ function generateHostConfig(exchangeInfo, apiPassword, params = {}) {
     max_open_trades: params.max_open_trades || 2,
     stake_currency: 'USDT',
     stake_amount: params.stake_amount || 'unlimited',
-    tradable_balance_ratio: params.tradable_balance_ratio || 0.5,
+    tradable_balance_ratio: params.tradable_balance_ratio ?? (params.helix_signal_artifact_path ? 1 : 0.5),
     dry_run: params.dry_run !== false,
     dry_run_wallet: 1000,
     cancel_open_orders_on_exit: false,
@@ -2248,6 +2248,7 @@ const actions = {
         }
         if (signalArtifact) {
           next.timeframe = signalArtifact.baseTimeframe;
+          next.tradable_balance_ratio = 1;
           next.helix_signal_artifact_path = dockerCliPath(archivedArtifact.hashFile);
           next.helix_signal_artifact_hash = signalArtifact.artifactHash;
           if (forwardDeployment) configureForwardRuntime(next, forwardDeployment, forwardPaths);

@@ -920,7 +920,7 @@ print(json.dumps({
   assert.deepEqual(JSON.parse(stdout), {
     forward: 500,
     forward_max_reject: 0,
-    forward_leverage_reject: 0,
+    forward_leverage_reject: 250,
     forward_missing_reject: 0,
     historical: 500,
     historical_wrong_file_pin: 0,

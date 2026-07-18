@@ -6,6 +6,7 @@ import { evaluateScalpRiskPolicy, evaluateScalpTimePolicy } from './scalp-polici
 const riskConfig: ScalpRiskPolicyConfig = {
   dailyLossLimitR: 1,
   maxConsecutiveLosses: 3,
+  maximumLeverage: 50,
   riskByGradeR: { A_PLUS: 0.35, A: 0.25, B: 0.15 },
 }
 
@@ -88,5 +89,14 @@ test('Scalp policies reject incomplete or incoherent configuration instead of us
       responseState: 'EXPECTED_RESPONSE_WINDOW',
     }),
     /response window cannot exceed max holding time/,
+  )
+})
+
+test('Scalp risk policy rejects entries that exceed the configured leverage ceiling', () => {
+  assert.deepEqual(
+    evaluateScalpRiskPolicy(riskConfig, {
+      grade: 'A_PLUS', dailyLossUsedR: 0, consecutiveLosses: 0, priceRiskRatio: 0.00005,
+    }),
+    { allowed: false, riskR: 0, reasonCodes: ['LEVERAGE_TOO_HIGH'] },
   )
 })

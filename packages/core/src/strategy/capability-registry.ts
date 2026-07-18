@@ -225,9 +225,10 @@ const ENGINE_CAPABILITIES: EngineCapabilityDefinition[] = [
     validateConfiguration: (value) => {
       const data = record(value)
       return Boolean(data
-        && exactKeys(data, ['daily_loss_limit_r', 'max_consecutive_losses', 'risk_by_grade_r'])
+        && exactKeys(data, ['daily_loss_limit_r', 'max_consecutive_losses', 'maximum_leverage', 'risk_by_grade_r'])
         && positive(data.daily_loss_limit_r)
         && positiveInteger(data.max_consecutive_losses)
+        && positive(data.maximum_leverage)
         && exactPositiveRecord(data.risk_by_grade_r, ['A_PLUS', 'A', 'B']))
     },
   },
@@ -261,8 +262,9 @@ const ENGINE_CAPABILITIES: EngineCapabilityDefinition[] = [
     validateConfiguration: (value) => {
       const data = record(value)
       return Boolean(data
-        && exactKeys(data, ['thesis_risk_budget_r', 'risk_by_stage_r'])
+        && exactKeys(data, ['thesis_risk_budget_r', 'maximum_leverage', 'risk_by_stage_r'])
         && positive(data.thesis_risk_budget_r)
+        && positive(data.maximum_leverage)
         && exactPositiveRecord(data.risk_by_stage_r, ['EARLY', 'STANDARD', 'CONFIRMED']))
     },
   },

@@ -503,6 +503,7 @@ export class ScalpHistoricalEvaluator {
       grade,
       dailyLossUsedR: this.dailyLossUsedR,
       consecutiveLosses: this.consecutiveLosses,
+      priceRiskRatio: riskDistance / entryPrice,
     })
     if (!risk.allowed) {
       this.recordEventRejection(this.event.id, risk.reasonCodes)

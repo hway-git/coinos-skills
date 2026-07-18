@@ -28,9 +28,10 @@ function normalizeR(value: number) {
 
 export function evaluateSwingRiskPolicy(
   config: SwingRiskPolicyConfig,
-  input: { stage: SwingExecutionStage; currentThesisRiskR: number; availablePortfolioRiskR: number },
+  input: { stage: SwingExecutionStage; currentThesisRiskR: number; availablePortfolioRiskR: number; priceRiskRatio?: number },
 ): SwingRiskDecision {
   positiveFinite(config.thesisRiskBudgetR, 'config.thesisRiskBudgetR')
+  positiveFinite(config.maximumLeverage, 'config.maximumLeverage')
   for (const stage of EXECUTION_STAGES) positiveFinite(config.riskByStageR[stage], `config.riskByStageR.${stage}`)
   nonNegativeFinite(input.currentThesisRiskR, 'input.currentThesisRiskR')
   nonNegativeFinite(input.availablePortfolioRiskR, 'input.availablePortfolioRiskR')
@@ -38,12 +39,17 @@ export function evaluateSwingRiskPolicy(
   const requestedRiskR = normalizeR(config.riskByStageR[input.stage])
   const remainingThesisRiskR = normalizeR(Math.max(0, config.thesisRiskBudgetR - input.currentThesisRiskR))
   const availablePortfolioRiskR = normalizeR(input.availablePortfolioRiskR)
-  const allowed = requestedRiskR <= remainingThesisRiskR && requestedRiskR <= availablePortfolioRiskR
+  let leverageTooHigh = false
+  if (input.priceRiskRatio !== undefined) {
+    positiveFinite(input.priceRiskRatio, 'input.priceRiskRatio')
+    leverageTooHigh = requestedRiskR / input.priceRiskRatio > config.maximumLeverage
+  }
+  const allowed = requestedRiskR <= remainingThesisRiskR && requestedRiskR <= availablePortfolioRiskR && !leverageTooHigh
   return {
     allowed,
     requestedRiskR: allowed ? requestedRiskR : 0,
     remainingThesisRiskR,
-    reasonCodes: allowed ? [] : ['RISK_BUDGET_EXCEEDED'],
+    reasonCodes: allowed ? [] : leverageTooHigh ? ['LEVERAGE_TOO_HIGH'] : ['RISK_BUDGET_EXCEEDED'],
   }
 }
 

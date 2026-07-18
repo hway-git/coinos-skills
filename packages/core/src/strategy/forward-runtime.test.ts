@@ -101,6 +101,7 @@ function snapshot(): StrategyRepositorySnapshot {
     micro_structure_execution_v1: { min_rr: 1 },
     scalp_risk_budget_v1: {
       daily_loss_limit_r: 10, max_consecutive_losses: 20,
+      maximum_leverage: 50,
       risk_by_grade_r: { A_PLUS: 0.35, A: 0.25, B: 0.15 },
     },
     scalp_time_stop_v1: {

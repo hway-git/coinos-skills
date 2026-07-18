@@ -60,6 +60,7 @@ function snapshot(): StrategyRepositorySnapshot {
     },
     swing_risk_budget_v1: {
       thesis_risk_budget_r: 1,
+      maximum_leverage: 50,
       risk_by_stage_r: { EARLY: 0.2, STANDARD: 0.3, CONFIRMED: 0.5 },
     },
   }

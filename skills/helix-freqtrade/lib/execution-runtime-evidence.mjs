@@ -274,7 +274,9 @@ export function createSecretFreeBacktestConfig(config, { timeframe, pairs }) {
     max_open_trades: identity.maxOpenTrades,
     stake_currency: identity.stakeCurrency,
     stake_amount: safeClone(identity.stakeAmount),
-    tradable_balance_ratio: identity.tradableBalanceRatio,
+    // Signal risk budgets are defined from full account equity; execution
+    // leverage, rather than a reduced wallet slice, limits the stake.
+    tradable_balance_ratio: 1,
     dry_run: true,
     dry_run_wallet: identity.dryRunWallet,
     entry_pricing: safeClone(identity.entryPricing),

@@ -49,6 +49,7 @@ class HelixSignalStrategy(IStrategy):
     _helix_batches = None
     _helix_historical_risk_fingerprint = None
     _helix_historical_risks = None
+    _helix_stake_headroom = 1.01
 
     def _artifact_path(self) -> Path:
         environment_path = os.environ.get("HELIX_SIGNAL_ARTIFACT_PATH", "").strip()
@@ -223,41 +224,67 @@ class HelixSignalStrategy(IStrategy):
         except (SignalArtifactError, ValueError):
             return False
 
+    def _risk_context(self, pair, current_rate, entry_tag, side):
+        if not isinstance(current_rate, (int, float)) or not math.isfinite(current_rate) or current_rate <= 0:
+            raise SignalArtifactError("current rate must be finite and positive")
+        expected_side = "LONG" if side == "long" else "SHORT" if side == "short" else None
+        if expected_side is None:
+            raise SignalArtifactError("entry side is invalid")
+        risk_record = self._risk_index(pair).get(entry_tag)
+        if not risk_record or risk_record["side"] != expected_side:
+            raise SignalArtifactError("entry tag has no matching risk intent")
+        risk = validate_risk_intent(risk_record["riskIntent"], "ENTER", expected_side)
+        initial_stop = float(risk["initialStop"])
+        if expected_side == "LONG" and initial_stop >= current_rate:
+            raise SignalArtifactError("LONG stop must be below the current rate")
+        if expected_side == "SHORT" and initial_stop <= current_rate:
+            raise SignalArtifactError("SHORT stop must be above the current rate")
+        price_risk_ratio = abs(current_rate - initial_stop) / current_rate
+        if not math.isfinite(price_risk_ratio) or price_risk_ratio <= 0:
+            raise SignalArtifactError("price risk ratio is invalid")
+        stake_currency = str(self.config.get("stake_currency", "")).strip()
+        equity = float(self.wallets.get_total(stake_currency))
+        if not math.isfinite(equity) or equity <= 0:
+            raise SignalArtifactError("wallet equity is invalid")
+        return risk, equity, price_risk_ratio
+
+    def leverage(
+        self, pair, current_time, current_rate, proposed_leverage, max_leverage, entry_tag, side, **kwargs,
+    ) -> float:
+        try:
+            if not isinstance(max_leverage, (int, float)) or not math.isfinite(max_leverage) or max_leverage < 1:
+                return 1.0
+            risk, equity, price_risk_ratio = self._risk_context(pair, current_rate, entry_tag, side)
+            tradable_ratio = float(self.config.get("tradable_balance_ratio", 1.0))
+            if not math.isfinite(tradable_ratio) or tradable_ratio <= 0 or tradable_ratio > 1:
+                return 1.0
+            available_stake = equity * tradable_ratio
+            risk_budget = equity * float(risk["riskUnitRatio"]) * float(risk["riskR"])
+            required_at_one_x = risk_budget / price_risk_ratio
+            required_leverage = (required_at_one_x / available_stake) * self._helix_stake_headroom
+            selected = max(1.0, required_leverage)
+            selected = math.ceil(selected * 100) / 100
+            return min(float(max_leverage), selected)
+        except (AttributeError, KeyError, SignalArtifactError, TypeError, ValueError):
+            return 1.0
+
     def custom_stake_amount(
         self, pair, current_time, current_rate, proposed_stake, min_stake,
         max_stake, leverage, entry_tag, side, **kwargs,
     ) -> float:
         try:
-            if not isinstance(current_rate, (int, float)) or not math.isfinite(current_rate) or current_rate <= 0:
+            if not isinstance(leverage, (int, float)) or not math.isfinite(leverage) or leverage < 1:
                 return 0.0
-            if not isinstance(leverage, (int, float)) or leverage != 1:
-                return 0.0
-            risk_record = self._risk_index(pair).get(entry_tag)
-            expected_side = "LONG" if side == "long" else "SHORT" if side == "short" else None
-            if not risk_record or risk_record["side"] != expected_side:
-                return 0.0
-            risk = validate_risk_intent(risk_record["riskIntent"], "ENTER", expected_side)
-            initial_stop = float(risk["initialStop"])
-            if expected_side == "LONG" and initial_stop >= current_rate:
-                return 0.0
-            if expected_side == "SHORT" and initial_stop <= current_rate:
-                return 0.0
-            price_risk_ratio = abs(current_rate - initial_stop) / current_rate
-            if not math.isfinite(price_risk_ratio) or price_risk_ratio <= 0:
-                return 0.0
-            stake_currency = str(self.config.get("stake_currency", "")).strip()
-            equity = float(self.wallets.get_total(stake_currency))
-            if not math.isfinite(equity) or equity <= 0:
-                return 0.0
+            risk, equity, price_risk_ratio = self._risk_context(pair, current_rate, entry_tag, side)
             risk_budget = equity * float(risk["riskUnitRatio"]) * float(risk["riskR"])
-            stake_notional = risk_budget / price_risk_ratio
-            if not math.isfinite(stake_notional) or stake_notional <= 0:
+            stake_amount = risk_budget / (price_risk_ratio * float(leverage))
+            if not math.isfinite(stake_amount) or stake_amount <= 0:
                 return 0.0
-            if min_stake is not None and stake_notional < float(min_stake):
+            if min_stake is not None and stake_amount < float(min_stake):
                 return 0.0
-            if max_stake is None or not math.isfinite(float(max_stake)) or stake_notional > float(max_stake):
+            if max_stake is None or not math.isfinite(float(max_stake)) or stake_amount > float(max_stake):
                 return 0.0
-            return stake_notional
+            return stake_amount
         except (AttributeError, KeyError, SignalArtifactError, TypeError, ValueError):
             return 0.0
 

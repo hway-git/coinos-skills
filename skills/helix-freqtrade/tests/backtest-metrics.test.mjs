@@ -288,10 +288,10 @@ test('computes net realized R and exact-dataset MFE/MAE from the locked initial 
   assert.ok(Math.abs(metrics.riskNormalized.observations[0].stakeAmount - 51) < 1e-12);
 });
 
-test('requires 1x leverage and exact trace/dataset linkage for risk-normalized metrics', () => {
+test('requires bounded leverage and exact trace/dataset linkage for risk-normalized metrics', () => {
   const leveraged = riskMetricFixture();
-  leveraged.summary.trades[0].leverage = 2;
-  assert.throws(() => backtestMetrics(leveraged.summary, leveraged), /leverage must equal 1/);
+  leveraged.summary.trades[0].leverage = 0.5;
+  assert.throws(() => backtestMetrics(leveraged.summary, leveraged), /leverage must be at least 1/);
 
   const invalidFill = riskMetricFixture();
   invalidFill.summary.trades[0].open_rate = 95;

@@ -480,6 +480,7 @@ export class SwingHistoricalEvaluator {
       stage,
       currentThesisRiskR: this.thesisRiskUsedR,
       availablePortfolioRiskR: Math.max(0, this.config.risk.thesisRiskBudgetR - this.thesisRiskUsedR),
+      priceRiskRatio: riskDistance / entryPrice,
     })
     if (!risk.allowed) {
       this.recordEntryGateRejection(this.thesis.id, risk.reasonCodes)

@@ -3,6 +3,8 @@ import { verifyHistoricalRiskTrace } from './historical-risk.mjs';
 import { marketTimeframeMilliseconds, verifyMarketDataset } from './market-dataset.mjs';
 import { verifySignalArtifact } from './signal-artifact.mjs';
 
+export const RISK_BUDGET_TOLERANCE_RATIO = 0.01;
+
 function firstField(summary, fields, name) {
   for (const field of fields) {
     if (!Object.prototype.hasOwnProperty.call(summary, field)) continue;
@@ -114,8 +116,8 @@ function riskNormalizedMetrics(summary, context) {
     const closeRate = requiredFinite(trade.close_rate, `${name}.close_rate`);
     if (closeRate <= 0) throw new Error(`${name}.close_rate must be positive`);
     const leverage = requiredFinite(trade.leverage, `${name}.leverage`);
-    if (leverage !== 1) {
-      throw new Error(`${name}.leverage must equal 1 for Helix risk-normalized metrics`);
+    if (leverage < 1) {
+      throw new Error(`${name}.leverage must be at least 1 for Helix risk-normalized metrics`);
     }
     const { open_timestamp: openTime, close_timestamp: closeTime } = trade;
     if (openTime % duration || closeTime % duration || closeTime <= openTime) {
@@ -144,11 +146,12 @@ function riskNormalizedMetrics(summary, context) {
     const stakeAmount = requiredFinite(trade.stake_amount, `${name}.stake_amount`);
     if (stakeAmount <= 0) throw new Error(`${name}.stake_amount must be positive`);
     const expectedRiskBudget = accountEquity * riskUnitRatio * risk.riskR;
-    const expectedStakeAmount = expectedRiskBudget / (executionRiskDistance / openRate);
-    const actualRiskBudget = stakeAmount * (executionRiskDistance / openRate);
-    const tolerance = Math.max(1e-8, expectedRiskBudget * 1e-8);
-    if (Math.abs(actualRiskBudget - expectedRiskBudget) > tolerance) {
-      throw new Error(`${name}.stake_amount does not match its account-equity risk budget`);
+    const expectedStakeAmount = expectedRiskBudget / ((executionRiskDistance / openRate) * leverage);
+    const actualRiskBudget = stakeAmount * leverage * (executionRiskDistance / openRate);
+    const tolerance = Math.max(1e-8, expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO);
+    if (actualRiskBudget > expectedRiskBudget + tolerance
+      || actualRiskBudget < expectedRiskBudget - tolerance) {
+      throw new Error(`${name}.stake_amount does not match its account-equity risk budget within execution precision`);
     }
     const profitAbs = requiredFinite(trade.profit_abs, `${name}.profit_abs`);
     const high = Math.max(...exposure.map((candle) => candle.high));
@@ -159,13 +162,13 @@ function riskNormalizedMetrics(summary, context) {
       entrySignalId: risk.entrySignalId,
       openTime,
       closeTime,
-      // Freqtrade profit_ratio is net of its recorded fees. At the required 1x leverage,
-      // actual fill-to-initial-stop distance over the fill is the execution-risk denominator.
-      realizedR: profitRatio / (executionRiskDistance / openRate),
+      // Freqtrade profit_ratio is net of fees and includes futures leverage.
+      realizedR: profitRatio / ((executionRiskDistance / openRate) * leverage),
       mfeR: Math.max(0, favorableDistance / executionRiskDistance),
       maeR: Math.max(0, adverseDistance / executionRiskDistance),
       riskUnitRatio,
       riskR: risk.riskR,
+      leverage,
       accountEquity,
       expectedRiskBudget,
       actualRiskBudget,

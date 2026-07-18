@@ -2,7 +2,11 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { backtestFeeObservations, backtestMetrics } from './backtest-metrics.mjs';
+import {
+  backtestFeeObservations,
+  backtestMetrics,
+  RISK_BUDGET_TOLERANCE_RATIO,
+} from './backtest-metrics.mjs';
 import { reconcileSignalBacktest } from './backtest-reconciliation.mjs';
 import { firstStrategySummary, readBacktestPayload } from './backtest-result.mjs';
 import { verifyExecutionRuntimeArchive } from './execution-runtime-evidence.mjs';
@@ -847,7 +851,7 @@ function normalizeBacktestMetrics(value, name) {
       const observationName = `${name}.riskNormalized.observations[${index}]`;
       const observation = exactRecord(value, observationName, [
         'entrySignalId', 'openTime', 'closeTime', 'realizedR', 'mfeR', 'maeR',
-        'riskUnitRatio', 'riskR', 'accountEquity', 'expectedRiskBudget', 'actualRiskBudget',
+        'riskUnitRatio', 'riskR', 'leverage', 'accountEquity', 'expectedRiskBudget', 'actualRiskBudget',
         'expectedStakeAmount', 'stakeAmount', 'segments',
       ]);
       const segments = jsonRecord(observation.segments, `${observationName}.segments`);
@@ -864,6 +868,7 @@ function normalizeBacktestMetrics(value, name) {
         maeR: finite(observation.maeR, `${observationName}.maeR`),
         riskUnitRatio: finite(observation.riskUnitRatio, `${observationName}.riskUnitRatio`),
         riskR: finite(observation.riskR, `${observationName}.riskR`),
+        leverage: finite(observation.leverage, `${observationName}.leverage`),
         accountEquity: finite(observation.accountEquity, `${observationName}.accountEquity`),
         expectedRiskBudget: finite(observation.expectedRiskBudget, `${observationName}.expectedRiskBudget`),
         actualRiskBudget: finite(observation.actualRiskBudget, `${observationName}.actualRiskBudget`),
@@ -1346,7 +1351,7 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
         && riskNormalized.observations.every((observation) => (
           observation.riskUnitRatio === policy.plan.riskUnitRatio
           && Math.abs(observation.actualRiskBudget - observation.expectedRiskBudget)
-            <= Math.max(1e-8, observation.expectedRiskBudget * 1e-8)
+            <= Math.max(1e-8, observation.expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO)
         ))
       )),
       scenarios.map(({ scenarioId, riskNormalized }) => ({
@@ -1355,7 +1360,7 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
         valid: riskNormalized.available && riskNormalized.observations.every((observation) => (
           policy && observation.riskUnitRatio === policy.plan.riskUnitRatio
           && Math.abs(observation.actualRiskBudget - observation.expectedRiskBudget)
-            <= Math.max(1e-8, observation.expectedRiskBudget * 1e-8)
+            <= Math.max(1e-8, observation.expectedRiskBudget * RISK_BUDGET_TOLERANCE_RATIO)
         )),
       })),
       policy ? { riskUnitRatio: policy.plan.riskUnitRatio, valid: true } : { policy: 'required' },

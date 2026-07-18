@@ -90,6 +90,7 @@ export function scalpHistoricalConfig(manifest: StrategyManifestIdentity): Scalp
     risk: {
       dailyLossLimitR: number(risk.daily_loss_limit_r, 'scalp_risk_budget_v1.daily_loss_limit_r'),
       maxConsecutiveLosses: number(risk.max_consecutive_losses, 'scalp_risk_budget_v1.max_consecutive_losses'),
+      maximumLeverage: number(risk.maximum_leverage, 'scalp_risk_budget_v1.maximum_leverage'),
       riskByGradeR: {
         A_PLUS: number(grade.A_PLUS, 'risk_by_grade_r.A_PLUS'),
         A: number(grade.A, 'risk_by_grade_r.A'),
@@ -156,6 +157,7 @@ export function swingHistoricalConfig(manifest: StrategyManifestIdentity): Swing
     },
     risk: {
       thesisRiskBudgetR: number(risk.thesis_risk_budget_r, 'swing_risk_budget_v1.thesis_risk_budget_r'),
+      maximumLeverage: number(risk.maximum_leverage, 'swing_risk_budget_v1.maximum_leverage'),
       riskByStageR: {
         EARLY: number(stageRisk.EARLY, 'risk_by_stage_r.EARLY'),
         STANDARD: number(stageRisk.STANDARD, 'risk_by_stage_r.STANDARD'),

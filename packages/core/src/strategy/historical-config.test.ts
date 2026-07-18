@@ -86,6 +86,7 @@ const scalpCapabilities = {
   scalp_risk_budget_v1: {
     daily_loss_limit_r: 1,
     max_consecutive_losses: 3,
+    maximum_leverage: 50,
     risk_by_grade_r: { A_PLUS: 0.35, A: 0.25, B: 0.15 },
   },
   scalp_time_stop_v1: {
@@ -162,6 +163,7 @@ test('maps every Scalp manifest parameter into the evaluator configuration', () 
     risk: {
       dailyLossLimitR: 1,
       maxConsecutiveLosses: 3,
+      maximumLeverage: 50,
       riskByGradeR: { A_PLUS: 0.35, A: 0.25, B: 0.15 },
     },
     time: {
@@ -212,6 +214,7 @@ const swingCapabilities = {
   },
   swing_risk_budget_v1: {
     thesis_risk_budget_r: 1,
+    maximum_leverage: 50,
     risk_by_stage_r: { EARLY: 0.25, STANDARD: 0.35, CONFIRMED: 0.4 },
   },
 }
@@ -250,6 +253,7 @@ test('maps every Swing manifest parameter into the evaluator configuration', () 
     },
     risk: {
       thesisRiskBudgetR: 1,
+      maximumLeverage: 50,
       riskByStageR: { EARLY: 0.25, STANDARD: 0.35, CONFIRMED: 0.4 },
     },
   })

@@ -6,6 +6,7 @@ import { evaluateSwingExecution, evaluateSwingInvalidation, evaluateSwingRiskPol
 
 const riskConfig: SwingRiskPolicyConfig = {
   thesisRiskBudgetR: 1,
+  maximumLeverage: 50,
   riskByStageR: { EARLY: 0.25, STANDARD: 0.35, CONFIRMED: 0.4 },
 }
 
@@ -74,6 +75,20 @@ test('Swing risk policy shares one Thesis budget across execution stages', () =>
       requestedRiskR: 0.4,
       remainingThesisRiskR: 0.4,
       reasonCodes: [],
+    },
+  )
+})
+
+test('Swing risk policy rejects entries that exceed the configured leverage ceiling', () => {
+  assert.deepEqual(
+    evaluateSwingRiskPolicy(riskConfig, {
+      stage: 'CONFIRMED', currentThesisRiskR: 0, availablePortfolioRiskR: 1, priceRiskRatio: 0.00005,
+    }),
+    {
+      allowed: false,
+      requestedRiskR: 0,
+      remainingThesisRiskR: 1,
+      reasonCodes: ['LEVERAGE_TOO_HIGH'],
     },
   )
 })

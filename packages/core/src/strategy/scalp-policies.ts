@@ -21,12 +21,13 @@ function nonNegativeFinite(value: number, field: string) {
 
 export function evaluateScalpRiskPolicy(
   config: ScalpRiskPolicyConfig,
-  input: { grade: ScalpGrade; dailyLossUsedR: number; consecutiveLosses: number },
+  input: { grade: ScalpGrade; dailyLossUsedR: number; consecutiveLosses: number; priceRiskRatio?: number },
 ): ScalpRiskDecision {
   positiveFinite(config.dailyLossLimitR, 'config.dailyLossLimitR')
   if (!Number.isSafeInteger(config.maxConsecutiveLosses) || config.maxConsecutiveLosses <= 0) {
     throw new Error('config.maxConsecutiveLosses must be a positive integer')
   }
+  positiveFinite(config.maximumLeverage, 'config.maximumLeverage')
   for (const grade of GRADES) positiveFinite(config.riskByGradeR[grade], `config.riskByGradeR.${grade}`)
   nonNegativeFinite(input.dailyLossUsedR, 'input.dailyLossUsedR')
   if (!Number.isSafeInteger(input.consecutiveLosses) || input.consecutiveLosses < 0) {
@@ -36,6 +37,12 @@ export function evaluateScalpRiskPolicy(
   const reasonCodes: string[] = []
   if (input.dailyLossUsedR >= config.dailyLossLimitR) reasonCodes.push('DAILY_SCALP_LOSS_LIMIT')
   if (input.consecutiveLosses >= config.maxConsecutiveLosses) reasonCodes.push('MAX_CONSECUTIVE_LOSSES')
+  if (input.priceRiskRatio !== undefined) {
+    positiveFinite(input.priceRiskRatio, 'input.priceRiskRatio')
+    if (config.riskByGradeR[input.grade] / input.priceRiskRatio > config.maximumLeverage) {
+      reasonCodes.push('LEVERAGE_TOO_HIGH')
+    }
+  }
   return {
     allowed: reasonCodes.length === 0,
     riskR: reasonCodes.length === 0 ? config.riskByGradeR[input.grade] : 0,
