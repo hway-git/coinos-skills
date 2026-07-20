@@ -14,6 +14,8 @@ import {
 import { marketDatasetHash } from '../lib/market-dataset.mjs';
 import { reconcileSignalBacktest } from '../lib/backtest-reconciliation.mjs';
 import { historicalRiskTraceHash } from '../lib/historical-risk.mjs';
+import { futuresCostDatasetIdentity } from '../lib/futures-cost-dataset.mjs';
+import { futuresCostDatasetFixture } from './helpers/futures-cost-dataset.mjs';
 
 const execFileAsync = promisify(execFile);
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -281,6 +283,8 @@ async function writeSignalBacktestFiles(resultsDir, { exitReason } = {}) {
           close_timestamp: artifact.signals[1].decisionTime,
           enter_tag: artifact.signals[0].signalId,
           exit_reason: exitReason || artifact.signals[1].signalId,
+          amount: 1,
+          funding_fees: 0,
         }],
       },
     },
@@ -1051,8 +1055,31 @@ test('signal backtest requires the exact market dataset identity', async (t) => 
   t.after(() => rm(home, { recursive: true, force: true }));
   const artifactFile = join(home, 'artifact.json');
   const datasetFile = join(home, 'dataset.json');
-  await writeFile(artifactFile, JSON.stringify(fixture()));
+  const artifact = fixture();
+  await writeFile(artifactFile, JSON.stringify(artifact));
   await writeFile(datasetFile, JSON.stringify(marketDatasetFixture()));
+  const riskPayload = {
+    schemaVersion: 'helix.historical-risk-trace/v1',
+    signalArtifactHash: artifact.artifactHash,
+    entries: [{
+      entrySignalId: artifact.signals[0].signalId,
+      family: 'scalp',
+      object: artifact.signals[0].object,
+      side: artifact.signals[0].side,
+      entryPrice: { source: 'DECISION_CANDLE_CLOSE', price: 100 },
+      initialStop: 95,
+      initialTarget: 110,
+      riskDistance: 5,
+      riskR: 0.25,
+      scalp: {
+        eventType: 'LIQUIDITY_SWEEP', grade: 'A',
+        regime: { id: 'dataset-gate', type: 'RANGING' },
+      },
+    }],
+  };
+  const riskTrace = { ...riskPayload, traceHash: historicalRiskTraceHash(riskPayload) };
+  const riskFile = join(home, 'risk-trace.json');
+  await writeFile(riskFile, JSON.stringify(riskTrace));
 
   await assert.rejects(
     runDeployAction(home, 'backtest', { signal_artifact: artifactFile }),
@@ -1065,6 +1092,8 @@ test('signal backtest requires the exact market dataset identity', async (t) => 
     runDeployAction(home, 'backtest', {
       signal_artifact: artifactFile,
       market_dataset: datasetFile,
+      historical_risk_trace: riskFile,
+      risk_unit_ratio: 0.01,
       fee: 0.001,
     }),
     (error) => {
@@ -1126,9 +1155,22 @@ test('deploy requires matching pinned backtest identity and a deployable lifecyc
   await mkdir(resultsDir, { recursive: true });
   await writeFile(artifactFile, JSON.stringify(artifact));
   const backtestFiles = await writeSignalBacktestFiles(resultsDir);
+  const futuresCostDataset = futuresCostDatasetFixture({
+    coveredFrom: artifact.marketData.firstCandleOpenTime,
+    coveredThrough: artifact.marketData.lastCandleCloseTime,
+  });
+  const futuresCostIdentity = futuresCostDatasetIdentity(futuresCostDataset);
+  const futuresCostContent = `${JSON.stringify(futuresCostDataset, null, 2)}\n`;
+  const futuresCostDatasetFileHash = `sha256:${createHash('sha256').update(futuresCostContent).digest('hex')}`;
+  const futuresCostDirectory = join(home, '.freqtrade', 'user_data', 'helix', 'futures-cost-data');
+  await mkdir(futuresCostDirectory, { recursive: true });
+  await writeFile(
+    join(futuresCostDirectory, `${futuresCostDataset.costDatasetHash.replace(':', '-')}.json`),
+    futuresCostContent,
+  );
 
   const evidence = (identity, source = artifact) => ({
-    version: 2,
+    version: 3,
     records: [{
       id: 'signal-evidence',
       strategy: 'HelixSignalStrategy',
@@ -1170,6 +1212,8 @@ test('deploy requires matching pinned backtest identity and a deployable lifecyc
           maxOpenTrades: 1,
           fee: null,
         },
+        futuresCostDataset: futuresCostIdentity,
+        futuresCostDatasetFileHash,
       },
       createdAt: '2026-07-15T00:00:00.000Z',
     }],

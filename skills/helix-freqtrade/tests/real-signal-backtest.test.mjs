@@ -8,6 +8,7 @@ import test from 'node:test';
 import { historicalRiskTraceHash } from '../lib/historical-risk.mjs';
 import { marketDatasetHash } from '../lib/market-dataset.mjs';
 import { signalArtifactHash } from '../lib/signal-artifact.mjs';
+import { futuresCostDatasetFixture } from './helpers/futures-cost-dataset.mjs';
 import {
   verifyWalkForwardReport,
   walkForwardPlanHash,
@@ -207,7 +208,23 @@ dockerTest('real Freqtrade executes a fee-stressed walk-forward bundle with exac
   const home = await mkdtemp(join(REPO_ROOT, '.helix-docker-e2e-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const { dataset, artifact, riskTrace, plan, run } = fixtures();
+  const leverageTiersFile = process.env.HELIX_TEST_LEVERAGE_TIERS_FILE
+    || join(process.env.HOME || '', '.freqtrade', 'user_data', 'data', 'okx', 'futures', 'leverage_tiers_USDT.json');
+  let leverageTiers;
+  try {
+    leverageTiers = JSON.parse(await readFile(leverageTiersFile, 'utf8')).data;
+  } catch {
+    t.skip('HELIX_TEST_LEVERAGE_TIERS_FILE must provide a complete OKX leverage tiers cache');
+    return;
+  }
+  const futuresCostDataset = futuresCostDatasetFixture({
+    source: dataset.source,
+    coveredFrom: dataset.timeframes['1m'][0].time,
+    coveredThrough: dataset.capturedThrough,
+    leverageData: leverageTiers,
+  });
   const datasetFile = join(home, 'source-dataset.json');
+  const futuresCostDatasetFile = join(home, 'futures-cost-dataset.json');
   const runFile = join(home, 'walk-forward-run.json');
   const envFile = join(home, '.helix', '.env');
   await mkdir(dirname(envFile), { recursive: true });
@@ -223,6 +240,11 @@ dockerTest('real Freqtrade executes a fee-stressed walk-forward bundle with exac
     '',
   ].join('\n'), { mode: 0o600 });
   await writeFile(datasetFile, `${JSON.stringify(dataset, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(
+    futuresCostDatasetFile,
+    `${JSON.stringify(futuresCostDataset, null, 2)}\n`,
+    { mode: 0o600 },
+  );
   await writeFile(join(home, 'walk-forward-plan.json'), `${JSON.stringify(plan, null, 2)}\n`, { mode: 0o600 });
   await writeFile(runFile, `${JSON.stringify(run, null, 2)}\n`, { mode: 0o600 });
   await writeFile(join(home, run.folds[0].datasetFile), `${JSON.stringify(dataset, null, 2)}\n`, { mode: 0o600 });
@@ -239,6 +261,7 @@ dockerTest('real Freqtrade executes a fee-stressed walk-forward bundle with exac
   const { stdout } = await execFileAsync(process.execPath, [DEPLOY, 'walk_forward', JSON.stringify({
     walk_forward_run: runFile,
     source_dataset: datasetFile,
+    futures_cost_dataset: futuresCostDatasetFile,
   })], {
     cwd: SKILL_DIR,
     env: {
@@ -286,6 +309,8 @@ dockerTest('real Freqtrade executes a fee-stressed walk-forward bundle with exac
     report.gate.checks.find(({ code }) => code === 'VERSIONED_GATE_POLICY_PRESENT').ok,
     false,
   );
+  assert.equal(report.gate.checks.find(({ code }) => code === 'FUTURES_COST_DATA_COMPLETE').ok, true);
+  assert.equal(report.gate.checks.find(({ code }) => code === 'FUNDING_COST_RECONCILED').ok, true);
   for (const evidence of report.folds[0].executionEvidence) {
     assert.deepEqual(evidence.reconciliation, {
       trades: 1,
@@ -353,6 +378,7 @@ dockerTest('real Freqtrade executes a fee-stressed walk-forward bundle with exac
   const resumed = await execFileAsync(process.execPath, [DEPLOY, 'walk_forward', JSON.stringify({
     walk_forward_run: runFile,
     source_dataset: datasetFile,
+    futures_cost_dataset: futuresCostDatasetFile,
   })], {
     cwd: SKILL_DIR,
     env: {

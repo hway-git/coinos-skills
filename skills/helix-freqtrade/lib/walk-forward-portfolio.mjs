@@ -3,6 +3,7 @@ import { basename, dirname, relative, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
   WALK_FORWARD_PLAN_SCHEMA_VERSION,
+  WALK_FORWARD_REPORT_SCHEMA_VERSION,
   canonicalWalkForwardJson,
   loadPromotableWalkForwardReport,
   loadWalkForwardBundle,
@@ -15,7 +16,9 @@ import {
 import { assertOkxForwardSource } from './forward-target.mjs';
 
 export const WALK_FORWARD_PORTFOLIO_PLAN_SCHEMA_VERSION = 'helix.walk-forward-portfolio-plan/v1';
-export const WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION = 'helix.walk-forward-portfolio-report/v1';
+export const WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION = 'helix.walk-forward-portfolio-report/v2';
+const LEGACY_WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION = 'helix.walk-forward-portfolio-report/v1';
+const LEGACY_WALK_FORWARD_REPORT_SCHEMA_VERSION = 'helix.walk-forward-report/v3';
 
 const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const PERFORMANCE_CHECKS = new Set([
@@ -334,7 +337,7 @@ function memberChecks(report) {
   };
 }
 
-function executionEnvironment(loadedMembers) {
+function executionEnvironment(loadedMembers, includeLeverageTiers) {
   const evidence = loadedMembers.flatMap(({ report }) => report.folds.flatMap(({ executionEvidence }) => executionEvidence));
   const versions = new Set(evidence.map(({ freqtradeVersion }) => freqtradeVersion));
   const adapters = new Set(evidence.map(({ adapterHash }) => adapterHash));
@@ -342,11 +345,17 @@ function executionEnvironment(loadedMembers) {
   if (versions.size !== 1 || adapters.size !== 1 || configs.size !== 1) {
     throw new Error('portfolio member reports must use one Freqtrade version, adapter, and execution config');
   }
-  return {
+  const environment = {
     freqtradeVersion: evidence[0].freqtradeVersion,
     adapterHash: evidence[0].adapterHash,
     configHash: evidence[0].configHash,
   };
+  if (!includeLeverageTiers) return environment;
+  const leverageTiers = new Set(evidence.map((item) => item.futuresCostDataset.leverageTiers.dataHash));
+  if (leverageTiers.size !== 1) {
+    throw new Error('portfolio member reports must use one Freqtrade version, adapter, execution config, and leverage tiers snapshot');
+  }
+  return { ...environment, leverageTiersHash: evidence[0].futuresCostDataset.leverageTiers.dataHash };
 }
 
 function scenarioAggregate(portfolioPlan, loadedMembers, memberStates, scenario) {
@@ -428,11 +437,15 @@ function gateCheck(code, ok, actual, required, evidenceRefs) {
   return { code, ok, actual, required, evidenceRefs };
 }
 
-function buildPortfolioReport(portfolioPlan, loadedMembers) {
+function buildPortfolioReport(portfolioPlan, loadedMembers, schemaVersion) {
+  const legacy = schemaVersion === LEGACY_WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION;
+  if (!legacy && schemaVersion !== WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION) {
+    throw new Error(`unsupported walk-forward portfolio report schema ${String(schemaVersion)}`);
+  }
   const policy = portfolioPlan.walkForwardPolicy;
   const symbolGate = policy.gates.symbolStability;
   const memberStates = loadedMembers.map(({ report }) => memberChecks(report));
-  const environment = executionEnvironment(loadedMembers);
+  const environment = executionEnvironment(loadedMembers, !legacy);
   const scenarios = portfolioPlan.executionScenarios.map((scenario) => (
     scenarioAggregate(portfolioPlan, loadedMembers, memberStates, scenario)
   ));
@@ -552,7 +565,7 @@ function buildPortfolioReport(portfolioPlan, loadedMembers) {
     failedChecks: memberStates[index].failedChecks,
   }));
   const payload = {
-    schemaVersion: WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION,
+    schemaVersion,
     portfolioPlanFile: 'walk-forward-portfolio-plan.json',
     planHash: portfolioPlan.planHash,
     candidate: portfolioPlan.candidate,
@@ -571,7 +584,7 @@ function buildPortfolioReport(portfolioPlan, loadedMembers) {
   return { ...payload, reportHash: walkForwardReportHash(payload) };
 }
 
-export function createWalkForwardPortfolioReport(planValue, memberReportFiles, reportDirectory) {
+function createWalkForwardPortfolioReportVersion(planValue, memberReportFiles, reportDirectory, schemaVersion) {
   const portfolioPlan = verifyWalkForwardPortfolioPlan(planValue);
   if (!Array.isArray(memberReportFiles) || memberReportFiles.length !== portfolioPlan.members.length) {
     throw new Error('portfolio report must provide one archived report per policy member');
@@ -586,7 +599,22 @@ export function createWalkForwardPortfolioReport(planValue, memberReportFiles, r
     return loadedMember;
   });
   if (ordered.length !== loaded.length) throw new Error('portfolio member report is outside the policy universe');
-  return buildPortfolioReport(portfolioPlan, ordered);
+  const expectedMemberSchema = schemaVersion === LEGACY_WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION
+    ? LEGACY_WALK_FORWARD_REPORT_SCHEMA_VERSION
+    : WALK_FORWARD_REPORT_SCHEMA_VERSION;
+  if (ordered.some(({ report }) => report.schemaVersion !== expectedMemberSchema)) {
+    throw new Error('portfolio report schema does not match its member report schemas');
+  }
+  return buildPortfolioReport(portfolioPlan, ordered, schemaVersion);
+}
+
+export function createWalkForwardPortfolioReport(planValue, memberReportFiles, reportDirectory) {
+  return createWalkForwardPortfolioReportVersion(
+    planValue,
+    memberReportFiles,
+    reportDirectory,
+    WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION,
+  );
 }
 
 export function verifyWalkForwardPortfolioReport(value, reportDirectory = null) {
@@ -594,7 +622,8 @@ export function verifyWalkForwardPortfolioReport(value, reportDirectory = null) 
     'schemaVersion', 'portfolioPlanFile', 'planHash', 'candidate', 'policyHash', 'members',
     'aggregate', 'gate', 'reportHash',
   ]);
-  if (report.schemaVersion !== WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION) {
+  if (![WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION, LEGACY_WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION]
+    .includes(report.schemaVersion)) {
     throw new Error(`unsupported walk-forward portfolio report schema ${String(report.schemaVersion)}`);
   }
   if (report.portfolioPlanFile !== 'walk-forward-portfolio-plan.json') {
@@ -630,7 +659,12 @@ export function verifyWalkForwardPortfolioReport(value, reportDirectory = null) 
     }
     return resolve(root, record.reportFile);
   });
-  const recreated = createWalkForwardPortfolioReport(portfolioPlan, memberFiles, root);
+  const recreated = createWalkForwardPortfolioReportVersion(
+    portfolioPlan,
+    memberFiles,
+    root,
+    report.schemaVersion,
+  );
   if (!isDeepStrictEqual(recreated, report)) {
     throw new Error('walk-forward portfolio report does not match its verified member archives');
   }
@@ -644,6 +678,9 @@ export function loadPromotableWalkForwardPortfolioReport(reportFile, artifact) {
   const expectedName = `walk-forward-portfolio-report-${report.reportHash.replace(':', '-')}.json`;
   if (basename(file) !== expectedName) throw new Error(`walk-forward portfolio report file must equal ${expectedName}`);
   if (!report.gate.ok) throw new Error(`walk-forward portfolio report ${report.reportHash} did not pass its policy`);
+  if (report.schemaVersion !== WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION) {
+    throw new Error('legacy walk-forward portfolio reports cannot authorize deployment');
+  }
   if (!artifact?.identity || typeof artifact.symbol !== 'string') {
     throw new Error('Signal Artifact identity and symbol are required for portfolio report binding');
   }
@@ -687,12 +724,14 @@ function singleReportArchiveFiles(file, report) {
       resolve(root, evidence.resultFile),
       resolve(root, evidence.resultMetaFile),
       resolve(root, evidence.runtimeEvidenceFile),
+      ...(evidence.futuresCostDatasetFile ? [resolve(root, evidence.futuresCostDatasetFile)] : []),
     ])),
   ];
 }
 
 function reportArchiveFiles(file, report) {
-  if (report.schemaVersion !== WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION) {
+  if (![WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION, LEGACY_WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION]
+    .includes(report.schemaVersion)) {
     return singleReportArchiveFiles(file, report);
   }
   const root = dirname(file);
@@ -708,7 +747,10 @@ function reportArchiveFiles(file, report) {
 
 export function verifyWalkForwardEvidenceReportFile(reportFile) {
   const { file, reportDirectory, payload } = walkForwardEvidenceFile(reportFile);
-  const portfolio = payload?.schemaVersion === WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION;
+  const portfolio = [
+    WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION,
+    LEGACY_WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION,
+  ].includes(payload?.schemaVersion);
   const report = portfolio
     ? verifyWalkForwardPortfolioReport(payload, reportDirectory)
     : verifyWalkForwardReport(payload, null, reportDirectory);
@@ -723,7 +765,10 @@ export function verifyWalkForwardEvidenceReportFile(reportFile) {
 
 export function loadPromotableWalkForwardEvidence(reportFile, artifact) {
   const { file, payload } = walkForwardEvidenceFile(reportFile);
-  return payload?.schemaVersion === WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION
+  return [
+    WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION,
+    LEGACY_WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION,
+  ].includes(payload?.schemaVersion)
     ? loadPromotableWalkForwardPortfolioReport(file, artifact)
     : loadPromotableWalkForwardReport(file, artifact);
 }

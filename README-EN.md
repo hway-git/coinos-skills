@@ -63,7 +63,7 @@ pnpm freqtrade:install
 
 Runtime credentials are stored in `~/.helix/.env`, and persistent Freqtrade data is stored in `~/.freqtrade/user_data`. The installer is idempotent and preserves existing configuration and API credentials.
 
-`HelixSignalStrategy` contains no indicators or strategy decisions. Signal backtests require the original `helix.market-dataset/v1` and use only its matching base-timeframe OHLCV. Evidence binds the adapter fingerprint, Signal Artifact hash, strategy commit, configuration hash, Engine commit, market-data hash, Freqtrade version, runtime configuration, and result file. Dry-run requires `shadow` or later lifecycle; live requires `canary` or `production`.
+`HelixSignalStrategy` contains no indicators or strategy decisions. Signal backtests require both the original `helix.market-dataset/v1` and a matching execution-only `helix.futures-cost-dataset/v1`. The latter must completely cover 1h mark prices, observed funding rates, and one frozen leverage-tier snapshot for the same source window. Missing cost data, a `futures_funding_rate=0` fallback, last-price substitution, or runtime tier drift fails closed, and every reported funding fee is recomputed from the pinned inputs. Evidence binds the adapter fingerprint, Signal Artifact hash, strategy commit, configuration hash, Engine commit, decision-data hash, futures-cost-data hash, Freqtrade version, runtime configuration, and result file. Dry-run requires `shadow` or later lifecycle; live requires `canary` or `production`.
 
 Dashboard control, deployment, backtest, authorization, emergency-stop, and reconciliation events persist in `~/.helix/helix.sqlite` with `0600` permissions.
 

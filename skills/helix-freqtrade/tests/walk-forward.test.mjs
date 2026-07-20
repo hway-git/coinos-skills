@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,9 +27,11 @@ import {
   walkForwardRunHash,
 } from '../lib/walk-forward.mjs';
 import { historicalRiskTraceHash } from '../lib/historical-risk.mjs';
+import { futuresCostDatasetIdentity, verifyFundingFees } from '../lib/futures-cost-dataset.mjs';
 import { marketDatasetHash } from '../lib/market-dataset.mjs';
 import { signalArtifactHash } from '../lib/signal-artifact.mjs';
 import { createPromotableWalkForwardReport } from './helpers/promotable-report.mjs';
+import { futuresCostDatasetFixture } from './helpers/futures-cost-dataset.mjs';
 
 const execFileAsync = promisify(execFile);
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -502,7 +504,9 @@ function backtestResultFixture(plan, fold, scenario, index) {
       profit_ratio: profitRatio,
       profit_abs: profitAbs,
       stake_amount: stakeAmount,
+      amount: stakeAmount / openRate,
       leverage: 1,
+      funding_fees: 0,
       fee_open: scenario.fee,
       fee_close: scenario.fee,
     }] : [],
@@ -534,6 +538,10 @@ function executionConfig(plan) {
 
 function runtimeEvidence(plan, fold, scenario, resultHash, resultMetaHash) {
   const config = executionConfig(plan);
+  const futuresCostDataset = futuresCostDatasetFixture({
+    source: plan.sourceDataset.source,
+    coveredThrough: plan.sourceDataset.capturedThrough,
+  });
   return createExecutionRuntimeEvidence({
     resultHash,
     resultMetaHash,
@@ -550,6 +558,7 @@ function runtimeEvidence(plan, fold, scenario, resultHash, resultMetaHash) {
       pairs: [plan.sourceDataset.source.symbol],
       fee: scenario.fee,
     }),
+    futuresCostDataset: futuresCostDatasetIdentity(futuresCostDataset),
     adapterFiles,
   });
 }
@@ -562,6 +571,12 @@ function executionEvidence(plan, fold, scenario, index) {
   const runtimeContent = `${JSON.stringify(runtime, null, 2)}\n`;
   const runtimeEvidenceHash = `sha256:${createHash('sha256').update(runtimeContent).digest('hex')}`;
   const tradeCount = fold.run.tradeIds.length;
+  const futuresCostDataset = futuresCostDatasetFixture({
+    source: plan.sourceDataset.source,
+    coveredThrough: plan.sourceDataset.capturedThrough,
+  });
+  const futuresCostContent = `${JSON.stringify(futuresCostDataset, null, 2)}\n`;
+  const futuresCostDatasetFileHash = `sha256:${createHash('sha256').update(futuresCostContent).digest('hex')}`;
   return {
     scenarioId: scenario.id,
     fee: scenario.fee,
@@ -572,6 +587,9 @@ function executionEvidence(plan, fold, scenario, index) {
     executionProfileHash: runtime.executionProfileHash,
     riskTraceHash: fold.executionRiskTrace.traceHash,
     riskUnitRatio: plan.walkForwardPolicy?.plan.riskUnitRatio ?? 0.01,
+    futuresCostDataset: runtime.futuresCostDataset,
+    futuresCostDatasetFile: `evidence/${futuresCostDatasetFileHash.replace(':', '-')}.futures-cost.json`,
+    futuresCostDatasetFileHash,
     runtimeEvidenceFile: `evidence/${runtimeEvidenceHash.replace(':', '-')}.runtime.json`,
     runtimeEvidenceHash,
     resultFile: `evidence/${resultHash.replace(':', '-')}.json`,
@@ -580,6 +598,7 @@ function executionEvidence(plan, fold, scenario, index) {
     resultMetaHash,
     reconciliation: reconcileSignalBacktest(summary, fold.executionArtifact),
     feeObservations: backtestFeeObservations(summary, scenario.fee),
+    fundingObservations: verifyFundingFees(summary, futuresCostDataset),
     metrics: backtestMetrics(summary, {
       signalArtifact: fold.executionArtifact,
       riskTrace: fold.executionRiskTrace,
@@ -624,6 +643,14 @@ async function writeReportArchives(directory, bundle, evidence) {
       await writeFile(
         join(directory, item.resultFile),
         fixture.resultContent,
+      );
+      const futuresCostDataset = futuresCostDatasetFixture({
+        source: bundle.plan.sourceDataset.source,
+        coveredThrough: bundle.plan.sourceDataset.capturedThrough,
+      });
+      await writeFile(
+        join(directory, item.futuresCostDatasetFile),
+        `${JSON.stringify(futuresCostDataset, null, 2)}\n`,
       );
       await writeFile(
         join(directory, item.resultMetaFile),
@@ -691,7 +718,7 @@ test('builds a hash-pinned R-normalized research report but requires a versioned
   changedAdapter[0][1].adapterHash = `sha256:${'9'.repeat(64)}`;
   assert.throws(
     () => createWalkForwardReport(bundle, changedAdapter, coreEvidence),
-    /one Freqtrade version, config, and adapter/,
+    /one Freqtrade version, config, adapter, and futures cost dataset/,
   );
 
   const unobservedFee = structuredClone(evidence);
@@ -838,6 +865,86 @@ test('rebuilds every versioned policy gate from archived trade-level R evidence'
   assert.throws(
     () => verifyWalkForwardReport(forged, bundle, directory),
     /does not match its verified Core bundle/,
+  );
+});
+
+test('verifies legacy v3 archives for audit but never accepts them for deployment', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-walk-forward-legacy-v3-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const artifact = {
+    identity: {
+      strategyId: 'helix_scalp_hunter',
+      strategyVersion: '1.0.1',
+      strategyRepoCommit: 'a'.repeat(40),
+      strategyConfigHash: `sha256:${'b'.repeat(64)}`,
+      engineCommit: 'c'.repeat(40),
+    },
+    strategyLifecycle: 'backtested',
+    objectModel: 'PRICE_EVENT',
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '1m',
+  };
+  const current = await createPromotableWalkForwardReport(directory, artifact);
+  const legacy = structuredClone(current.report);
+  legacy.schemaVersion = 'helix.walk-forward-report/v3';
+  for (const fold of legacy.folds) {
+    for (const evidence of fold.executionEvidence) {
+      const runtime = JSON.parse(await readFile(join(directory, evidence.runtimeEvidenceFile), 'utf8'));
+      runtime.schemaVersion = 'helix.freqtrade-execution-runtime/v2';
+      delete runtime.futuresCostDataset;
+      const runtimeContent = `${JSON.stringify(runtime, null, 2)}\n`;
+      const runtimeHash = `sha256:${createHash('sha256').update(runtimeContent).digest('hex')}`;
+      const runtimeFile = `evidence/${runtimeHash.replace(':', '-')}.runtime.json`;
+      await writeFile(join(directory, runtimeFile), runtimeContent);
+      evidence.runtimeEvidenceFile = runtimeFile;
+      evidence.runtimeEvidenceHash = runtimeHash;
+      delete evidence.futuresCostDataset;
+      delete evidence.futuresCostDatasetFile;
+      delete evidence.futuresCostDatasetFileHash;
+      delete evidence.fundingObservations;
+    }
+  }
+  delete legacy.aggregate.executionEnvironment;
+  legacy.gate.checks = legacy.gate.checks.filter(({ code }) => ![
+    'FUTURES_COST_DATA_COMPLETE',
+    'FUNDING_COST_RECONCILED',
+  ].includes(code));
+  legacy.gate.ok = legacy.gate.checks.every(({ ok }) => ok);
+  const { reportHash: _currentHash, ...payload } = legacy;
+  legacy.reportHash = walkForwardReportHash(payload);
+  const legacyFile = join(
+    directory,
+    `walk-forward-report-${legacy.reportHash.replace(':', '-')}.json`,
+  );
+  await writeFile(legacyFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  assert.deepEqual(verifyWalkForwardReport(legacy, null, directory), legacy);
+  const forgedAggregate = structuredClone(legacy);
+  forgedAggregate.aggregate.scenarios[0].profitAbs += 1;
+  const { reportHash: _aggregateHash, ...forgedAggregatePayload } = forgedAggregate;
+  forgedAggregate.reportHash = walkForwardReportHash(forgedAggregatePayload);
+  assert.throws(
+    () => verifyWalkForwardReport(forgedAggregate, null, directory),
+    /does not match its verified Core bundle/,
+  );
+  const forgedGate = structuredClone(legacy);
+  forgedGate.gate.checks[0].actual = 'forged';
+  const { reportHash: _gateHash, ...forgedGatePayload } = forgedGate;
+  forgedGate.reportHash = walkForwardReportHash(forgedGatePayload);
+  assert.throws(
+    () => verifyWalkForwardReport(forgedGate, null, directory),
+    /does not match its verified Core bundle/,
+  );
+  const mislabeled = structuredClone(legacy);
+  mislabeled.schemaVersion = 'helix.walk-forward-report/v4';
+  const { reportHash: _mislabeledHash, ...mislabeledPayload } = mislabeled;
+  mislabeled.reportHash = walkForwardReportHash(mislabeledPayload);
+  assert.throws(
+    () => verifyWalkForwardReport(mislabeled, null, directory),
+    /futures cost evidence does not match the report schema/,
+  );
+  assert.throws(
+    () => loadPromotableWalkForwardReport(legacyFile, artifact),
+    /legacy walk-forward reports cannot authorize deployment/,
   );
 });
 

@@ -17,8 +17,10 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { signalArtifactHash } from '../lib/signal-artifact.mjs';
+import { futuresCostDatasetIdentity } from '../lib/futures-cost-dataset.mjs';
 import { walkForwardPortfolioPlanHash } from '../lib/walk-forward-portfolio.mjs';
 import { createPromotableWalkForwardReport } from './helpers/promotable-report.mjs';
+import { futuresCostDatasetFixture } from './helpers/futures-cost-dataset.mjs';
 
 const execFileAsync = promisify(execFile);
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -216,6 +218,19 @@ async function setupManagedDeployment(t, {
   const artifactContent = `${JSON.stringify(artifact, null, 2)}\n`;
   await writeFile(artifactFile, artifactContent, { mode: 0o600 });
   const { report, reportFile } = await createPromotableWalkForwardReport(join(home, 'walk-forward'), artifact);
+  const futuresCostDataset = futuresCostDatasetFixture({
+    coveredFrom: artifact.marketData.firstCandleOpenTime,
+    coveredThrough: artifact.marketData.lastCandleCloseTime,
+  });
+  const futuresCostIdentity = futuresCostDatasetIdentity(futuresCostDataset);
+  const futuresCostContent = `${JSON.stringify(futuresCostDataset, null, 2)}\n`;
+  const futuresCostDatasetFileHash = sha256(futuresCostContent);
+  const futuresCostDirectory = join(userData, 'helix', 'futures-cost-data');
+  await mkdir(futuresCostDirectory, { recursive: true });
+  await writeFile(
+    join(futuresCostDirectory, `${futuresCostDataset.costDatasetHash.replace(':', '-')}.json`),
+    futuresCostContent,
+  );
   const reportIndexFile = join(userData, 'helix', 'validation', 'walk-forward-reports.json');
   await mkdir(dirname(reportIndexFile), { recursive: true });
   await writeFile(reportIndexFile, JSON.stringify({
@@ -243,6 +258,8 @@ async function setupManagedDeployment(t, {
           close_timestamp: artifact.signals[1].decisionTime,
           enter_tag: artifact.signals[0].signalId,
           exit_reason: artifact.signals[1].signalId,
+          amount: 1,
+          funding_fees: 0,
         }],
       },
     },
@@ -252,7 +269,7 @@ async function setupManagedDeployment(t, {
   await writeFile(join(resultsDir, resultMetaFile), metaContent);
   const evidenceFile = join(resultsDir, '.helix-evidence.json');
   await writeFile(evidenceFile, JSON.stringify({
-    version: 2,
+    version: 3,
     records: [{
       id: 'managed-evidence',
       strategy: 'HelixSignalStrategy',
@@ -314,6 +331,8 @@ async function setupManagedDeployment(t, {
           positionAdjustmentEnabled: null,
           maxEntryPositionAdjustment: null,
         },
+        futuresCostDataset: futuresCostIdentity,
+        futuresCostDatasetFileHash,
       },
       createdAt: '2026-07-16T00:00:00.000Z',
     }],

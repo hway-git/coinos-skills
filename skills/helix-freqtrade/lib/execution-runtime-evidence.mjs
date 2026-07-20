@@ -3,8 +3,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { FUTURES_COST_DATASET_SCHEMA_VERSION } from './futures-cost-dataset.mjs';
 
-export const EXECUTION_RUNTIME_EVIDENCE_SCHEMA_VERSION = 'helix.freqtrade-execution-runtime/v2';
+export const EXECUTION_RUNTIME_EVIDENCE_SCHEMA_VERSION = 'helix.freqtrade-execution-runtime/v3';
+const LEGACY_EXECUTION_RUNTIME_EVIDENCE_SCHEMA_VERSION = 'helix.freqtrade-execution-runtime/v2';
 export const EXECUTION_CONFIG_IDENTITY_SCHEMA_VERSION = 'helix.freqtrade-config-identity/v1';
 export const EXECUTION_PROFILE_SCHEMA_VERSION = 'helix.freqtrade-execution-profile/v1';
 
@@ -91,6 +93,76 @@ function normalizedPairs(value, name) {
   const pairs = value.map((pair, index) => text(pair, `${name}[${index}]`)).sort();
   if (new Set(pairs).size !== pairs.length) throw new Error(`${name} must not contain duplicates`);
   return pairs;
+}
+
+function normalizeFuturesCostDatasetIdentity(value, name = 'futuresCostDataset') {
+  const identity = exactRecord(value, name, [
+    'schemaVersion', 'costDatasetHash', 'source', 'capturedThrough', 'coveredFrom',
+    'coveredThrough', 'markPrice', 'fundingRate', 'leverageTiers',
+  ]);
+  if (identity.schemaVersion !== FUTURES_COST_DATASET_SCHEMA_VERSION) {
+    throw new Error(`${name}.schemaVersion is unsupported`);
+  }
+  const source = exactRecord(identity.source, `${name}.source`, [
+    'provider', 'market', 'instrumentId', 'symbol',
+  ]);
+  const mark = exactRecord(identity.markPrice, `${name}.markPrice`, [
+    'timeframe', 'candleCount', 'dataHash',
+  ]);
+  const funding = exactRecord(identity.fundingRate, `${name}.fundingRate`, [
+    'timeframe', 'maximumIntervalMs', 'rowCount', 'dataHash',
+  ]);
+  const leverage = exactRecord(identity.leverageTiers, `${name}.leverageTiers`, [
+    'stakeCurrency', 'dataHash',
+  ]);
+  const nonNegativeInteger = (candidate, field) => {
+    if (!Number.isSafeInteger(candidate) || candidate < 0) {
+      throw new Error(`${field} must be a non-negative safe integer`);
+    }
+    return candidate;
+  };
+  const coveredFrom = nonNegativeInteger(identity.coveredFrom, `${name}.coveredFrom`);
+  const coveredThrough = nonNegativeInteger(identity.coveredThrough, `${name}.coveredThrough`);
+  if (coveredFrom >= coveredThrough) throw new Error(`${name} has an invalid coverage window`);
+  const capturedThrough = nonNegativeInteger(identity.capturedThrough, `${name}.capturedThrough`);
+  if (capturedThrough < coveredThrough) throw new Error(`${name}.capturedThrough does not cover its window`);
+  const markCandleCount = nonNegativeInteger(mark.candleCount, `${name}.markPrice.candleCount`);
+  const fundingRowCount = nonNegativeInteger(funding.rowCount, `${name}.fundingRate.rowCount`);
+  const maximumIntervalMs = nonNegativeInteger(
+    funding.maximumIntervalMs,
+    `${name}.fundingRate.maximumIntervalMs`,
+  );
+  if (!markCandleCount || !fundingRowCount || !maximumIntervalMs) {
+    throw new Error(`${name} must contain mark, funding, and interval evidence`);
+  }
+  return {
+    schemaVersion: FUTURES_COST_DATASET_SCHEMA_VERSION,
+    costDatasetHash: hash(identity.costDatasetHash, `${name}.costDatasetHash`),
+    source: {
+      provider: text(source.provider, `${name}.source.provider`),
+      market: text(source.market, `${name}.source.market`),
+      instrumentId: text(source.instrumentId, `${name}.source.instrumentId`),
+      symbol: text(source.symbol, `${name}.source.symbol`),
+    },
+    capturedThrough,
+    coveredFrom,
+    coveredThrough,
+    markPrice: {
+      timeframe: text(mark.timeframe, `${name}.markPrice.timeframe`),
+      candleCount: markCandleCount,
+      dataHash: hash(mark.dataHash, `${name}.markPrice.dataHash`),
+    },
+    fundingRate: {
+      timeframe: text(funding.timeframe, `${name}.fundingRate.timeframe`),
+      maximumIntervalMs,
+      rowCount: fundingRowCount,
+      dataHash: hash(funding.dataHash, `${name}.fundingRate.dataHash`),
+    },
+    leverageTiers: {
+      stakeCurrency: text(leverage.stakeCurrency, `${name}.leverageTiers.stakeCurrency`),
+      dataHash: hash(leverage.dataHash, `${name}.leverageTiers.dataHash`),
+    },
+  };
 }
 
 export function canonicalExecutionJson(value) {
@@ -400,17 +472,66 @@ export function createExecutionRuntimeEvidence(value) {
     configHash,
     executionProfile,
     executionProfileHash: executionProfileHash(executionProfile),
+    futuresCostDataset: normalizeFuturesCostDatasetIdentity(value.futuresCostDataset),
     adapterFiles: bundle.files,
     adapterHash: bundle.adapterHash,
   };
 }
 
 export function verifyExecutionRuntimeEvidence(value, expected = null) {
+  if (value?.schemaVersion === LEGACY_EXECUTION_RUNTIME_EVIDENCE_SCHEMA_VERSION) {
+    const source = exactRecord(value, 'legacy execution runtime evidence', [
+      'schemaVersion', 'resultHash', 'resultMetaHash', 'datasetHash', 'executionArtifactHash',
+      'riskTraceHash', 'riskUnitRatio', 'scenarioId', 'fee', 'freqtradeVersion',
+      'configIdentity', 'configHash', 'executionProfile', 'executionProfileHash',
+      'adapterFiles', 'adapterHash',
+    ]);
+    const bundle = signalAdapterBundle(source.adapterFiles);
+    const configIdentity = normalizeConfigIdentity(source.configIdentity);
+    const profile = normalizeExecutionProfile(source.executionProfile);
+    const riskUnitRatio = finite(source.riskUnitRatio, 'riskUnitRatio');
+    if (riskUnitRatio <= 0 || riskUnitRatio > 1) throw new Error('riskUnitRatio must be in (0, 1]');
+    if (profile.configHash !== executionConfigIdentityHash(configIdentity)) {
+      throw new Error('legacy executionProfile does not match configIdentity');
+    }
+    const normalized = {
+      schemaVersion: LEGACY_EXECUTION_RUNTIME_EVIDENCE_SCHEMA_VERSION,
+      resultHash: hash(source.resultHash, 'resultHash'),
+      resultMetaHash: hash(source.resultMetaHash, 'resultMetaHash'),
+      datasetHash: hash(source.datasetHash, 'datasetHash'),
+      executionArtifactHash: hash(source.executionArtifactHash, 'executionArtifactHash'),
+      riskTraceHash: hash(source.riskTraceHash, 'riskTraceHash'),
+      riskUnitRatio,
+      scenarioId: text(source.scenarioId, 'scenarioId'),
+      fee: finite(source.fee, 'fee'),
+      freqtradeVersion: text(source.freqtradeVersion, 'freqtradeVersion'),
+      configIdentity,
+      configHash: executionConfigIdentityHash(configIdentity),
+      executionProfile: profile,
+      executionProfileHash: executionProfileHash(profile),
+      adapterFiles: bundle.files,
+      adapterHash: bundle.adapterHash,
+    };
+    for (const field of ['configHash', 'executionProfileHash', 'adapterHash']) {
+      if (source[field] !== normalized[field]) throw new Error(`legacy execution runtime ${field} mismatch`);
+    }
+    if (expected) {
+      for (const field of [
+        'resultHash', 'resultMetaHash', 'datasetHash', 'executionArtifactHash',
+        'riskTraceHash', 'riskUnitRatio', 'scenarioId', 'fee',
+      ]) {
+        if (normalized[field] !== expected[field]) {
+          throw new Error(`legacy execution runtime ${field} does not match its report evidence`);
+        }
+      }
+    }
+    return normalized;
+  }
   const source = exactRecord(value, 'execution runtime evidence', [
     'schemaVersion', 'resultHash', 'resultMetaHash', 'datasetHash', 'executionArtifactHash',
     'riskTraceHash', 'riskUnitRatio',
     'scenarioId', 'fee', 'freqtradeVersion', 'configIdentity', 'configHash',
-    'executionProfile', 'executionProfileHash', 'adapterFiles', 'adapterHash',
+    'executionProfile', 'executionProfileHash', 'futuresCostDataset', 'adapterFiles', 'adapterHash',
   ]);
   if (source.schemaVersion !== EXECUTION_RUNTIME_EVIDENCE_SCHEMA_VERSION) {
     throw new Error(`unsupported execution runtime evidence schema ${String(source.schemaVersion)}`);
@@ -431,6 +552,9 @@ export function verifyExecutionRuntimeEvidence(value, expected = null) {
       if (normalized[field] !== expected[field]) {
         throw new Error(`execution runtime ${field} does not match its report evidence`);
       }
+    }
+    if (!isDeepStrictEqual(normalized.futuresCostDataset, expected.futuresCostDataset)) {
+      throw new Error('execution runtime futuresCostDataset does not match its report evidence');
     }
   }
   return normalized;

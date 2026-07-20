@@ -11,13 +11,19 @@ import { reconcileSignalBacktest } from './backtest-reconciliation.mjs';
 import { firstStrategySummary, readBacktestPayload } from './backtest-result.mjs';
 import { verifyExecutionRuntimeArchive } from './execution-runtime-evidence.mjs';
 import { verifyHistoricalRiskTrace } from './historical-risk.mjs';
+import {
+  futuresCostDatasetIdentity,
+  loadFuturesCostDataset,
+  verifyFundingFees,
+} from './futures-cost-dataset.mjs';
 import { marketDatasetHash, marketTimeframeMilliseconds, verifyMarketDataset } from './market-dataset.mjs';
 import { verifySignalArtifact } from './signal-artifact.mjs';
 import { assertOkxForwardSource } from './forward-target.mjs';
 
 export const WALK_FORWARD_PLAN_SCHEMA_VERSION = 'helix.walk-forward-plan/v1';
 export const WALK_FORWARD_RUN_SCHEMA_VERSION = 'helix.walk-forward-run/v1';
-export const WALK_FORWARD_REPORT_SCHEMA_VERSION = 'helix.walk-forward-report/v3';
+export const WALK_FORWARD_REPORT_SCHEMA_VERSION = 'helix.walk-forward-report/v4';
+const LEGACY_WALK_FORWARD_REPORT_SCHEMA_VERSION = 'helix.walk-forward-report/v3';
 
 const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const COMMIT_PATTERN = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
@@ -1086,12 +1092,22 @@ function normalizeCoreEvidence(value, runHash) {
   return { root, sourceDatasetFile, runFile, files };
 }
 
-function normalizeExecutionEvidence(value, name, plan, fold) {
-  const evidence = exactRecord(value, name, [
+function normalizeExecutionEvidence(value, name, plan, fold, requireFuturesCostDataset) {
+  const hasFuturesCostDataset = Object.prototype.hasOwnProperty.call(value || {}, 'futuresCostDataset');
+  if (hasFuturesCostDataset !== requireFuturesCostDataset) {
+    throw new Error(`${name} futures cost evidence does not match the report schema`);
+  }
+  const evidence = exactRecord(value, name, hasFuturesCostDataset ? [
     'scenarioId', 'fee', 'freqtradeVersion', 'configHash', 'adapterHash', 'executionProfile',
-    'executionProfileHash', 'riskTraceHash', 'riskUnitRatio', 'runtimeEvidenceFile', 'runtimeEvidenceHash', 'resultFile',
+    'executionProfileHash', 'riskTraceHash', 'riskUnitRatio', 'futuresCostDataset',
+    'futuresCostDatasetFile', 'futuresCostDatasetFileHash', 'runtimeEvidenceFile', 'runtimeEvidenceHash', 'resultFile',
     'resultHash', 'resultMetaFile', 'resultMetaHash', 'reconciliation', 'feeObservations',
-    'metrics',
+    'fundingObservations', 'metrics',
+  ] : [
+    'scenarioId', 'fee', 'freqtradeVersion', 'configHash', 'adapterHash', 'executionProfile',
+    'executionProfileHash', 'riskTraceHash', 'riskUnitRatio', 'runtimeEvidenceFile',
+    'runtimeEvidenceHash', 'resultFile', 'resultHash', 'resultMetaFile', 'resultMetaHash',
+    'reconciliation', 'feeObservations', 'metrics',
   ]);
   const scenarioId = text(evidence.scenarioId, `${name}.scenarioId`);
   const scenario = plan.executionScenarios.find(({ id }) => id === scenarioId);
@@ -1123,7 +1139,26 @@ function normalizeExecutionEvidence(value, name, plan, fold) {
   }
   const metrics = normalizeBacktestMetrics(evidence.metrics, `${name}.metrics`);
   if (metrics.trades !== fold.tradeIds.length) throw new Error(`${name}.metrics trades do not match the fold cohort`);
-  return {
+  let futuresCostDataset = null;
+  let fundingObservations = null;
+  if (hasFuturesCostDataset) {
+    futuresCostDataset = jsonRecord(evidence.futuresCostDataset, `${name}.futuresCostDataset`);
+    if (futuresCostDataset.schemaVersion !== 'helix.futures-cost-dataset/v1'
+      || futuresCostDataset.source?.provider !== plan.sourceDataset.source.provider
+      || futuresCostDataset.source?.market !== plan.sourceDataset.source.market
+      || futuresCostDataset.source?.instrumentId !== plan.sourceDataset.source.instrumentId
+      || futuresCostDataset.source?.symbol !== plan.sourceDataset.source.symbol) {
+      throw new Error(`${name}.futuresCostDataset does not match the plan source`);
+    }
+    hash(futuresCostDataset.costDatasetHash, `${name}.futuresCostDataset.costDatasetHash`);
+    fundingObservations = jsonRecord(evidence.fundingObservations, `${name}.fundingObservations`);
+    if (fundingObservations.status !== 'OBSERVED'
+      || fundingObservations.matches !== true
+      || fundingObservations.trades !== metrics.trades) {
+      throw new Error(`${name}.fundingObservations are incomplete or unreconciled`);
+    }
+  }
+  const normalized = {
     scenarioId,
     fee,
     freqtradeVersion: text(evidence.freqtradeVersion, `${name}.freqtradeVersion`),
@@ -1156,6 +1191,22 @@ function normalizeExecutionEvidence(value, name, plan, fold) {
       fold.tradeIds.length,
     ),
     metrics,
+  };
+  if (!hasFuturesCostDataset) return normalized;
+  return {
+    ...normalized,
+    futuresCostDataset,
+    futuresCostDatasetFile: archiveFile(
+      evidence.futuresCostDatasetFile,
+      `${name}.futuresCostDatasetFile`,
+      hash(evidence.futuresCostDatasetFileHash, `${name}.futuresCostDatasetFileHash`),
+      ['.futures-cost.json'],
+    ),
+    futuresCostDatasetFileHash: hash(
+      evidence.futuresCostDatasetFileHash,
+      `${name}.futuresCostDatasetFileHash`,
+    ),
+    fundingObservations,
   };
 }
 
@@ -1305,7 +1356,11 @@ function gateCheck(code, ok, actual, required, evidenceRefs) {
   return { code, ok, actual, required, evidenceRefs };
 }
 
-export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue) {
+function createWalkForwardReportVersion(bundle, foldEvidence, coreEvidenceValue, schemaVersion) {
+  const legacy = schemaVersion === LEGACY_WALK_FORWARD_REPORT_SCHEMA_VERSION;
+  if (!legacy && schemaVersion !== WALK_FORWARD_REPORT_SCHEMA_VERSION) {
+    throw new Error(`unsupported walk-forward report schema ${String(schemaVersion)}`);
+  }
   if (!bundle?.plan || !bundle?.run || !Array.isArray(bundle.folds)) {
     throw new Error('walk-forward bundle is required');
   }
@@ -1335,7 +1390,13 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
       throw new Error(`walk-forward fold ${index} must cover every execution scenario`);
     }
     const executionEvidence = foldEvidence[index].map((value, evidenceIndex) => (
-      normalizeExecutionEvidence(value, `folds[${index}].executionEvidence[${evidenceIndex}]`, bundle.plan, runFold)
+      normalizeExecutionEvidence(
+        value,
+        `folds[${index}].executionEvidence[${evidenceIndex}]`,
+        bundle.plan,
+        runFold,
+        !legacy,
+      )
     ));
     if (!isDeepStrictEqual(
       executionEvidence.map(({ scenarioId }) => scenarioId),
@@ -1359,7 +1420,25 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
   if (new Set(environments.map(({ freqtradeVersion }) => freqtradeVersion)).size !== 1
     || new Set(environments.map(({ configHash }) => configHash)).size !== 1
     || new Set(environments.map(({ adapterHash }) => adapterHash)).size !== 1) {
-    throw new Error('walk-forward execution evidence must use one Freqtrade version, config, and adapter');
+    throw new Error(legacy
+      ? 'walk-forward execution evidence must use one Freqtrade version, config, and adapter'
+      : 'walk-forward execution evidence must use one Freqtrade version, config, adapter, and futures cost dataset');
+  }
+  let executionEnvironment = null;
+  if (!legacy) {
+    if (new Set(environments.map(({ futuresCostDataset }) => futuresCostDataset.costDatasetHash)).size !== 1
+      || new Set(environments.map(({ futuresCostDatasetFile }) => futuresCostDatasetFile)).size !== 1
+      || new Set(environments.map(({ futuresCostDatasetFileHash }) => futuresCostDatasetFileHash)).size !== 1) {
+      throw new Error('walk-forward execution evidence must use one futures cost dataset');
+    }
+    executionEnvironment = {
+      freqtradeVersion: environments[0].freqtradeVersion,
+      configHash: environments[0].configHash,
+      adapterHash: environments[0].adapterHash,
+      futuresCostDataset: environments[0].futuresCostDataset,
+      futuresCostDatasetFile: environments[0].futuresCostDatasetFile,
+      futuresCostDatasetFileHash: environments[0].futuresCostDatasetFileHash,
+    };
   }
   const base = scenarios.reduce((selected, item) => item.fee < selected.fee ? item : selected, scenarios[0]);
   const costSensitivity = scenarios.map((scenario) => ({
@@ -1392,6 +1471,27 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
     gateCheck('EXECUTION_EVIDENCE_HASH_VALID', true, true, true, ['folds.*.executionEvidence']),
     gateCheck('SIGNAL_RECONCILED', true, true, true, ['folds.*.executionEvidence.*.reconciliation']),
     gateCheck('EXECUTION_PROFILE_PIN_MATCH', true, true, true, ['folds.*.executionEvidence.*.executionProfileHash']),
+    ...(!legacy ? [
+      gateCheck(
+        'FUTURES_COST_DATA_COMPLETE',
+        true,
+        executionEnvironment.futuresCostDataset,
+        { schemaVersion: 'helix.futures-cost-dataset/v1', complete: true },
+        ['aggregate.executionEnvironment.futuresCostDataset'],
+      ),
+      gateCheck(
+        'FUNDING_COST_RECONCILED',
+        environments.every(({ fundingObservations }) => fundingObservations.matches === true),
+        environments.map(({ scenarioId, fundingObservations }) => ({
+          scenarioId,
+          trades: fundingObservations.trades,
+          settlements: fundingObservations.settlements,
+          matches: fundingObservations.matches,
+        })),
+        true,
+        ['folds.*.executionEvidence.*.fundingObservations'],
+      ),
+    ] : []),
     gateCheck(
       'FEE_STRESS_OBSERVED',
       observedFeeScenarios.length === bundle.plan.executionScenarios.length,
@@ -1538,17 +1638,26 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
     );
   }
   const payload = {
-    schemaVersion: WALK_FORWARD_REPORT_SCHEMA_VERSION,
+    schemaVersion,
     planHash: bundle.plan.planHash,
     runHash: bundle.run.runHash,
     candidate: bundle.plan.candidate,
     sourceDatasetHash: bundle.plan.sourceDataset.datasetHash,
     coreEvidence,
     folds,
-    aggregate: { scenarios, costSensitivity },
+    aggregate: legacy ? { scenarios, costSensitivity } : { executionEnvironment, scenarios, costSensitivity },
     gate: { ok: checks.every(({ ok }) => ok), checks },
   };
   return { ...payload, reportHash: walkForwardReportHash(payload) };
+}
+
+export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue) {
+  return createWalkForwardReportVersion(
+    bundle,
+    foldEvidence,
+    coreEvidenceValue,
+    WALK_FORWARD_REPORT_SCHEMA_VERSION,
+  );
 }
 
 function rawFileHash(file) {
@@ -1577,10 +1686,15 @@ function verifyReportArchives(report, directory) {
   for (const [foldIndex, fold] of report.folds.entries()) {
     const archivedFold = archivedBundle.folds[foldIndex];
     for (const evidence of fold.executionEvidence) {
+      const futuresCostEvidence = evidence.futuresCostDataset ? [[
+        evidence.futuresCostDatasetFile,
+        evidence.futuresCostDatasetFileHash,
+      ]] : [];
       for (const [file, expectedHash] of [
         [evidence.resultFile, evidence.resultHash],
         [evidence.resultMetaFile, evidence.resultMetaHash],
         [evidence.runtimeEvidenceFile, evidence.runtimeEvidenceHash],
+        ...futuresCostEvidence,
       ]) {
         if (rawFileHash(resolve(root, file)) !== expectedHash) {
           throw new Error(`walk-forward execution archive hash mismatch: ${file}`);
@@ -1595,6 +1709,13 @@ function verifyReportArchives(report, directory) {
       if (!Object.prototype.hasOwnProperty.call(meta, evidence.executionProfile.strategy)) {
         throw new Error(`walk-forward execution metadata has no strategy ${evidence.executionProfile.strategy}`);
       }
+      const futuresCostDataset = evidence.futuresCostDataset
+        ? loadFuturesCostDataset(resolve(root, evidence.futuresCostDatasetFile))
+        : null;
+      const futuresCostIdentity = futuresCostDataset ? futuresCostDatasetIdentity(futuresCostDataset) : null;
+      if (futuresCostIdentity && !isDeepStrictEqual(futuresCostIdentity, evidence.futuresCostDataset)) {
+        throw new Error(`walk-forward futures cost dataset identity mismatch: ${evidence.futuresCostDatasetFile}`);
+      }
       const runtime = verifyExecutionRuntimeArchive(
         readJson(resolve(root, evidence.runtimeEvidenceFile), 'walk-forward runtime evidence'),
         {
@@ -1607,6 +1728,7 @@ function verifyReportArchives(report, directory) {
           riskUnitRatio: evidence.riskUnitRatio,
           scenarioId: evidence.scenarioId,
           fee: evidence.fee,
+          ...(futuresCostIdentity ? { futuresCostDataset: futuresCostIdentity } : {}),
         },
       );
       for (const [field, actual] of [
@@ -1617,6 +1739,7 @@ function verifyReportArchives(report, directory) {
         ['executionProfileHash', runtime.executionProfileHash],
         ['riskTraceHash', runtime.riskTraceHash],
         ['riskUnitRatio', runtime.riskUnitRatio],
+        ...(futuresCostIdentity ? [['futuresCostDataset', runtime.futuresCostDataset]] : []),
       ]) {
         if (!isDeepStrictEqual(evidence[field], actual)) {
           throw new Error(`walk-forward execution ${field} does not match archived runtime evidence`);
@@ -1625,6 +1748,7 @@ function verifyReportArchives(report, directory) {
       const recomputed = {
         reconciliation: reconcileSignalBacktest(summary, archivedFold.executionArtifact),
         feeObservations: backtestFeeObservations(summary, evidence.fee),
+        ...(futuresCostDataset ? { fundingObservations: verifyFundingFees(summary, futuresCostDataset) } : {}),
         metrics: backtestMetrics(summary, {
           signalArtifact: archivedFold.executionArtifact,
           riskTrace: archivedFold.executionRiskTrace,
@@ -1633,7 +1757,9 @@ function verifyReportArchives(report, directory) {
           accountEquity: evidence.executionProfile.dryRunWallet,
         }),
       };
-      for (const field of ['reconciliation', 'feeObservations', 'metrics']) {
+      for (const field of [
+        'reconciliation', 'feeObservations', ...(futuresCostDataset ? ['fundingObservations'] : []), 'metrics',
+      ]) {
         if (!isDeepStrictEqual(evidence[field], recomputed[field])) {
           throw new Error(
             `walk-forward execution ${field} does not match archived result: ${evidence.resultFile}`,
@@ -1642,7 +1768,9 @@ function verifyReportArchives(report, directory) {
       }
       if (rawFileHash(resolve(root, evidence.resultFile)) !== evidence.resultHash
         || rawFileHash(resolve(root, evidence.resultMetaFile)) !== evidence.resultMetaHash
-        || rawFileHash(resolve(root, evidence.runtimeEvidenceFile)) !== evidence.runtimeEvidenceHash) {
+        || rawFileHash(resolve(root, evidence.runtimeEvidenceFile)) !== evidence.runtimeEvidenceHash
+        || (futuresCostDataset
+          && rawFileHash(resolve(root, evidence.futuresCostDatasetFile)) !== evidence.futuresCostDatasetFileHash)) {
         throw new Error(`walk-forward execution archive changed during verification: ${evidence.resultFile}`);
       }
     }
@@ -1655,7 +1783,8 @@ export function verifyWalkForwardReport(value, bundle = null, reportDirectory = 
     'schemaVersion', 'planHash', 'runHash', 'candidate', 'sourceDatasetHash',
     'coreEvidence', 'folds', 'aggregate', 'gate', 'reportHash',
   ]);
-  if (report.schemaVersion !== WALK_FORWARD_REPORT_SCHEMA_VERSION) {
+  if (![WALK_FORWARD_REPORT_SCHEMA_VERSION, LEGACY_WALK_FORWARD_REPORT_SCHEMA_VERSION]
+    .includes(report.schemaVersion)) {
     throw new Error(`unsupported walk-forward report schema ${String(report.schemaVersion)}`);
   }
   hash(report.planHash, 'planHash');
@@ -1691,10 +1820,11 @@ export function verifyWalkForwardReport(value, bundle = null, reportDirectory = 
     archivedBundle.plan.planHash !== bundle.plan.planHash
     || archivedBundle.run.runHash !== bundle.run.runHash
   )) throw new Error('walk-forward report archive does not match the supplied Core bundle');
-  const recreated = createWalkForwardReport(
+  const recreated = createWalkForwardReportVersion(
     archivedBundle,
     report.folds.map((fold) => fold.executionEvidence),
     report.coreEvidence,
+    report.schemaVersion,
   );
   if (!isDeepStrictEqual(recreated, report)) {
     throw new Error('walk-forward report does not match its verified Core bundle');
@@ -1709,6 +1839,9 @@ export function loadPromotableWalkForwardReport(reportFile, artifact) {
   const expectedName = `walk-forward-report-${report.reportHash.replace(':', '-')}.json`;
   if (basename(file) !== expectedName) throw new Error(`walk-forward report file must equal ${expectedName}`);
   if (!report.gate.ok) throw new Error(`walk-forward report ${report.reportHash} did not pass its versioned policy`);
+  if (report.schemaVersion !== WALK_FORWARD_REPORT_SCHEMA_VERSION) {
+    throw new Error('legacy walk-forward reports cannot authorize deployment');
+  }
   if (!artifact?.identity) throw new Error('signal artifact is required for walk-forward report binding');
   const candidate = report.candidate;
   if (candidate.strategyId !== artifact.identity.strategyId

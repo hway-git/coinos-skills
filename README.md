@@ -87,7 +87,7 @@ pnpm freqtrade:install
 
 运行配置和凭据保存在 `~/.helix/.env`，Freqtrade 用户数据保存在 `~/.freqtrade/user_data`。安装器可重复执行，不会覆盖已有配置或轮换已有 API 密码。
 
-`HelixSignalStrategy` 不包含指标或策略判断。Signal 回测必须同时提供原始 `helix.market-dataset/v1`，且只使用其中与 artifact 匹配的基础周期 OHLCV。风险仓位使用 `1R = 账户权益 1%`；单笔总预算为 `账户权益 × 0.01 × riskR`，初始止损价差、开仓手续费和按初始止损价估算的平仓手续费必须共同落在该预算内，但 realized R、MFE 和 MAE 始终除以账户级的 `账户权益 × 0.01`，不能把单笔预算误称为 1R。杠杆只用于把单笔风险预算放入可用保证金范围，实际杠杆、价格风险预算、手续费风险预算和 stake 会逐笔重建并写入证据。Walk-forward 使用策略 policy 固定的参考账户权益，不能继承开发机任意的 `dry_run_wallet`；回测证据会绑定 adapter 指纹、Signal Artifact hash、策略 commit、配置 hash、Engine commit、市场数据 hash、Freqtrade 版本、运行配置和结果文件；dry-run 只接受 `shadow` 及以上 lifecycle，live 只接受 `canary` 或 `production`。
+`HelixSignalStrategy` 不包含指标或策略判断。Signal 回测必须同时提供原始 `helix.market-dataset/v1` 和 execution-only 的 `helix.futures-cost-dataset/v1`：前者只使用与 artifact 匹配的基础周期 OHLCV，后者必须完整覆盖同一来源窗口的 1h mark、funding rate 与冻结的 leverage tiers。缺失 funding/mark、使用 `futures_funding_rate=0`、用成交价代替 mark 或 tiers 在运行中变化都会 fail closed；每笔 `funding_fees` 还会按固定数据逐笔重算。风险仓位使用 `1R = 账户权益 1%`；单笔总预算为 `账户权益 × 0.01 × riskR`，初始止损价差、开仓手续费和按初始止损价估算的平仓手续费必须共同落在该预算内，但 realized R、MFE 和 MAE 始终除以账户级的 `账户权益 × 0.01`，不能把单笔预算误称为 1R。杠杆只用于把单笔风险预算放入可用保证金范围，实际杠杆、价格风险预算、手续费风险预算和 stake 会逐笔重建并写入证据。Walk-forward 使用策略 policy 固定的参考账户权益，不能继承开发机任意的 `dry_run_wallet`；回测证据会绑定 adapter 指纹、Signal Artifact hash、策略 commit、配置 hash、Engine commit、决策数据 hash、期货成本数据 hash、Freqtrade 版本、运行配置和结果文件；dry-run 只接受 `shadow` 及以上 lifecycle，live 只接受 `canary` 或 `production`。
 
 当策略 manifest 已引用版本化 walk-forward policy 时，使用 Core 的 `run-policy` 从 policy 自动生成 fold、observation tail 和 fee 场景。Policy v2 还会预先固定跨标的验证 universe；每个标的保留独立 Core/Freqtrade 归档，组合报告从逐笔 R 重建 pooled expectancy、profit factor、symbol-fold 活跃度、策略原生 segment 和 Symbol Segments。独立单标的结果不能冒充共享资金组合回撤，组合报告只记录各标的回撤及 `worstSymbolDrawdownR`。Helix Signal 部署必须通过 `walk_forward_report` 提供覆盖 Artifact symbol、与候选身份完全一致且通过全部 gate 的组合报告，并将 report hash 固定进 forward deployment。
 
@@ -147,8 +147,10 @@ pnpm strategy:backtest -- run '{"dataset":"/absolute/path/source-dataset.json","
 
 # 4. 对三个单标的 bundle 分别生成完整 Freqtrade 证据与 member report
 cd skills/helix-freqtrade
-node scripts/ft-deploy.mjs backtest '{"signal_artifact":"/absolute/path/scalp-artifact.json","market_dataset":"/absolute/path/source-dataset.json","fee":0.0005}'
-node scripts/ft-deploy.mjs walk_forward '{"walk_forward_run":"/absolute/path/scalp-walk-forward/walk-forward-run.json","source_dataset":"/absolute/path/source-dataset.json"}'
+node scripts/ft-deploy.mjs download_data '{"exchange":"okx","pairs":["BTC/USDT:USDT"],"timeframes":["1h"],"timerange":"20260101-20260304","data_format_ohlcv":"json","candle_types":["mark","funding_rate"],"data_directory":"/absolute/path/raw/okx"}'
+node scripts/ft-deploy.mjs freeze_futures_cost_dataset '{"source_dataset":"/absolute/path/source-dataset.json","data_directory":"/absolute/path/raw/okx","output_file":"/absolute/path/btc-futures-cost.json"}'
+node scripts/ft-deploy.mjs backtest '{"signal_artifact":"/absolute/path/scalp-artifact.json","market_dataset":"/absolute/path/source-dataset.json","futures_cost_dataset":"/absolute/path/btc-futures-cost.json","historical_risk_trace":"/absolute/path/risk-trace.json","risk_unit_ratio":0.01,"fee":0.0005}'
+node scripts/ft-deploy.mjs walk_forward '{"walk_forward_run":"/absolute/path/scalp-walk-forward/walk-forward-run.json","source_dataset":"/absolute/path/source-dataset.json","futures_cost_dataset":"/absolute/path/btc-futures-cost.json"}'
 
 # 5. 由 Core 固定三个 child plan/run 的组合身份；members 输入顺序不影响最终 hash
 cd /absolute/path/to/helix

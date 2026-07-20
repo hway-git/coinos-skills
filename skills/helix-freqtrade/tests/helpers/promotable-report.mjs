@@ -10,6 +10,7 @@ import {
   signalExecutionProfile,
 } from '../../lib/execution-runtime-evidence.mjs';
 import { historicalRiskTraceHash } from '../../lib/historical-risk.mjs';
+import { futuresCostDatasetIdentity, verifyFundingFees } from '../../lib/futures-cost-dataset.mjs';
 import { marketDatasetHash } from '../../lib/market-dataset.mjs';
 import { signalArtifactHash } from '../../lib/signal-artifact.mjs';
 import {
@@ -18,6 +19,7 @@ import {
   walkForwardPlanHash,
   walkForwardRunHash,
 } from '../../lib/walk-forward.mjs';
+import { futuresCostDatasetFixture } from './futures-cost-dataset.mjs';
 
 function sha256(content) {
   return `sha256:${createHash('sha256').update(content).digest('hex')}`;
@@ -109,7 +111,9 @@ function resultFixture(fold, scenario, stressed, options = {}) {
       profit_ratio: profitRatio,
       profit_abs: profitAbs,
       stake_amount: stakeAmount,
+      amount: stakeAmount / openRate,
       leverage: 1,
+      funding_fees: 0,
       fee_open: scenario.fee,
       fee_close: scenario.fee,
     }] : [],
@@ -272,8 +276,18 @@ export async function createPromotableWalkForwardReport(root, artifact, options 
     { name: 'helix_signal_batch.py', contentBase64: Buffer.from('BATCH = True\n').toString('base64') },
   ];
   const config = executionConfig();
+  const futuresCostDataset = futuresCostDatasetFixture({
+    source: source.source,
+    coveredThrough: source.capturedThrough,
+    maxLeverage: options.maxLeverage ?? 20,
+  });
+  const futuresCostIdentity = futuresCostDatasetIdentity(futuresCostDataset);
+  const futuresCostContent = `${JSON.stringify(futuresCostDataset, null, 2)}\n`;
+  const futuresCostDatasetFileHash = sha256(futuresCostContent);
+  const futuresCostDatasetFile = `evidence/${futuresCostDatasetFileHash.replace(':', '-')}.futures-cost.json`;
   const evidence = [];
   await mkdir(join(root, 'evidence'), { recursive: true });
+  await writeFile(join(root, futuresCostDatasetFile), futuresCostContent);
   for (const fold of bundle.folds) {
     const scenarioEvidence = [];
     for (const [scenarioIndex, scenario] of bundle.plan.executionScenarios.entries()) {
@@ -289,7 +303,8 @@ export async function createPromotableWalkForwardReport(root, artifact, options 
         riskTraceHash: fold.executionRiskTrace.traceHash,
         riskUnitRatio: 0.01,
         scenarioId: scenario.id, fee: scenario.fee, freqtradeVersion: 'freqtrade test',
-        configIdentity: executionConfigIdentity(config), executionProfile, adapterFiles,
+        configIdentity: executionConfigIdentity(config), executionProfile,
+        futuresCostDataset: futuresCostIdentity, adapterFiles,
       });
       const resultFile = `evidence/${resultHash.replace(':', '-')}.json`;
       const resultMetaFile = `evidence/${resultMetaHash.replace(':', '-')}.meta.json`;
@@ -304,9 +319,13 @@ export async function createPromotableWalkForwardReport(root, artifact, options 
         configHash: runtime.configHash, adapterHash: runtime.adapterHash,
         executionProfile: runtime.executionProfile, executionProfileHash: runtime.executionProfileHash,
         riskTraceHash: fold.executionRiskTrace.traceHash, riskUnitRatio: 0.01,
+        futuresCostDataset: futuresCostIdentity,
+        futuresCostDatasetFile,
+        futuresCostDatasetFileHash,
         runtimeEvidenceFile, runtimeEvidenceHash, resultFile, resultHash, resultMetaFile, resultMetaHash,
         reconciliation: reconcileSignalBacktest(fixture.summary, fold.executionArtifact),
         feeObservations: backtestFeeObservations(fixture.summary, scenario.fee),
+        fundingObservations: verifyFundingFees(fixture.summary, futuresCostDataset),
         metrics: backtestMetrics(fixture.summary, {
           signalArtifact: fold.executionArtifact, riskTrace: fold.executionRiskTrace, marketDataset: fold.dataset,
           riskUnitRatio: 0.01, accountEquity: 1000,

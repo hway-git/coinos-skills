@@ -47,6 +47,14 @@ import {
 import { reconcileSignalBacktest } from '../lib/backtest-reconciliation.mjs';
 import { backtestFeeObservations, backtestMetrics } from '../lib/backtest-metrics.mjs';
 import { verifyHistoricalRiskTrace } from '../lib/historical-risk.mjs';
+import {
+  createFuturesCostDataset,
+  freqtradeFuturesCostFiles,
+  futuresCostDatasetIdentity,
+  loadFuturesCostDataset,
+  requireFuturesCostDatasetWindow,
+  verifyFundingFees,
+} from '../lib/futures-cost-dataset.mjs';
 import { firstStrategySummary, readBacktestPayload } from '../lib/backtest-result.mjs';
 import {
   SIGNAL_ADAPTER_FILE_NAMES,
@@ -119,7 +127,7 @@ const CONFIG_PATH = ENV ? ENV.configPath       : HOST.configPath;
 const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[0]; // host: ~/.helix/.env(规范位置, 与读路径最高优先级一致)
 const FT_API_URL = process.env.FREQTRADE_URL || process.env.FT_API_URL || 'http://127.0.0.1:8888';
 const FT_API_PORT = Number(new URL(FT_API_URL).port || 8888);
-const BACKTEST_EVIDENCE_VERSION = 2;
+const BACKTEST_EVIDENCE_VERSION = 3;
 // Research-only walk-forward bundles may omit a versioned policy. They still
 // need an explicit account-R scale for execution evidence, while the report's
 // VERSIONED_GATE_POLICY_PRESENT check keeps them permanently non-promotable.
@@ -128,6 +136,7 @@ const UNVERSIONED_WALK_FORWARD_ACCOUNT_EQUITY = 1000;
 const BACKTEST_EVIDENCE_FILE = resolve(USER_DATA, 'backtest_results', '.helix-evidence.json');
 const SIGNAL_ARTIFACT_DIR = resolve(USER_DATA, 'helix', 'signals');
 const SIGNAL_BACKTEST_DATA_DIR = resolve(USER_DATA, 'helix', 'backtest-data');
+const FUTURES_COST_DATASET_DIR = resolve(USER_DATA, 'helix', 'futures-cost-data');
 const WALK_FORWARD_REPORT_INDEX = resolve(USER_DATA, 'helix', 'validation', 'walk-forward-reports.json');
 const HELIX_REPO_ROOT = resolve(__dir, '..', '..', '..');
 const CORE_PACKAGE_DIR = resolve(HELIX_REPO_ROOT, 'packages', 'core');
@@ -567,6 +576,7 @@ function reusableWalkForwardEvidence({
   freqtradeVersion,
   riskUnitRatio,
   accountEquity,
+  futuresCostDatasetHash,
 }) {
   const artifact = fold.executionArtifact;
   for (const record of readBacktestEvidence()) {
@@ -584,7 +594,8 @@ function reusableWalkForwardEvidence({
       || environment.freqtradeVersion.trim() !== freqtradeVersion.trim()
       || environment?.configIdentity?.dryRunWallet !== accountEquity
       || environment?.executionProfile?.dryRunWallet !== accountEquity
-      || environment?.executionProfile?.fee !== scenario.fee) continue;
+      || environment?.executionProfile?.fee !== scenario.fee
+      || environment?.futuresCostDataset?.costDatasetHash !== futuresCostDatasetHash) continue;
     try {
       const verified = verifyBacktestEvidenceResult(record, artifact, scenario.fee, {
         signalArtifact: artifact,
@@ -741,6 +752,9 @@ function archiveWalkForwardMemberReport(portfolioDirectory, reportFileValue) {
       files.set(evidence.resultFile, evidence.resultHash);
       files.set(evidence.resultMetaFile, evidence.resultMetaHash);
       files.set(evidence.runtimeEvidenceFile, evidence.runtimeEvidenceHash);
+      if (evidence.futuresCostDatasetFile) {
+        files.set(evidence.futuresCostDatasetFile, evidence.futuresCostDatasetFileHash);
+      }
     }
   }
   for (const [relativeFile, expectedHash] of files) {
@@ -824,7 +838,10 @@ function hasSignalExecutionEnvironment(evidence) {
     && environment.riskUnitRatio > 0
     && environment.riskUnitRatio <= 1
     && environment.dataFormatOhlcv === 'json'
-    && environment.executionProfile?.schemaVersion === 'helix.freqtrade-execution-profile/v1';
+    && environment.executionProfile?.schemaVersion === 'helix.freqtrade-execution-profile/v1'
+    && environment.futuresCostDataset?.schemaVersion === 'helix.futures-cost-dataset/v1'
+    && typeof environment.futuresCostDataset?.costDatasetHash === 'string'
+    && typeof environment.futuresCostDatasetFileHash === 'string';
 }
 
 let cachedFreqtradeVersion;
@@ -867,7 +884,7 @@ function requireSignalExecutionCompatibility(evidence, config, archivedArtifact)
 
 function readBacktestEvidence() {
   const payload = readJsonFile(BACKTEST_EVIDENCE_FILE);
-  return (payload?.version === 1 || payload?.version === BACKTEST_EVIDENCE_VERSION) && Array.isArray(payload.records)
+  return [1, 2, BACKTEST_EVIDENCE_VERSION].includes(payload?.version) && Array.isArray(payload.records)
     ? payload.records
     : [];
 }
@@ -1069,6 +1086,56 @@ function archiveHistoricalRiskTrace(file, artifact) {
   return { riskTrace, hashFile, fileHash: expectedFileHash };
 }
 
+function archiveFuturesCostDataset(file) {
+  if (typeof file !== 'string' || !file.trim()) {
+    throw new Error('HelixSignalStrategy backtest requires futures_cost_dataset.');
+  }
+  const dataset = loadFuturesCostDataset(resolve(file.trim()));
+  mkdirSync(FUTURES_COST_DATASET_DIR, { recursive: true, mode: 0o700 });
+  const hashFile = resolve(
+    FUTURES_COST_DATASET_DIR,
+    `${dataset.costDatasetHash.replace(':', '-')}.json`,
+  );
+  const content = `${JSON.stringify(dataset, null, 2)}\n`;
+  const expectedFileHash = `sha256:${createHash('sha256').update(content).digest('hex')}`;
+  if (existsSync(hashFile)) {
+    if (fileHash(hashFile) !== expectedFileHash) {
+      throw new Error(`archived futures cost dataset is corrupt: ${hashFile}`);
+    }
+    loadFuturesCostDataset(hashFile);
+  } else {
+    const temporary = `${hashFile}.tmp.${process.pid}`;
+    writeFileSync(temporary, content, { mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, hashFile);
+  }
+  return {
+    dataset,
+    identity: futuresCostDatasetIdentity(dataset),
+    hashFile,
+    fileHash: expectedFileHash,
+  };
+}
+
+function loadArchivedFuturesCostDataset(identity, expectedFileHash) {
+  if (identity?.schemaVersion !== 'helix.futures-cost-dataset/v1'
+    || typeof identity.costDatasetHash !== 'string') {
+    throw new Error('backtest evidence has no valid futures cost dataset identity');
+  }
+  const file = resolve(
+    FUTURES_COST_DATASET_DIR,
+    `${identity.costDatasetHash.replace(':', '-')}.json`,
+  );
+  if (fileHash(file) !== expectedFileHash) {
+    throw new Error(`archived futures cost dataset hash mismatch: ${identity.costDatasetHash}`);
+  }
+  const dataset = loadFuturesCostDataset(file);
+  if (!isDeepStrictEqual(futuresCostDatasetIdentity(dataset), identity)) {
+    throw new Error(`archived futures cost dataset identity mismatch: ${identity.costDatasetHash}`);
+  }
+  return { dataset, file };
+}
+
 function resolveSignalWalkForwardReport(params, artifact) {
   const value = params.walk_forward_report;
   if (value == null || value === '') return null;
@@ -1241,7 +1308,7 @@ function requireStoredDeploymentIdentity(config) {
   return { strategy, archivedArtifact, evidence };
 }
 
-function stageSignalBacktestDataset(file, artifact) {
+function stageSignalBacktestDataset(file, artifact, futuresCostDatasetFile) {
   if (typeof file !== 'string' || !file.trim()) throw new Error('market_dataset must be a JSON file path');
   const source = resolve(file.trim());
   const dataset = loadMarketDataset(source);
@@ -1252,26 +1319,44 @@ function stageSignalBacktestDataset(file, artifact) {
     throw new Error(`market_dataset symbol ${dataset.source.symbol} does not match signal artifact ${artifact.symbol}`);
   }
   const rendered = freqtradeOhlcvFile(dataset, artifact.baseTimeframe);
+  const futuresCostArchive = archiveFuturesCostDataset(futuresCostDatasetFile);
+  requireFuturesCostDatasetWindow(futuresCostArchive.dataset, dataset, artifact);
+  const futuresCostFiles = freqtradeFuturesCostFiles(futuresCostArchive.dataset);
   const candles = dataset.timeframes[artifact.baseTimeframe];
   const marketWindow = requireMarketDatasetArtifactWindow(dataset, artifact);
   const lastCandleCloseTime = marketWindow.lastCandleCloseTime;
-  const dataRoot = resolve(SIGNAL_BACKTEST_DATA_DIR, dataset.datasetHash.replace(':', '-'));
-  const destination = resolve(dataRoot, rendered.relativePath);
-  mkdirSync(dirname(destination), { recursive: true });
-  if (existsSync(destination)) {
-    if (fileHash(destination) !== rendered.dataHash) {
-      throw new Error(`staged market dataset is corrupt: ${destination}`);
+  const dataRoot = resolve(
+    SIGNAL_BACKTEST_DATA_DIR,
+    dataset.datasetHash.replace(':', '-'),
+    futuresCostArchive.dataset.costDatasetHash.replace(':', '-'),
+  );
+  const stageFile = (value, name) => {
+    const destination = resolve(dataRoot, value.relativePath);
+    mkdirSync(dirname(destination), { recursive: true });
+    if (existsSync(destination)) {
+      if (fileHash(destination) !== value.dataHash) {
+        throw new Error(`staged ${name} data is corrupt: ${destination}`);
+      }
+    } else {
+      const temporary = `${destination}.tmp.${process.pid}`;
+      writeFileSync(temporary, value.content, { mode: 0o600 });
+      chmodSync(temporary, 0o600);
+      renameSync(temporary, destination);
     }
-  } else {
-    const temporary = `${destination}.tmp.${process.pid}`;
-    writeFileSync(temporary, rendered.content);
-    chmodSync(temporary, 0o600);
-    renameSync(temporary, destination);
-  }
+    return { file: destination, hash: value.dataHash };
+  };
+  const stagedFiles = {
+    market: stageFile(rendered, 'market'),
+    mark: stageFile(futuresCostFiles.mark, 'mark price'),
+    fundingRate: stageFile(futuresCostFiles.fundingRate, 'funding rate'),
+    leverageTiers: stageFile(futuresCostFiles.leverageTiers, 'leverage tiers'),
+  };
   return {
     dataset,
     dataRoot,
-    dataFile: destination,
+    dataFile: stagedFiles.market.file,
+    stagedFiles,
+    futuresCostArchive,
     evidence: {
       datasetHash: dataset.datasetHash,
       provider: dataset.source.provider,
@@ -1286,6 +1371,114 @@ function stageSignalBacktestDataset(file, artifact) {
       warmupCandles: marketWindow.warmupCandles,
       lastCandleCloseTime,
     },
+  };
+}
+
+function freqtradePairFileName(symbol) {
+  return ['/', ' ', '.', '@', '$', '+', ':'].reduce(
+    (filename, character) => filename.replaceAll(character, '_'),
+    symbol,
+  );
+}
+
+function readFreqtradeJsonRows(file, name) {
+  let rows;
+  try {
+    rows = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (error) {
+    throw new Error(`cannot read ${name} JSON ${file}: ${error.message}`);
+  }
+  if (!Array.isArray(rows)) throw new Error(`${name} JSON must contain an array`);
+  return rows;
+}
+
+function freezeFuturesCostDataset(params) {
+  if (typeof params.source_dataset !== 'string' || !params.source_dataset.trim()) {
+    throw new Error('freeze_futures_cost_dataset requires source_dataset.');
+  }
+  if (typeof params.data_directory !== 'string' || !params.data_directory.trim()) {
+    throw new Error('freeze_futures_cost_dataset requires data_directory.');
+  }
+  if (typeof params.output_file !== 'string' || !params.output_file.trim()) {
+    throw new Error('freeze_futures_cost_dataset requires output_file.');
+  }
+  const sourceDataset = loadMarketDataset(resolve(params.source_dataset.trim()));
+  if (sourceDataset.source.provider !== 'okx' || sourceDataset.source.market !== 'futures') {
+    throw new Error('freeze_futures_cost_dataset currently requires an OKX futures source dataset.');
+  }
+  const timeframeEntries = Object.entries(sourceDataset.timeframes);
+  const coveredFrom = Math.min(...timeframeEntries.map(([, candles]) => candles[0].time));
+  const coveredThrough = Math.max(...timeframeEntries.map(([timeframe, candles]) => (
+    candles.at(-1).time + marketTimeframeMilliseconds(timeframe)
+  )));
+  const futuresDirectory = resolve(params.data_directory.trim(), 'futures');
+  const pair = freqtradePairFileName(sourceDataset.source.symbol);
+  const markFile = resolve(futuresDirectory, `${pair}-1h-mark.json`);
+  const fundingFile = resolve(futuresDirectory, `${pair}-1h-funding_rate.json`);
+  const leverageFile = resolve(futuresDirectory, 'leverage_tiers_USDT.json');
+  const markRows = readFreqtradeJsonRows(markFile, 'mark price');
+  const fundingRows = readFreqtradeJsonRows(fundingFile, 'funding rate');
+  let leverageCache;
+  try {
+    leverageCache = JSON.parse(readFileSync(leverageFile, 'utf8'));
+  } catch (error) {
+    throw new Error(`cannot read leverage tiers JSON ${leverageFile}: ${error.message}`);
+  }
+  const leverageData = leverageCache?.data;
+  if (!leverageData || typeof leverageData !== 'object' || Array.isArray(leverageData)) {
+    throw new Error('leverage tiers JSON must contain a data object');
+  }
+  const hour = 3_600_000;
+  const firstHour = Math.floor(coveredFrom / hour) * hour;
+  const lastHour = Math.ceil(coveredThrough / hour) * hour;
+  const markPrice = markRows.map((row, index) => {
+    if (!Array.isArray(row) || row.length < 6) {
+      throw new Error(`mark price row ${index} must contain six columns`);
+    }
+    if (!Number.isSafeInteger(row[0]) || row.slice(1, 5).some((value) => !Number.isFinite(value))
+      || (row[5] != null && !Number.isFinite(row[5]))) {
+      throw new Error(`mark price row ${index} contains invalid numeric values`);
+    }
+    return {
+      time: row[0],
+      open: row[1],
+      high: row[2],
+      low: row[3],
+      close: row[4],
+      volume: row[5] == null ? 0 : row[5],
+    };
+  }).filter(({ time }) => time >= firstHour && time < lastHour);
+  const fundingRate = fundingRows.map((row, index) => {
+    if (!Array.isArray(row) || row.length < 2) {
+      throw new Error(`funding rate row ${index} must contain at least two columns`);
+    }
+    if (!Number.isSafeInteger(row[0]) || !Number.isFinite(row[1])) {
+      throw new Error(`funding rate row ${index} contains invalid numeric values`);
+    }
+    return { time: row[0], rate: row[1] };
+  }).filter(({ time }) => time >= firstHour && time < coveredThrough);
+  const dataset = createFuturesCostDataset({
+    schemaVersion: 'helix.futures-cost-dataset/v1',
+    source: sourceDataset.source,
+    capturedThrough: sourceDataset.capturedThrough,
+    coveredFrom,
+    coveredThrough,
+    markPrice: { candleType: 'mark', timeframe: '1h', candles: markPrice },
+    fundingRate: { timeframe: '1h', maximumIntervalMs: 8 * hour, rows: fundingRate },
+    leverageTiers: { stakeCurrency: 'USDT', data: leverageData },
+  });
+  const outputFile = resolve(params.output_file.trim());
+  const fileHash = writeImmutableJsonFile(outputFile, dataset);
+  return {
+    file: outputFile,
+    fileHash,
+    costDatasetHash: dataset.costDatasetHash,
+    source: dataset.source,
+    coveredFrom: dataset.coveredFrom,
+    coveredThrough: dataset.coveredThrough,
+    markCandles: dataset.markPrice.candles.length,
+    fundingRows: dataset.fundingRate.rows.length,
+    leverageTiersHash: futuresCostDatasetIdentity(dataset).leverageTiers.dataHash,
   };
 }
 
@@ -1368,6 +1561,22 @@ function verifyBacktestEvidenceResult(evidence, signalArtifact = null, requested
   const reconciliation = verifiedSignalArtifact
     ? reconcileSignalBacktest(summary, verifiedSignalArtifact)
     : null;
+  const futuresCostArchive = verifiedSignalArtifact
+    ? loadArchivedFuturesCostDataset(
+        evidence.executionEnvironment?.futuresCostDataset,
+        evidence.executionEnvironment?.futuresCostDatasetFileHash,
+      )
+    : null;
+  const fundingObservations = futuresCostArchive
+    ? verifyFundingFees(summary, futuresCostArchive.dataset)
+    : null;
+  if (fundingObservations && !fundingObservations.matches) {
+    throw new Error(`Backtest evidence "${evidence.id}" funding fees do not match the pinned futures cost dataset.`);
+  }
+  if (futuresCostArchive
+    && fileHash(futuresCostArchive.file) !== evidence.executionEnvironment.futuresCostDatasetFileHash) {
+    throw new Error(`Backtest evidence "${evidence.id}" futures cost dataset changed during verification.`);
+  }
   if (fileHash(resultFile) !== actualResultHash || fileHash(resultMetaFile) !== actualResultMetaHash) {
     throw new Error(`Backtest evidence "${evidence.id}" result files changed during verification.`);
   }
@@ -1377,6 +1586,10 @@ function verifyBacktestEvidenceResult(evidence, signalArtifact = null, requested
     resultHash: actualResultHash,
     resultMetaHash: actualResultMetaHash,
     reconciliation,
+    fundingObservations,
+    futuresCostDataset: futuresCostArchive
+      ? futuresCostDatasetIdentity(futuresCostArchive.dataset)
+      : null,
     signalArtifact: verifiedSignalArtifact ? signalArtifactEvidence(verifiedSignalArtifact) : null,
   };
 }
@@ -3142,9 +3355,6 @@ const actions = {
     if (fee !== null && (!Number.isFinite(fee) || fee < 0)) {
       throw new Error('fee must be a non-negative number');
     }
-    const stagedDataset = signalArtifact
-      ? stageSignalBacktestDataset(String(params.market_dataset), signalArtifact)
-      : null;
     const riskUnitRatio = signalArtifact ? Number(params.risk_unit_ratio) : null;
     if (signalArtifact && (!Number.isFinite(riskUnitRatio) || riskUnitRatio <= 0 || riskUnitRatio > 1)) {
       throw new Error('HelixSignalStrategy backtest requires risk_unit_ratio in (0, 1].');
@@ -3164,6 +3374,13 @@ const actions = {
     const archivedRiskTrace = signalArtifact
       ? archiveHistoricalRiskTrace(params.historical_risk_trace, signalArtifact)
       : null;
+    const stagedDataset = signalArtifact
+      ? stageSignalBacktestDataset(
+          String(params.market_dataset),
+          signalArtifact,
+          params.futures_cost_dataset,
+        )
+      : null;
     ensureHostFreqtradeInstalled();
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
@@ -3177,6 +3394,9 @@ const actions = {
       console.error(`Auto-created backtest config (exchange: ${exchange})`);
     }
     const backtestConfig = readJsonFile(CONFIG_PATH);
+    if (signalArtifact && backtestConfig?.futures_funding_rate != null) {
+      throw new Error('HelixSignalStrategy forbids futures_funding_rate fallback; provide observed futures_cost_dataset data.');
+    }
     if (stagedDataset) {
       const configuredExchange = String(backtestConfig?.exchange?.name || '').toLowerCase();
       const datasetProvider = stagedDataset.dataset.source.provider.toLowerCase();
@@ -3223,6 +3443,16 @@ const actions = {
     const stagedDataHash = stagedDataset ? fileHash(stagedDataset.dataFile) : null;
     if (stagedDataset && stagedDataHash !== stagedDataset.evidence.dataHash) {
       throw new Error(`Staged market dataset is corrupt: ${stagedDataset.dataFile}`);
+    }
+    if (stagedDataset) {
+      for (const [name, staged] of Object.entries(stagedDataset.stagedFiles)) {
+        requireUnchangedFile(staged.file, staged.hash, `Staged ${name} data`);
+      }
+      requireUnchangedFile(
+        stagedDataset.futuresCostArchive.hashFile,
+        stagedDataset.futuresCostArchive.fileHash,
+        'Archived futures cost dataset',
+      );
     }
     const archivedArtifactFileHash = archivedArtifact ? fileHash(archivedArtifact.hashFile) : null;
     if (archivedArtifact && !archivedArtifactFileHash) {
@@ -3303,6 +3533,16 @@ const actions = {
     }
     if (!signalArtifact) requireUnchangedFile(CONFIG_PATH, configFileHash, 'Freqtrade config');
     if (stagedDataset) requireUnchangedFile(stagedDataset.dataFile, stagedDataHash, 'Staged market dataset');
+    if (stagedDataset) {
+      for (const [name, staged] of Object.entries(stagedDataset.stagedFiles)) {
+        requireUnchangedFile(staged.file, staged.hash, `Staged ${name} data`);
+      }
+      requireUnchangedFile(
+        stagedDataset.futuresCostArchive.hashFile,
+        stagedDataset.futuresCostArchive.fileHash,
+        'Archived futures cost dataset',
+      );
+    }
     if (archivedArtifact) {
       requireUnchangedFile(archivedArtifact.hashFile, archivedArtifactFileHash, 'Archived signal artifact');
     }
@@ -3311,6 +3551,12 @@ const actions = {
     }
     requireUnchangedFile(resultPath, resultHash, 'Freqtrade result');
     requireUnchangedFile(resultMetaPath, resultMetaHash, 'Freqtrade result metadata');
+    const fundingObservations = signalArtifact
+      ? verifyFundingFees(summary, stagedDataset.futuresCostArchive.dataset)
+      : null;
+    if (fundingObservations && !fundingObservations.matches) {
+      throw new Error('Freqtrade funding fees do not match the pinned futures cost dataset.');
+    }
     const evidence = recordBacktestEvidence({
       strategy,
       strategyHash,
@@ -3333,6 +3579,12 @@ const actions = {
         dataFormatOhlcv: stagedDataset ? 'json' : null,
         configIdentity: safeBacktestConfig ? executionConfigIdentity(safeBacktestConfig) : null,
         executionProfile: recordedExecutionProfile,
+        futuresCostDataset: stagedDataset
+          ? stagedDataset.futuresCostArchive.identity
+          : null,
+        futuresCostDatasetFileHash: stagedDataset
+          ? stagedDataset.futuresCostArchive.fileHash
+          : null,
       },
       resultHash,
       resultMetaHash,
@@ -3382,6 +3634,18 @@ const actions = {
         + 'extend observationEndTime and rerun Core before Freqtrade execution.',
       );
     }
+    const futuresCostArchive = archiveFuturesCostDataset(params.futures_cost_dataset);
+    requireFuturesCostDatasetWindow(
+      futuresCostArchive.dataset,
+      bundle.sourceDataset,
+      bundle.folds[0].executionArtifact,
+    );
+    const futuresCostDatasetFile = archiveWalkForwardEvidence(
+      bundle.directory,
+      futuresCostArchive.hashFile,
+      futuresCostArchive.fileHash,
+      '.futures-cost.json',
+    );
 
     const runtimeAdapterBundle = signalAdapterBundleFromDirectory(SIGNAL_ADAPTER_ASSET_DIR);
     const riskUnitRatio = bundle.plan.walkForwardPolicy?.plan.riskUnitRatio
@@ -3400,6 +3664,7 @@ const actions = {
           freqtradeVersion,
           riskUnitRatio,
           accountEquity,
+          futuresCostDatasetHash: futuresCostArchive.dataset.costDatasetHash,
         });
         const result = reusable ? null : runBacktestSubprocess({
           signal_artifact: resolve(bundle.directory, fold.run.executionArtifactFile),
@@ -3407,6 +3672,7 @@ const actions = {
           risk_unit_ratio: riskUnitRatio,
           account_equity: accountEquity,
           market_dataset: resolve(bundle.directory, fold.run.datasetFile),
+          futures_cost_dataset: futuresCostArchive.hashFile,
           fee: scenario.fee,
         });
         const evidenceId = result?.evidence?.id;
@@ -3447,6 +3713,10 @@ const actions = {
           && !verified.feeObservations.matchesRequested) {
           throw new Error(`walk-forward fold ${foldIndex} scenario ${scenario.id} observed fee mismatch.`);
         }
+        if (!verified.fundingObservations?.matches
+          || !isDeepStrictEqual(verified.futuresCostDataset, futuresCostArchive.identity)) {
+          throw new Error(`walk-forward fold ${foldIndex} scenario ${scenario.id} futures cost evidence mismatch.`);
+        }
         const resultsDirectory = dirname(BACKTEST_EVIDENCE_FILE);
         const resultPath = evidenceFilePath(
           resultsDirectory,
@@ -3473,6 +3743,7 @@ const actions = {
           freqtradeVersion: environment.freqtradeVersion,
           configIdentity: environment.configIdentity,
           executionProfile: environment.executionProfile,
+          futuresCostDataset: futuresCostArchive.identity,
           adapterFiles: runtimeAdapterBundle.files,
         });
         const runtimeArchive = archiveWalkForwardRuntimeEvidence(bundle.directory, runtimeEvidence);
@@ -3486,6 +3757,9 @@ const actions = {
           adapterHash: `sha256:${record.strategyHash}`,
           riskTraceHash: fold.executionRiskTrace.traceHash,
           riskUnitRatio,
+          futuresCostDataset: futuresCostArchive.identity,
+          futuresCostDatasetFile,
+          futuresCostDatasetFileHash: futuresCostArchive.fileHash,
           runtimeEvidenceFile: runtimeArchive.file,
           runtimeEvidenceHash: runtimeArchive.hash,
           resultFile: archiveWalkForwardEvidence(
@@ -3504,6 +3778,7 @@ const actions = {
           resultMetaHash: verified.resultMetaHash,
           reconciliation: verified.reconciliation,
           feeObservations: verified.feeObservations,
+          fundingObservations: verified.fundingObservations,
           metrics: verified.metrics,
         });
       }
@@ -3578,6 +3853,8 @@ const actions = {
     };
   },
 
+  freeze_futures_cost_dataset: async (params = {}) => freezeFuturesCostDataset(params),
+
   // ── download_data ──────────────────────────────────────────────
   download_data: async (params = {}) => {
     ensureHostFreqtradeInstalled();
@@ -3596,14 +3873,43 @@ const actions = {
       : [String(params.timeframe || '1h')];
     const timerange = params.timerange || '';
     const pairs = params.pairs ? (Array.isArray(params.pairs) ? params.pairs : [params.pairs]) : [];
+    const dataFormatOhlcv = params.data_format_ohlcv == null
+      ? null
+      : String(params.data_format_ohlcv);
+    if (dataFormatOhlcv !== null && dataFormatOhlcv !== 'json') {
+      throw new Error('download_data data_format_ohlcv currently supports only json.');
+    }
+    const candleTypes = params.candle_types == null
+      ? []
+      : Array.isArray(params.candle_types) ? params.candle_types.map(String) : [String(params.candle_types)];
+    const allowedCandleTypes = new Set(['futures', 'mark', 'funding_rate']);
+    if (candleTypes.some((value) => !allowedCandleTypes.has(value))) {
+      throw new Error('download_data candle_types supports futures, mark, and funding_rate.');
+    }
+    const dataDirectory = params.data_directory == null
+      ? null
+      : resolve(String(params.data_directory));
 
     console.error(`Downloading data: timeframes=${timeframes.join(',')}${timerange ? `, timerange=${timerange}` : ''}...`);
     const args = ['download-data', '--config', CONFIG_PATH, '--timeframes', ...timeframes, '--userdir', USER_DATA];
     if (timerange) args.push('--timerange', timerange);
     if (pairs.length) args.push('-p', ...pairs);
     if (params.prepend === true) args.push('--prepend');
+    if (dataFormatOhlcv) args.push('--data-format-ohlcv', dataFormatOhlcv);
+    if (candleTypes.length) args.push('--candle-types', ...candleTypes);
+    if (dataDirectory) args.push('--datadir', dataDirectory);
     const output = runFreqtrade(args, { timeout: 300000, env: proxyEnv() });
-    return { mode: runtimeMode(), timeframes, pairs, prepend: params.prepend === true, timerange: timerange || 'all available', output };
+    return {
+      mode: runtimeMode(),
+      timeframes,
+      pairs,
+      prepend: params.prepend === true,
+      timerange: timerange || 'all available',
+      dataFormatOhlcv,
+      candleTypes,
+      dataDirectory,
+      output,
+    };
   },
 
   // ── hyperopt ───────────────────────────────────────────────────

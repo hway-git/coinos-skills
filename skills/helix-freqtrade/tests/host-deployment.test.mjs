@@ -17,7 +17,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { signalArtifactHash } from '../lib/signal-artifact.mjs';
+import { futuresCostDatasetIdentity } from '../lib/futures-cost-dataset.mjs';
 import { createPromotableWalkForwardReport } from './helpers/promotable-report.mjs';
+import { futuresCostDatasetFixture } from './helpers/futures-cost-dataset.mjs';
 
 const execFileAsync = promisify(execFile);
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -293,11 +295,26 @@ setInterval(() => {}, 1000);
   let artifactFile = null;
   let artifactContent = null;
   let reportFile = null;
+  let futuresCostIdentity = null;
+  let futuresCostDatasetFileHash = null;
   if (artifact) {
     artifactFile = join(signalDir, `${artifact.artifactHash.replace(':', '-')}.json`);
     artifactContent = `${JSON.stringify(artifact, null, 2)}\n`;
     await writeFile(artifactFile, artifactContent, { mode: 0o600 });
     ({ reportFile } = await createPromotableWalkForwardReport(join(home, 'walk-forward'), artifact));
+    const futuresCostDataset = futuresCostDatasetFixture({
+      coveredFrom: artifact.marketData.firstCandleOpenTime,
+      coveredThrough: artifact.marketData.lastCandleCloseTime,
+    });
+    futuresCostIdentity = futuresCostDatasetIdentity(futuresCostDataset);
+    const futuresCostContent = `${JSON.stringify(futuresCostDataset, null, 2)}\n`;
+    futuresCostDatasetFileHash = sha256(futuresCostContent);
+    const futuresCostDirectory = join(userData, 'helix', 'futures-cost-data');
+    await mkdir(futuresCostDirectory, { recursive: true });
+    await writeFile(
+      join(futuresCostDirectory, `${futuresCostDataset.costDatasetHash.replace(':', '-')}.json`),
+      futuresCostContent,
+    );
   }
 
   const resultFile = 'backtest-result-host.json';
@@ -317,6 +334,8 @@ setInterval(() => {}, 1000);
             close_timestamp: artifact.signals[1].decisionTime,
             enter_tag: artifact.signals[0].signalId,
             exit_reason: artifact.signals[1].signalId,
+            amount: 1,
+            funding_fees: 0,
           }],
         } : {}),
       },
@@ -331,7 +350,7 @@ setInterval(() => {}, 1000);
   await writeFile(join(resultsDir, resultFile), resultContent);
   await writeFile(join(resultsDir, resultMetaFile), resultMetaContent);
   await writeFile(join(resultsDir, '.helix-evidence.json'), JSON.stringify({
-    version: 2,
+    version: 3,
     records: [{
       id: 'host-evidence',
       strategy: signal ? 'HelixSignalStrategy' : 'TestStrategy',
@@ -394,6 +413,8 @@ setInterval(() => {}, 1000);
             positionAdjustmentEnabled: null,
             maxEntryPositionAdjustment: null,
           },
+          futuresCostDataset: futuresCostIdentity,
+          futuresCostDatasetFileHash,
         },
       } : {}),
       createdAt: '2026-07-16T00:00:00.000Z',

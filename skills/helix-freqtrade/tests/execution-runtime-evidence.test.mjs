@@ -15,6 +15,7 @@ import {
   verifyExecutionRuntimeArchive,
   verifyExecutionRuntimeEvidence,
 } from '../lib/execution-runtime-evidence.mjs';
+import { futuresCostIdentityFixture } from './helpers/futures-cost-dataset.mjs';
 
 const sentinel = 'HELIX_SENTINEL_SECRET_DO_NOT_ARCHIVE';
 const publicApiCredentials = {
@@ -70,6 +71,7 @@ function runtimeFixture(config) {
     freqtradeVersion: 'freqtrade 2026.7',
     configIdentity: executionConfigIdentity(config),
     executionProfile,
+    futuresCostDataset: futuresCostIdentityFixture(),
     adapterFiles,
   });
 }
@@ -168,6 +170,7 @@ test('hash-pins the complete adapter, config profile, version, and result linkag
     riskUnitRatio: runtime.riskUnitRatio,
     scenarioId: runtime.scenarioId,
     fee: runtime.fee,
+    futuresCostDataset: runtime.futuresCostDataset,
   }), runtime);
 
   const changedHelper = structuredClone(runtime);
@@ -182,6 +185,7 @@ test('hash-pins the complete adapter, config profile, version, and result linkag
     riskUnitRatio: runtime.riskUnitRatio,
     scenarioId: runtime.scenarioId,
     fee: runtime.fee,
+    futuresCostDataset: runtime.futuresCostDataset,
   }), /resultHash does not match/);
 });
 
@@ -231,6 +235,7 @@ test('cross-checks a REDACTED ZIP config and rejects an embedded sentinel creden
     riskUnitRatio: runtime.riskUnitRatio,
     scenarioId: runtime.scenarioId,
     fee: runtime.fee,
+    futuresCostDataset: runtime.futuresCostDataset,
   }), runtime);
 
   for (const [field, value] of [
@@ -267,5 +272,6 @@ test('cross-checks a REDACTED ZIP config and rejects an embedded sentinel creden
     riskUnitRatio: runtime.riskUnitRatio,
     scenarioId: runtime.scenarioId,
     fee: runtime.fee,
+    futuresCostDataset: runtime.futuresCostDataset,
   }), /forbidden secret exchange.key/);
 });
