@@ -9,7 +9,6 @@ import type {
   SwingLocationConfig,
   SwingRiskPolicyConfig,
   SwingStageEvidence,
-  SwingThesisConfig,
   SwingTradeThesis,
 } from '@helix/contracts/swing'
 import type { HistoricalDecisionContext, HistoricalSignalDecision } from './historical-runner'
@@ -34,7 +33,6 @@ const EXECUTION_STAGES: readonly SwingExecutionStage[] = ['EARLY', 'STANDARD', '
 export type SwingHistoricalEvaluatorConfig = {
   dailyContext: SwingDailyMarketContextConfig
   location: SwingLocationConfig
-  thesis: SwingThesisConfig
   execution: SwingExecutionPolicyConfig
   risk: SwingRiskPolicyConfig
 }
@@ -113,15 +111,6 @@ function bodyRatio(candle: Candle) {
 function latestAtr(candles: readonly Candle[], period = 14) {
   if (candles.length < period + 1) return null
   return average(trueRanges(candles.slice(-(period + 1))).slice(-period))
-}
-
-function locationDistanceAtr(location: SwingLocationCandidate, price: number, atr: number) {
-  const distance = price < location.boundaries.lower
-    ? location.boundaries.lower - price
-    : price > location.boundaries.upper
-      ? price - location.boundaries.upper
-      : 0
-  return distance / atr
 }
 
 function rejectionCounts(rejections: Map<string, Set<string>>) {
@@ -220,9 +209,6 @@ export class SwingHistoricalEvaluator {
     private readonly recordHistoricalRiskEntry?: (entry: StrategyHistoricalSwingRiskTraceEntry) => void,
     checkpoint?: SwingHistoricalEvaluatorCheckpoint,
   ) {
-    if (!Number.isFinite(config.thesis.maxLocationDistanceAtr) || config.thesis.maxLocationDistanceAtr <= 0) {
-      throw new Error('config.thesis.maxLocationDistanceAtr must be positive')
-    }
     if (!Number.isFinite(config.execution.stopBufferAtr) || config.execution.stopBufferAtr <= 0) {
       throw new Error('config.execution.stopBufferAtr must be positive')
     }
@@ -447,13 +433,9 @@ export class SwingHistoricalEvaluator {
   }
 
   private createThesis(decision: HistoricalDecisionContext, fourHourly: readonly Candle[]) {
-    const current = latest(fourHourly)
+    const location = this.locations[0]
     const atr = latestAtr(fourHourly, this.config.location.atrPeriod)
-    if (!current || !this.context || !atr) return
-    const location = this.locations.find((candidate) => (
-      locationDistanceAtr(candidate, current.close, atr) <= this.config.thesis.maxLocationDistanceAtr
-    ))
-    if (!location) return
+    if (!location || !this.context || !atr) return
     const expectedMove = selectSwingStructuralTarget(location, this.locations)
     if (!expectedMove) {
       this.missingExpectedMoveDecisions += 1

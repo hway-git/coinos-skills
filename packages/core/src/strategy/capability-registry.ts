@@ -244,15 +244,7 @@ const ENGINE_CAPABILITIES: EngineCapabilityDefinition[] = [
     id: 'swing_location_v1', kind: 'component', family: 'swing', requiresConfiguration: true,
     validateConfiguration: swingLocationConfig,
   },
-  {
-    id: 'trade_thesis_v1', kind: 'component', family: 'swing', requiresConfiguration: true,
-    validateConfiguration: (value) => {
-      const data = record(value)
-      return Boolean(data
-        && exactKeys(data, ['max_location_distance_atr'])
-        && positive(data.max_location_distance_atr))
-    },
-  },
+  { id: 'trade_thesis_v1', kind: 'component', family: 'swing', requiresConfiguration: false },
   { id: 'evidence_accumulation_v1', kind: 'component', family: 'swing', requiresConfiguration: false },
   {
     id: 'staged_execution_v1', kind: 'component', family: 'swing', requiresConfiguration: true,

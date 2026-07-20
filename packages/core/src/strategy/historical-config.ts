@@ -117,7 +117,6 @@ export function swingHistoricalConfig(manifest: StrategyManifestIdentity): Swing
   if (manifest.id !== 'helix_swing_hunter') throw new Error('Swing config requires helix_swing_hunter manifest')
   const daily = capability(manifest, 'daily_market_context_v1')
   const location = capability(manifest, 'swing_location_v1')
-  const thesis = capability(manifest, 'trade_thesis_v1')
   const execution = capability(manifest, 'staged_execution_v1')
   const rr = record(execution.min_rr_by_stage, 'staged_execution_v1.min_rr_by_stage')
   const risk = capability(manifest, 'swing_risk_budget_v1')
@@ -148,12 +147,6 @@ export function swingHistoricalConfig(manifest: StrategyManifestIdentity): Swing
       maxTestCount: number(location.max_test_count, 'swing_location_v1.max_test_count'),
       maxAgeBars: number(location.max_age_bars, 'swing_location_v1.max_age_bars'),
       minLocationScore: number(location.min_location_score, 'swing_location_v1.min_location_score'),
-    },
-    thesis: {
-      maxLocationDistanceAtr: number(
-        thesis.max_location_distance_atr,
-        'trade_thesis_v1.max_location_distance_atr',
-      ),
     },
     execution: {
       minRrByStage: {

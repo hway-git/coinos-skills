@@ -208,9 +208,6 @@ const swingCapabilities = {
     max_age_bars: 90,
     min_location_score: 55,
   },
-  trade_thesis_v1: {
-    max_location_distance_atr: 2,
-  },
   staged_execution_v1: {
     min_rr_by_stage: { EARLY: 1.5, STANDARD: 1.8, CONFIRMED: 2 },
     max_attempts_per_thesis: 3,
@@ -250,9 +247,6 @@ test('maps every Swing manifest parameter into the evaluator configuration', () 
       maxTestCount: 4,
       maxAgeBars: 90,
       minLocationScore: 55,
-    },
-    thesis: {
-      maxLocationDistanceAtr: 2,
     },
     execution: {
       minRrByStage: { EARLY: 1.5, STANDARD: 1.8, CONFIRMED: 2 },

@@ -97,10 +97,6 @@ export type SwingLocationScan = {
   featureSnapshot: SwingFeatureSnapshot
 }
 
-export type SwingThesisConfig = {
-  maxLocationDistanceAtr: number
-}
-
 export type SwingThesisInvalidation = {
   policyId: 'thesis_invalidation_v1'
   type: 'H4_CLOSE_ABOVE_LEVEL' | 'H4_CLOSE_BELOW_LEVEL'
