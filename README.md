@@ -145,9 +145,10 @@ pnpm strategy:walk-forward -- run-policy '{"dataset":"/absolute/path/source-data
 # 3. 生成同一候选身份的完整历史 Artifact
 pnpm strategy:backtest -- run '{"dataset":"/absolute/path/source-dataset.json","strategyId":"helix_scalp_hunter","firstDecisionTime":"2026-01-04T00:00:00Z","output":"/absolute/path/scalp-artifact.json"}'
 
-# 4. 对三个单标的 bundle 分别生成完整 Freqtrade 证据与 member report
+# 4. 从 OKX 官方历史归档固定 funding；再对三个标的分别下载 mark 并生成 Freqtrade 证据
 cd skills/helix-freqtrade
-node scripts/ft-deploy.mjs download_data '{"exchange":"okx","pairs":["BTC/USDT:USDT"],"timeframes":["1h"],"timerange":"20260101-20260304","data_format_ohlcv":"json","candle_types":["mark","funding_rate"],"data_directory":"/absolute/path/raw/okx"}'
+node scripts/ft-deploy.mjs download_okx_funding_archive '{"instrument_ids":["BTC-USDT-SWAP","ETH-USDT-SWAP","XRP-USDT-SWAP"],"start":"2026-01-01","end":"2026-03-04","data_directory":"/absolute/path/raw/okx"}'
+node scripts/ft-deploy.mjs download_data '{"exchange":"okx","pairs":["BTC/USDT:USDT"],"timeframes":["1h"],"timerange":"20260101-20260304","data_format_ohlcv":"json","candle_types":["mark"],"data_directory":"/absolute/path/raw/okx"}'
 node scripts/ft-deploy.mjs freeze_futures_cost_dataset '{"source_dataset":"/absolute/path/source-dataset.json","data_directory":"/absolute/path/raw/okx","output_file":"/absolute/path/btc-futures-cost.json"}'
 node scripts/ft-deploy.mjs backtest '{"signal_artifact":"/absolute/path/scalp-artifact.json","market_dataset":"/absolute/path/source-dataset.json","futures_cost_dataset":"/absolute/path/btc-futures-cost.json","historical_risk_trace":"/absolute/path/risk-trace.json","risk_unit_ratio":0.01,"fee":0.0005}'
 node scripts/ft-deploy.mjs walk_forward '{"walk_forward_run":"/absolute/path/scalp-walk-forward/walk-forward-run.json","source_dataset":"/absolute/path/source-dataset.json","futures_cost_dataset":"/absolute/path/btc-futures-cost.json"}'
@@ -164,6 +165,8 @@ node scripts/ft-deploy.mjs backtest_results
 # 7. 仅当组合 report gate 通过且 Artifact lifecycle 已为 shadow 或更高时部署 dry-run
 node scripts/ft-deploy.mjs deploy '{"signal_artifact_hash":"sha256:...","walk_forward_report":"/absolute/path/portfolio/walk-forward-portfolio-report-sha256-....json","dry_run":true}'
 ```
+
+`download_okx_funding_archive` 使用 UTC 半开窗口 `[start, end)`，只接受 OKX 官方 `static.okx.com` 日度 funding ZIP。原始 ZIP 按 SHA-256 保存在 `data_directory/helix/okx-funding-archives`，同时生成 acquisition manifest；任何缺失日期、非官方 URL、重复结算点或超过 8 小时的目标标的 funding 间隔都会失败。
 
 Policy v2 的单标的 report 会固定失败 `SYMBOL_STABILITY_GATE_SATISFIED`，只能作为组合报告成员，不能单独部署。Lifecycle 或任一仓库 commit 改变后，旧 Artifact 与 report 都不能沿用。晋级到 `shadow` 后必须在新的 clean commits 上重跑上述链路。
 

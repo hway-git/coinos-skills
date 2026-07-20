@@ -55,6 +55,14 @@ import {
   requireFuturesCostDatasetWindow,
   verifyFundingFees,
 } from '../lib/futures-cost-dataset.mjs';
+import {
+  createOkxFundingArchiveManifest,
+  mergeOkxFundingRows,
+  okxFundingArchiveFiles,
+  okxFundingArchivePlan,
+  OKX_FUNDING_ARCHIVE_ENDPOINT,
+  readOkxFundingArchive,
+} from '../lib/okx-funding-archive.mjs';
 import { firstStrategySummary, readBacktestPayload } from '../lib/backtest-result.mjs';
 import {
   SIGNAL_ADAPTER_FILE_NAMES,
@@ -1390,6 +1398,108 @@ function readFreqtradeJsonRows(file, name) {
   }
   if (!Array.isArray(rows)) throw new Error(`${name} JSON must contain an array`);
   return rows;
+}
+
+async function fetchOkxArchiveResource(url, options, name) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: { 'User-Agent': 'Helix/2.0', ...(options?.headers || {}) },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`cannot download ${name}: ${lastError?.message || 'unknown error'}`);
+}
+
+async function downloadOkxFundingArchive(params) {
+  if (typeof params.data_directory !== 'string' || !params.data_directory.trim()) {
+    throw new Error('download_okx_funding_archive requires data_directory.');
+  }
+  const plan = okxFundingArchivePlan(params);
+  const dataDirectory = resolve(params.data_directory.trim());
+  const descriptors = [];
+  for (const [index, request] of plan.requests.entries()) {
+    console.error(`Resolving OKX funding archive days ${index + 1}/${plan.requests.length}...`);
+    const response = await fetchOkxArchiveResource(OKX_FUNDING_ARCHIVE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        module: '3',
+        instType: 'SWAP',
+        instQueryParam: { instIdList: [] },
+        dateQuery: {
+          dateAggrType: 'daily',
+          begin: String(request.begin),
+          end: String(request.end),
+        },
+      }),
+    }, 'OKX funding archive index').then((value) => value.json());
+    descriptors.push(...okxFundingArchiveFiles(response, request));
+  }
+  const expectedDays = plan.requests.flatMap(({ dates }) => dates);
+  if (descriptors.length !== expectedDays.length
+    || new Set(descriptors.map(({ date }) => date)).size !== expectedDays.length) {
+    throw new Error('OKX funding archive index did not resolve the complete requested window');
+  }
+
+  const rawDirectory = resolve(dataDirectory, 'helix', 'okx-funding-archives');
+  const archives = [];
+  const parts = [];
+  for (let index = 0; index < descriptors.length; index += 6) {
+    const batch = descriptors.slice(index, index + 6);
+    const downloaded = await Promise.all(batch.map(async (descriptor) => {
+      const response = await fetchOkxArchiveResource(descriptor.url, {}, descriptor.filename);
+      const content = Buffer.from(await response.arrayBuffer());
+      if (!content.length) throw new Error(`OKX funding archive is empty: ${descriptor.filename}`);
+      const fileHash = `sha256:${createHash('sha256').update(content).digest('hex')}`;
+      const relativeFile = `helix/okx-funding-archives/${fileHash.replace(':', '-')}.zip`;
+      const file = resolve(dataDirectory, relativeFile);
+      writeImmutableRawFile(file, content, fileHash);
+      return {
+        archive: {
+          ...descriptor,
+          file: relativeFile,
+          fileHash,
+          size: content.length,
+        },
+        rows: readOkxFundingArchive(file, plan.instruments, plan.startTime, plan.endTime),
+      };
+    }));
+    archives.push(...downloaded.map(({ archive }) => archive));
+    parts.push(...downloaded.map(({ rows }) => rows));
+    console.error(`Downloaded OKX funding archives ${Math.min(index + batch.length, descriptors.length)}/${descriptors.length}.`);
+  }
+
+  const rendered = mergeOkxFundingRows(parts, plan);
+  const outputs = rendered.map((output) => {
+    const file = resolve(dataDirectory, output.relativePath);
+    writeImmutableRawFile(file, output.content, output.dataHash);
+    return { ...output, file: output.relativePath };
+  });
+  const manifest = createOkxFundingArchiveManifest({ plan, archives, outputs });
+  const manifestFile = resolve(
+    rawDirectory,
+    `manifest-${manifest.manifestHash.replace(':', '-')}.json`,
+  );
+  const manifestFileHash = writeImmutableJsonFile(manifestFile, manifest);
+  return {
+    start: plan.start,
+    end: plan.end,
+    instruments: outputs.map(({ instrumentId, symbol, file, rowCount, dataHash }) => ({
+      instrumentId, symbol, file: resolve(dataDirectory, file), rowCount, dataHash,
+    })),
+    archives: archives.length,
+    manifestFile,
+    manifestHash: manifest.manifestHash,
+    manifestFileHash,
+  };
 }
 
 function freezeFuturesCostDataset(params) {
@@ -3852,6 +3962,8 @@ const actions = {
       gate: report.gate,
     };
   },
+
+  download_okx_funding_archive: async (params = {}) => downloadOkxFundingArchive(params),
 
   freeze_futures_cost_dataset: async (params = {}) => freezeFuturesCostDataset(params),
 

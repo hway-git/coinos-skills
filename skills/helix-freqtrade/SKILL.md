@@ -62,7 +62,8 @@ node scripts/ft-deploy.mjs create_strategy '{"name":"RSIStrategy","timeframe":"1
 node scripts/ft-deploy.mjs backtest '{"strategy":"RSIStrategy","timeframe":"15m","timerange":"20250101-20260301"}'
 node scripts/ft-deploy.mjs hyperopt '{"strategy":"RSIStrategy","timeframe":"1h","epochs":100}'
 node scripts/ft-deploy.mjs deploy '{"strategy":"RSIStrategy","dry_run":true}'
-node scripts/ft-deploy.mjs download_data '{"exchange":"okx","pairs":["BTC/USDT:USDT"],"timeframes":["1h"],"timerange":"20260101-20260304","data_format_ohlcv":"json","candle_types":["mark","funding_rate"],"data_directory":"/path/to/raw/okx"}'
+node scripts/ft-deploy.mjs download_okx_funding_archive '{"instrument_ids":["BTC-USDT-SWAP","ETH-USDT-SWAP","XRP-USDT-SWAP"],"start":"2026-01-01","end":"2026-03-04","data_directory":"/path/to/raw/okx"}'
+node scripts/ft-deploy.mjs download_data '{"exchange":"okx","pairs":["BTC/USDT:USDT"],"timeframes":["1h"],"timerange":"20260101-20260304","data_format_ohlcv":"json","candle_types":["mark"],"data_directory":"/path/to/raw/okx"}'
 node scripts/ft-deploy.mjs freeze_futures_cost_dataset '{"source_dataset":"/path/to/source-dataset.json","data_directory":"/path/to/raw/okx","output_file":"/path/to/btc-futures-cost.json"}'
 node scripts/ft-deploy.mjs backtest '{"signal_artifact":"/path/to/artifact.json","market_dataset":"/path/to/dataset.json","futures_cost_dataset":"/path/to/btc-futures-cost.json","historical_risk_trace":"/path/to/risk-trace.json","risk_unit_ratio":0.01,"fee":0.0005}'
 node scripts/ft-deploy.mjs walk_forward '{"walk_forward_run":"/path/to/walk-forward-run.json","source_dataset":"/path/to/source-dataset.json","futures_cost_dataset":"/path/to/btc-futures-cost.json"}'
@@ -119,5 +120,5 @@ The Freqtrade daemon's own strategy-driven entries/exits do not require per-trad
 - Do not start `freqtrade trade` manually.
 - Do not use random or synthetic data as real backtest input.
 - Do not pass `timerange` for Signal Artifact backtests; their immutable dataset defines the complete window.
-- A successful OKX/Freqtrade download does not prove historical funding coverage. `freeze_futures_cost_dataset` must pass before backtesting; if OKX no longer serves the requested window, obtain a traceable historical archive instead of using zero funding.
+- A successful OKX/Freqtrade download does not prove historical funding coverage. For older windows, use `download_okx_funding_archive`; it preserves official raw ZIP hashes and fails on missing days or funding gaps. `freeze_futures_cost_dataset` must still pass before backtesting. Never use zero funding.
 - Do not print `.env` or `.ft_api_pass`.

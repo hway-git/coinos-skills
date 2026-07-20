@@ -65,6 +65,8 @@ Runtime credentials are stored in `~/.helix/.env`, and persistent Freqtrade data
 
 `HelixSignalStrategy` contains no indicators or strategy decisions. Signal backtests require both the original `helix.market-dataset/v1` and a matching execution-only `helix.futures-cost-dataset/v1`. The latter must completely cover 1h mark prices, observed funding rates, and one frozen leverage-tier snapshot for the same source window. Missing cost data, a `futures_funding_rate=0` fallback, last-price substitution, or runtime tier drift fails closed, and every reported funding fee is recomputed from the pinned inputs. Evidence binds the adapter fingerprint, Signal Artifact hash, strategy commit, configuration hash, Engine commit, decision-data hash, futures-cost-data hash, Freqtrade version, runtime configuration, and result file. Dry-run requires `shadow` or later lifecycle; live requires `canary` or `production`.
 
+For windows older than the rolling funding API, `download_okx_funding_archive` downloads only official `static.okx.com` daily funding archives, preserves every raw ZIP by SHA-256, emits an acquisition manifest, and renders complete Freqtrade JSON for the requested linear USDT swaps. Use `download_data` separately for 1h mark candles, then freeze both inputs with `freeze_futures_cost_dataset`.
+
 Dashboard control, deployment, backtest, authorization, emergency-stop, and reconciliation events persist in `~/.helix/helix.sqlite` with `0600` permissions.
 
 ## Common Commands
