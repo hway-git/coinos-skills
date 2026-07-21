@@ -373,7 +373,9 @@ class HelixSignalStrategy(IStrategy):
         dataframe.loc[matched, tag_column] = tags.loc[matched]
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        if not self._artifact_override_enabled():
+        runmode = self.config.get("runmode")
+        if not self._artifact_override_enabled() \
+                or getattr(runmode, "value", runmode) != "backtest":
             return dataframe
         # Freqtrade clamps exit limits to candle bounds before exchange precision
         # rounding, then requires the rounded float to remain inside those bounds.

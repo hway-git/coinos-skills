@@ -602,6 +602,7 @@ indexes = {
 }
 strategy = module.HelixSignalStrategy()
 strategy._signal_index = lambda _pair: indexes
+strategy.config = {'runmode': 'backtest'}
 os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = '1'
 frame = DataFrame({
     'date': [first],
@@ -613,10 +614,25 @@ frame = DataFrame({
 strategy.populate_indicators(frame, {'pair': 'BTC/USDT:USDT'})
 strategy.populate_entry_trend(frame, {'pair': 'BTC/USDT:USDT'})
 strategy.populate_exit_trend(frame, {'pair': 'BTC/USDT:USDT'})
-print(json.dumps(frame.columns))
+
+os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = ''
+override_off = DataFrame({'low': [2.3707000000000003], 'high': [2.3796]})
+strategy.populate_indicators(override_off, {'pair': 'BTC/USDT:USDT'})
+
+os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = '1'
+strategy.config = {'runmode': 'dry_run'}
+forward = DataFrame({'low': [2.3707000000000003], 'high': [2.3796]})
+strategy.populate_indicators(forward, {'pair': 'BTC/USDT:USDT'})
+
+print(json.dumps({
+    'backtest': frame.columns,
+    'override_off': override_off.columns,
+    'forward': forward.columns,
+}))
 `;
   const evaluated = await execFileAsync('python3', ['-c', harness, ADAPTER]);
-  const columns = JSON.parse(evaluated.stdout);
+  const result = JSON.parse(evaluated.stdout);
+  const columns = result.backtest;
   assert.deepEqual(columns.enter_long, [1]);
   assert.deepEqual(columns.enter_short, [0]);
   assert.deepEqual(columns.enter_tag, ['enter-long']);
@@ -627,6 +643,14 @@ print(json.dumps(frame.columns))
   assert.equal(2.3707 <= columns.high[0], true);
   assert.equal(columns.open[0], 2.3707000000000003);
   assert.equal(columns.close[0], 2.3778);
+  assert.deepEqual(result.override_off, {
+    low: [2.3707000000000003],
+    high: [2.3796],
+  });
+  assert.deepEqual(result.forward, {
+    low: [2.3707000000000003],
+    high: [2.3796],
+  });
 });
 
 test('adapter pins the configured hash and uses an explicit backtest override', async (t) => {

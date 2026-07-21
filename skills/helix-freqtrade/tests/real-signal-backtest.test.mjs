@@ -19,6 +19,7 @@ const execFileAsync = promisify(execFile);
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT = resolve(SKILL_DIR, '..', '..');
 const DEPLOY = resolve(SKILL_DIR, 'scripts', 'ft-deploy.mjs');
+const COMPOSE = resolve(REPO_ROOT, 'docker', 'freqtrade', 'compose.yaml');
 const dockerTest = process.env.HELIX_RUN_DOCKER_E2E === '1' ? test : test.skip;
 const sentinel = 'HELIX_SENTINEL_SECRET_DO_NOT_ARCHIVE';
 const minute = 60_000;
@@ -203,6 +204,100 @@ function fixtures() {
     run: { ...runPayload, runHash: walkForwardRunHash(runPayload) },
   };
 }
+
+dockerTest('real Freqtrade fills exchange-rounded Signal exits on both candle boundaries', async () => {
+  const harness = String.raw`
+import importlib.util
+import json
+import math
+import os
+import sys
+
+import pandas as pd
+from ccxt.base.decimal_to_precision import TICK_SIZE
+from freqtrade.enums import RunMode
+from freqtrade.exchange.exchange_utils import price_to_precision
+from freqtrade.optimize.backtesting import Backtesting, HIGH_IDX, LOW_IDX
+
+sys.path.insert(0, '/freqtrade/strategies')
+spec = importlib.util.spec_from_file_location(
+    'HelixSignalStrategy', '/freqtrade/strategies/HelixSignalStrategy.py'
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+strategy = module.HelixSignalStrategy({'runmode': RunMode.BACKTEST})
+os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = '1'
+
+def filled(low, high, proposed):
+    rounded = price_to_precision(proposed, 0.0001, TICK_SIZE)
+    row = [None] * (max(LOW_IDX, HIGH_IDX) + 1)
+    row[LOW_IDX] = low
+    row[HIGH_IDX] = high
+    return rounded, bool(Backtesting._get_order_filled(None, rounded, tuple(row)))
+
+long_low = math.nextafter(2.3707, math.inf)
+short_high = math.nextafter(2.3796, -math.inf)
+long_rate, long_before = filled(long_low, 2.3796, long_low)
+short_rate, short_before = filled(2.3707, short_high, short_high)
+
+normalized = strategy.populate_indicators(pd.DataFrame({
+    'low': [long_low, 2.3707],
+    'high': [2.3796, short_high],
+}), {'pair': 'XRP/USDT:USDT'})
+_, long_after = filled(normalized.iloc[0].low, normalized.iloc[0].high, long_low)
+_, short_after = filled(normalized.iloc[1].low, normalized.iloc[1].high, short_high)
+
+os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = ''
+override_off = strategy.populate_indicators(
+    pd.DataFrame({'low': [long_low], 'high': [short_high]}),
+    {'pair': 'XRP/USDT:USDT'},
+)
+os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = '1'
+strategy.config = {'runmode': 'dry_run'}
+forward = strategy.populate_indicators(
+    pd.DataFrame({'low': [long_low], 'high': [short_high]}),
+    {'pair': 'XRP/USDT:USDT'},
+)
+
+print(json.dumps({
+    'long_rate': long_rate,
+    'short_rate': short_rate,
+    'long_before': long_before,
+    'short_before': short_before,
+    'long_after': long_after,
+    'short_after': short_after,
+    'override_off_unchanged': bool(override_off.iloc[0].low == long_low
+        and override_off.iloc[0].high == short_high),
+    'forward_unchanged': bool(forward.iloc[0].low == long_low
+        and forward.iloc[0].high == short_high),
+}))
+`;
+  const { stdout } = await execFileAsync('docker', [
+    'compose', '-f', COMPOSE,
+    'run', '--rm', '--no-deps', '--entrypoint', 'python',
+    'freqtrade', '-c', harness,
+  ], {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      FREQTRADE_PASSWORD: sentinel,
+      FREQTRADE_JWT_SECRET: sentinel,
+      HELIX_SIGNAL_ARTIFACT_OVERRIDE: '1',
+    },
+    timeout: 120_000,
+  });
+  assert.deepEqual(JSON.parse(stdout), {
+    long_rate: 2.3707,
+    short_rate: 2.3796,
+    long_before: false,
+    short_before: false,
+    long_after: true,
+    short_after: true,
+    override_off_unchanged: true,
+    forward_unchanged: true,
+  });
+});
 
 dockerTest('real Freqtrade executes a fee-stressed walk-forward bundle with exact reconciliation', async (t) => {
   const home = await mkdtemp(join(REPO_ROOT, '.helix-docker-e2e-'));
