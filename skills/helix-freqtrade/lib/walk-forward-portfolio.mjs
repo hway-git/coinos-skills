@@ -6,9 +6,9 @@ import {
   WALK_FORWARD_REPORT_SCHEMA_VERSION,
   canonicalWalkForwardJson,
   loadPromotableWalkForwardReport,
-  loadWalkForwardBundle,
   verifyWalkForwardPlan,
   verifyWalkForwardReport,
+  verifyWalkForwardReportWithBundle,
   walkForwardEvidenceHash,
   walkForwardPlanHash,
   walkForwardReportHash,
@@ -215,19 +215,31 @@ export function verifyWalkForwardPortfolioPlan(value) {
 function loadMemberReport(fileValue, reportDirectory) {
   const { absolute, path } = relativeArchiveFile(fileValue, 'member report file', reportDirectory);
   const reportDirectoryValue = dirname(absolute);
-  const report = verifyWalkForwardReport(
+  const { report, bundle } = verifyWalkForwardReportWithBundle(
     readJson(absolute, 'walk-forward member report'),
     null,
     reportDirectoryValue,
   );
   const expectedName = `walk-forward-report-${report.reportHash.replace(':', '-')}.json`;
   if (basename(absolute) !== expectedName) throw new Error(`walk-forward member report file must equal ${expectedName}`);
-  const coreEvidence = report.coreEvidence;
-  const bundle = loadWalkForwardBundle(
-    resolve(reportDirectoryValue, coreEvidence.runFile),
-    resolve(reportDirectoryValue, coreEvidence.sourceDatasetFile),
-  );
   return { file: absolute, reportFile: path, report, bundle };
+}
+
+function normalizeVerifiedMember(value, index, reportDirectory) {
+  const member = exactRecord(value, `verifiedMembers[${index}]`, ['file', 'report', 'bundle']);
+  if (!member.report?.reportHash || !member.bundle?.plan || !member.bundle?.run) {
+    throw new Error(`verifiedMembers[${index}] must contain a verified report and Core bundle`);
+  }
+  const { absolute, path } = relativeArchiveFile(
+    member.file,
+    `verifiedMembers[${index}].file`,
+    reportDirectory,
+  );
+  const expectedName = `walk-forward-report-${member.report.reportHash.replace(':', '-')}.json`;
+  if (basename(absolute) !== expectedName) {
+    throw new Error(`verified member report file must equal ${expectedName}`);
+  }
+  return { file: absolute, reportFile: path, report: member.report, bundle: member.bundle };
 }
 
 function assertMemberMatchesPlan(member, loaded, portfolioPlan, index) {
@@ -584,12 +596,10 @@ function buildPortfolioReport(portfolioPlan, loadedMembers, schemaVersion) {
   return { ...payload, reportHash: walkForwardReportHash(payload) };
 }
 
-function createWalkForwardPortfolioReportVersion(planValue, memberReportFiles, reportDirectory, schemaVersion) {
-  const portfolioPlan = verifyWalkForwardPortfolioPlan(planValue);
-  if (!Array.isArray(memberReportFiles) || memberReportFiles.length !== portfolioPlan.members.length) {
+function buildWalkForwardPortfolioReportVersion(portfolioPlan, loaded, schemaVersion) {
+  if (!Array.isArray(loaded) || loaded.length !== portfolioPlan.members.length) {
     throw new Error('portfolio report must provide one archived report per policy member');
   }
-  const loaded = memberReportFiles.map((file) => loadMemberReport(file, reportDirectory));
   const loadedBySymbol = new Map(loaded.map((member) => [member.bundle.plan.sourceDataset.source.symbol, member]));
   if (loadedBySymbol.size !== loaded.length) throw new Error('portfolio member reports contain duplicate symbols');
   const ordered = portfolioPlan.members.map((member, index) => {
@@ -608,11 +618,39 @@ function createWalkForwardPortfolioReportVersion(planValue, memberReportFiles, r
   return buildPortfolioReport(portfolioPlan, ordered, schemaVersion);
 }
 
+function createWalkForwardPortfolioReportVersion(planValue, memberReportFiles, reportDirectory, schemaVersion) {
+  const portfolioPlan = verifyWalkForwardPortfolioPlan(planValue);
+  if (!Array.isArray(memberReportFiles)) {
+    throw new Error('portfolio report must provide one archived report per policy member');
+  }
+  return buildWalkForwardPortfolioReportVersion(
+    portfolioPlan,
+    memberReportFiles.map((file) => loadMemberReport(file, reportDirectory)),
+    schemaVersion,
+  );
+}
+
 export function createWalkForwardPortfolioReport(planValue, memberReportFiles, reportDirectory) {
   return createWalkForwardPortfolioReportVersion(
     planValue,
     memberReportFiles,
     reportDirectory,
+    WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION,
+  );
+}
+
+export function createWalkForwardPortfolioReportFromVerifiedMembers(
+  planValue,
+  verifiedMembers,
+  reportDirectory,
+) {
+  const portfolioPlan = verifyWalkForwardPortfolioPlan(planValue);
+  if (!Array.isArray(verifiedMembers)) {
+    throw new Error('portfolio report must provide one archived report per policy member');
+  }
+  return buildWalkForwardPortfolioReportVersion(
+    portfolioPlan,
+    verifiedMembers.map((member, index) => normalizeVerifiedMember(member, index, reportDirectory)),
     WALK_FORWARD_PORTFOLIO_REPORT_SCHEMA_VERSION,
   );
 }

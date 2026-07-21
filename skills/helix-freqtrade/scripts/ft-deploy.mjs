@@ -79,10 +79,11 @@ import {
   createWalkForwardReport,
   loadWalkForwardBundle,
   verifyWalkForwardReport,
+  verifyWalkForwardReportWithBundle,
   walkForwardEvidenceHash,
 } from '../lib/walk-forward.mjs';
 import {
-  createWalkForwardPortfolioReport,
+  createWalkForwardPortfolioReportFromVerifiedMembers,
   loadPromotableWalkForwardEvidence,
   verifyWalkForwardPortfolioPlan,
   verifyWalkForwardPortfolioReport,
@@ -745,7 +746,7 @@ function writeImmutableRawFile(file, content, expectedHash) {
 function archiveWalkForwardMemberReport(portfolioDirectory, reportFileValue) {
   const reportFile = resolve(reportFileValue);
   const sourceDirectory = dirname(reportFile);
-  const report = verifyWalkForwardReport(
+  const { report, bundle } = verifyWalkForwardReportWithBundle(
     JSON.parse(readFileSync(reportFile, 'utf8')),
     null,
     sourceDirectory,
@@ -776,8 +777,7 @@ function archiveWalkForwardMemberReport(portfolioDirectory, reportFileValue) {
     writeImmutableRawFile(resolve(memberDirectory, relativeFile), readFileSync(sourceFile), expectedHash);
   }
   const archivedReport = resolve(memberDirectory, expectedName);
-  verifyWalkForwardReport(JSON.parse(readFileSync(archivedReport, 'utf8')), null, memberDirectory);
-  return archivedReport;
+  return { file: archivedReport, report, bundle };
 }
 
 function writeImmutableWalkForwardPortfolioReport(directory, report) {
@@ -3937,29 +3937,33 @@ const actions = {
     if (archivedPlan.planHash !== portfolioPlan.planHash) {
       throw new Error('archived walk-forward portfolio plan identity mismatch');
     }
-    const archivedReports = params.reports.map((file) => (
+    const archivedMembers = params.reports.map((file) => (
       archiveWalkForwardMemberReport(outputDirectory, file.trim())
     ));
     const currentPlan = verifyWalkForwardPortfolioPlan(JSON.parse(readFileSync(sourcePlanFile, 'utf8')));
     if (currentPlan.planHash !== portfolioPlan.planHash) {
       throw new Error('walk-forward portfolio plan changed during report creation');
     }
-    const report = createWalkForwardPortfolioReport(archivedPlan, archivedReports, outputDirectory);
+    const report = createWalkForwardPortfolioReportFromVerifiedMembers(
+      archivedPlan,
+      archivedMembers,
+      outputDirectory,
+    );
     const reportFile = writeImmutableWalkForwardPortfolioReport(outputDirectory, report);
-    verifyWalkForwardPortfolioReport(
+    const verifiedReport = verifyWalkForwardPortfolioReport(
       JSON.parse(readFileSync(reportFile, 'utf8')),
       outputDirectory,
     );
-    recordWalkForwardReport({ file: reportFile, report });
+    recordWalkForwardReport({ file: reportFile, report: verifiedReport });
     return {
       ok: true,
-      planHash: report.planHash,
-      reportHash: report.reportHash,
+      planHash: verifiedReport.planHash,
+      reportHash: verifiedReport.reportHash,
       reportFile,
-      symbols: report.members.map(({ source: memberSource }) => memberSource.symbol),
-      scenarios: report.aggregate.scenarios.length,
-      promotable: report.gate.ok,
-      gate: report.gate,
+      symbols: verifiedReport.members.map(({ source: memberSource }) => memberSource.symbol),
+      scenarios: verifiedReport.aggregate.scenarios.length,
+      promotable: verifiedReport.gate.ok,
+      gate: verifiedReport.gate,
     };
   },
 

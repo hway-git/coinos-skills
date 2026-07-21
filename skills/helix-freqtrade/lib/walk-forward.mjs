@@ -12,9 +12,9 @@ import { firstStrategySummary, readBacktestPayload } from './backtest-result.mjs
 import { verifyExecutionRuntimeArchive } from './execution-runtime-evidence.mjs';
 import { verifyHistoricalRiskTrace } from './historical-risk.mjs';
 import {
-  futuresCostDatasetIdentity,
+  fundingFeesFromVerifiedDataset,
+  futuresCostDatasetIdentityFromVerifiedDataset,
   loadFuturesCostDataset,
-  verifyFundingFees,
 } from './futures-cost-dataset.mjs';
 import { marketDatasetHash, marketTimeframeMilliseconds, verifyMarketDataset } from './market-dataset.mjs';
 import { verifySignalArtifact } from './signal-artifact.mjs';
@@ -1671,9 +1671,34 @@ function rawFileHash(file) {
 function verifyReportArchives(report, directory) {
   const root = resolve(text(directory, 'reportDirectory'));
   const coreEvidence = normalizeCoreEvidence(report.coreEvidence, report.runHash);
+  const archiveFiles = new Map();
+  const registerArchiveFile = (file, expectedHash, kind) => {
+    const absolute = resolve(root, file);
+    const existing = archiveFiles.get(absolute);
+    if (existing && existing.expectedHash !== expectedHash) {
+      throw new Error(`walk-forward archive file has conflicting hashes: ${file}`);
+    }
+    if (!existing) archiveFiles.set(absolute, { absolute, file, expectedHash, kind });
+  };
   for (const { file, fileHash } of coreEvidence.files) {
-    if (rawFileHash(resolve(root, file)) !== fileHash) {
-      throw new Error(`walk-forward Core archive hash mismatch: ${file}`);
+    registerArchiveFile(file, fileHash, 'Core');
+  }
+  for (const fold of report.folds) {
+    for (const evidence of fold.executionEvidence) {
+      for (const [file, expectedHash] of [
+        [evidence.resultFile, evidence.resultHash],
+        [evidence.resultMetaFile, evidence.resultMetaHash],
+        [evidence.runtimeEvidenceFile, evidence.runtimeEvidenceHash],
+        ...(evidence.futuresCostDataset ? [[
+          evidence.futuresCostDatasetFile,
+          evidence.futuresCostDatasetFileHash,
+        ]] : []),
+      ]) registerArchiveFile(file, expectedHash, 'execution');
+    }
+  }
+  for (const { absolute, file, expectedHash, kind } of archiveFiles.values()) {
+    if (rawFileHash(absolute) !== expectedHash) {
+      throw new Error(`walk-forward ${kind} archive hash mismatch: ${file}`);
     }
   }
   const archivedBundle = loadWalkForwardBundle(
@@ -1683,23 +1708,10 @@ function verifyReportArchives(report, directory) {
   if (report.folds.length !== archivedBundle.folds.length) {
     throw new Error('walk-forward report fold count does not match its archived Core bundle');
   }
+  const futuresCostDatasets = new Map();
   for (const [foldIndex, fold] of report.folds.entries()) {
     const archivedFold = archivedBundle.folds[foldIndex];
     for (const evidence of fold.executionEvidence) {
-      const futuresCostEvidence = evidence.futuresCostDataset ? [[
-        evidence.futuresCostDatasetFile,
-        evidence.futuresCostDatasetFileHash,
-      ]] : [];
-      for (const [file, expectedHash] of [
-        [evidence.resultFile, evidence.resultHash],
-        [evidence.resultMetaFile, evidence.resultMetaHash],
-        [evidence.runtimeEvidenceFile, evidence.runtimeEvidenceHash],
-        ...futuresCostEvidence,
-      ]) {
-        if (rawFileHash(resolve(root, file)) !== expectedHash) {
-          throw new Error(`walk-forward execution archive hash mismatch: ${file}`);
-        }
-      }
       const payload = readBacktestPayload(root, evidence.resultFile);
       const summary = firstStrategySummary(payload, evidence.executionProfile.strategy);
       if (!summary) {
@@ -1709,10 +1721,22 @@ function verifyReportArchives(report, directory) {
       if (!Object.prototype.hasOwnProperty.call(meta, evidence.executionProfile.strategy)) {
         throw new Error(`walk-forward execution metadata has no strategy ${evidence.executionProfile.strategy}`);
       }
-      const futuresCostDataset = evidence.futuresCostDataset
-        ? loadFuturesCostDataset(resolve(root, evidence.futuresCostDatasetFile))
-        : null;
-      const futuresCostIdentity = futuresCostDataset ? futuresCostDatasetIdentity(futuresCostDataset) : null;
+      let futuresCostDataset = null;
+      let futuresCostIdentity = null;
+      if (evidence.futuresCostDataset) {
+        const futuresCostFile = resolve(root, evidence.futuresCostDatasetFile);
+        let cached = futuresCostDatasets.get(futuresCostFile);
+        if (!cached) {
+          const dataset = loadFuturesCostDataset(futuresCostFile);
+          cached = {
+            dataset,
+            identity: futuresCostDatasetIdentityFromVerifiedDataset(dataset),
+          };
+          futuresCostDatasets.set(futuresCostFile, cached);
+        }
+        futuresCostDataset = cached.dataset;
+        futuresCostIdentity = cached.identity;
+      }
       if (futuresCostIdentity && !isDeepStrictEqual(futuresCostIdentity, evidence.futuresCostDataset)) {
         throw new Error(`walk-forward futures cost dataset identity mismatch: ${evidence.futuresCostDatasetFile}`);
       }
@@ -1748,7 +1772,9 @@ function verifyReportArchives(report, directory) {
       const recomputed = {
         reconciliation: reconcileSignalBacktest(summary, archivedFold.executionArtifact),
         feeObservations: backtestFeeObservations(summary, evidence.fee),
-        ...(futuresCostDataset ? { fundingObservations: verifyFundingFees(summary, futuresCostDataset) } : {}),
+        ...(futuresCostDataset ? {
+          fundingObservations: fundingFeesFromVerifiedDataset(summary, futuresCostDataset),
+        } : {}),
         metrics: backtestMetrics(summary, {
           signalArtifact: archivedFold.executionArtifact,
           riskTrace: archivedFold.executionRiskTrace,
@@ -1766,19 +1792,17 @@ function verifyReportArchives(report, directory) {
           );
         }
       }
-      if (rawFileHash(resolve(root, evidence.resultFile)) !== evidence.resultHash
-        || rawFileHash(resolve(root, evidence.resultMetaFile)) !== evidence.resultMetaHash
-        || rawFileHash(resolve(root, evidence.runtimeEvidenceFile)) !== evidence.runtimeEvidenceHash
-        || (futuresCostDataset
-          && rawFileHash(resolve(root, evidence.futuresCostDatasetFile)) !== evidence.futuresCostDatasetFileHash)) {
-        throw new Error(`walk-forward execution archive changed during verification: ${evidence.resultFile}`);
-      }
+    }
+  }
+  for (const { absolute, file, expectedHash } of archiveFiles.values()) {
+    if (rawFileHash(absolute) !== expectedHash) {
+      throw new Error(`walk-forward archive changed during verification: ${file}`);
     }
   }
   return archivedBundle;
 }
 
-export function verifyWalkForwardReport(value, bundle = null, reportDirectory = null) {
+export function verifyWalkForwardReportWithBundle(value, bundle = null, reportDirectory = null) {
   const report = exactRecord(value, 'walk-forward report', [
     'schemaVersion', 'planHash', 'runHash', 'candidate', 'sourceDatasetHash',
     'coreEvidence', 'folds', 'aggregate', 'gate', 'reportHash',
@@ -1829,7 +1853,11 @@ export function verifyWalkForwardReport(value, bundle = null, reportDirectory = 
   if (!isDeepStrictEqual(recreated, report)) {
     throw new Error('walk-forward report does not match its verified Core bundle');
   }
-  return report;
+  return { report, bundle: archivedBundle };
+}
+
+export function verifyWalkForwardReport(value, bundle = null, reportDirectory = null) {
+  return verifyWalkForwardReportWithBundle(value, bundle, reportDirectory).report;
 }
 
 export function loadPromotableWalkForwardReport(reportFile, artifact) {

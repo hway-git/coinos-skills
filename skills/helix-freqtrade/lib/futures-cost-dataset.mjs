@@ -244,8 +244,7 @@ function renderedCanonicalFile(relativePath, value) {
   };
 }
 
-export function freqtradeFuturesCostFiles(datasetValue) {
-  const dataset = verifyFuturesCostDataset(datasetValue);
+function freqtradeFuturesCostFilesFromVerifiedDataset(dataset) {
   const pair = pairFileName(dataset.source.symbol);
   return {
     mark: renderedFile(
@@ -265,9 +264,12 @@ export function freqtradeFuturesCostFiles(datasetValue) {
   };
 }
 
-export function futuresCostDatasetIdentity(datasetValue) {
-  const dataset = verifyFuturesCostDataset(datasetValue);
-  const files = freqtradeFuturesCostFiles(dataset);
+export function freqtradeFuturesCostFiles(datasetValue) {
+  return freqtradeFuturesCostFilesFromVerifiedDataset(verifyFuturesCostDataset(datasetValue));
+}
+
+export function futuresCostDatasetIdentityFromVerifiedDataset(dataset) {
+  const files = freqtradeFuturesCostFilesFromVerifiedDataset(dataset);
   return {
     schemaVersion: FUTURES_COST_DATASET_SCHEMA_VERSION,
     costDatasetHash: dataset.costDatasetHash,
@@ -293,6 +295,10 @@ export function futuresCostDatasetIdentity(datasetValue) {
   };
 }
 
+export function futuresCostDatasetIdentity(datasetValue) {
+  return futuresCostDatasetIdentityFromVerifiedDataset(verifyFuturesCostDataset(datasetValue));
+}
+
 export function requireFuturesCostDatasetWindow(datasetValue, marketDataset, artifact) {
   const dataset = verifyFuturesCostDataset(datasetValue);
   const expectedSource = marketDataset?.source;
@@ -313,8 +319,7 @@ export function requireFuturesCostDatasetWindow(datasetValue, marketDataset, art
   return dataset;
 }
 
-export function verifyFundingFees(summary, datasetValue, tolerance = 1e-8) {
-  const dataset = verifyFuturesCostDataset(datasetValue);
+export function fundingFeesFromVerifiedDataset(summary, dataset, tolerance = 1e-8) {
   const trades = Array.isArray(summary?.trades) ? summary.trades : [];
   const markByTime = new Map(dataset.markPrice.candles.map(({ time, open }) => [time, open]));
   const rows = dataset.fundingRate.rows.map(({ time, rate }) => ({ time, rate, mark: markByTime.get(time) }));
@@ -347,4 +352,12 @@ export function verifyFundingFees(summary, datasetValue, tolerance = 1e-8) {
     matches: observations.every(({ matches }) => matches),
     observations,
   };
+}
+
+export function verifyFundingFees(summary, datasetValue, tolerance = 1e-8) {
+  return fundingFeesFromVerifiedDataset(
+    summary,
+    verifyFuturesCostDataset(datasetValue),
+    tolerance,
+  );
 }

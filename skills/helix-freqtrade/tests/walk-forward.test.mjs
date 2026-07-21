@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +24,7 @@ import {
   loadWalkForwardBundle,
   verifyWalkForwardPlan,
   verifyWalkForwardReport,
+  verifyWalkForwardReportWithBundle,
   walkForwardPlanHash,
   walkForwardReportHash,
   walkForwardRunHash,
@@ -691,6 +694,12 @@ test('builds a hash-pinned R-normalized research report but requires a versioned
   const coreEvidence = await writeReportArchives(directory, bundle, evidence);
   const report = createWalkForwardReport(bundle, evidence, coreEvidence);
   assert.throws(() => verifyWalkForwardReport(report), /reportDirectory is required/);
+  const verified = verifyWalkForwardReportWithBundle(report, bundle, directory);
+  assert.deepEqual(verified.report, report);
+  assert.deepEqual(verified.bundle.plan, bundle.plan);
+  assert.deepEqual(verified.bundle.run, bundle.run);
+  assert.deepEqual(verified.bundle.sourceDataset, bundle.sourceDataset);
+  assert.deepEqual(verified.bundle.folds, bundle.folds);
   assert.deepEqual(verifyWalkForwardReport(report, bundle, directory), report);
   assert.equal(report.gate.ok, false);
   assert.equal(
@@ -766,6 +775,61 @@ test('builds a hash-pinned R-normalized research report but requires a versioned
     () => verifyWalkForwardReport(report, bundle, directory),
     /execution archive hash mismatch/,
   );
+});
+
+test('loads a shared futures cost archive once and detects changes at verification end', {
+  concurrency: false,
+}, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-walk-forward-cost-cache-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await writeBundle(directory);
+  const bundle = loadWalkForwardBundle(
+    join(directory, 'walk-forward-run.json'),
+    join(directory, 'source.json'),
+  );
+  const evidence = bundle.folds.map((fold) => bundle.plan.executionScenarios.map(
+    (scenario, index) => executionEvidence(bundle.plan, fold, scenario, index),
+  ));
+  const coreEvidence = await writeReportArchives(directory, bundle, evidence);
+  const report = createWalkForwardReport(bundle, evidence, coreEvidence);
+  const costReferences = report.folds.flatMap(({ executionEvidence: foldEvidence }) => (
+    foldEvidence.map(({ futuresCostDatasetFile }) => futuresCostDatasetFile)
+  ));
+  assert.ok(costReferences.length > 1);
+  assert.equal(new Set(costReferences).size, 1);
+  const costFile = resolve(directory, costReferences[0]);
+  const originalCostContent = await readFile(costFile);
+  const originalReadFileSync = fs.readFileSync;
+  let costReads = 0;
+  const instrumentCostReads = (onRead = null) => {
+    fs.readFileSync = (file, ...args) => {
+      if (resolve(String(file)) === costFile) {
+        costReads += 1;
+        if (onRead) onRead(costReads);
+      }
+      return originalReadFileSync(file, ...args);
+    };
+    syncBuiltinESMExports();
+  };
+
+  try {
+    instrumentCostReads();
+    assert.deepEqual(verifyWalkForwardReport(report, bundle, directory), report);
+    assert.equal(costReads, 3);
+
+    costReads = 0;
+    instrumentCostReads((readCount) => {
+      if (readCount === 3) fs.writeFileSync(costFile, 'tampered\n');
+    });
+    assert.throws(
+      () => verifyWalkForwardReport(report, bundle, directory),
+      /archive changed during verification/,
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    syncBuiltinESMExports();
+    fs.writeFileSync(costFile, originalCostContent);
+  }
 });
 
 test('rebuilds every versioned policy gate from archived trade-level R evidence', async (t) => {

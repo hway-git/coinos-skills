@@ -9,8 +9,10 @@ import test from 'node:test';
 import {
   freqtradeFuturesCostFiles,
   createFuturesCostDataset,
+  fundingFeesFromVerifiedDataset,
   futuresCostDatasetHash,
   futuresCostDatasetIdentity,
+  futuresCostDatasetIdentityFromVerifiedDataset,
   verifyFundingFees,
   verifyFuturesCostDataset,
 } from '../lib/futures-cost-dataset.mjs';
@@ -24,12 +26,17 @@ const DEPLOY = resolve(SKILL_DIR, 'scripts', 'ft-deploy.mjs');
 
 test('hash-pins complete mark, funding, and timestamp-free leverage tier data', () => {
   const dataset = futuresCostDatasetFixture({ coveredThrough: 16 * hour });
-  assert.deepEqual(verifyFuturesCostDataset(dataset), dataset);
+  const verified = verifyFuturesCostDataset(dataset);
+  assert.deepEqual(verified, dataset);
   const files = freqtradeFuturesCostFiles(dataset);
   assert.equal(files.leverageTiers.content.includes('updated'), false);
   assert.equal(files.mark.relativePath, 'futures/BTC_USDT_USDT-1h-mark.json');
   assert.equal(files.fundingRate.relativePath, 'futures/BTC_USDT_USDT-1h-funding_rate.json');
   assert.equal(futuresCostDatasetIdentity(dataset).leverageTiers.dataHash, files.leverageTiers.dataHash);
+  assert.deepEqual(
+    futuresCostDatasetIdentityFromVerifiedDataset(verified),
+    futuresCostDatasetIdentity(dataset),
+  );
   const reorderedPayload = structuredClone(dataset);
   reorderedPayload.leverageTiers.data = Object.fromEntries(
     Object.entries(reorderedPayload.leverageTiers.data).reverse(),
@@ -97,10 +104,17 @@ test('reconciles non-zero long and short funding and accepts a proven no-settlem
   const result = verifyFundingFees(summary, dataset);
   assert.equal(result.matches, true);
   assert.deepEqual(result.observations.map(({ settlements }) => settlements), [1, 1, 0]);
+  assert.deepEqual(
+    fundingFeesFromVerifiedDataset(summary, verifyFuturesCostDataset(dataset)),
+    result,
+  );
 
   const tampered = structuredClone(summary);
   tampered.trades[0].funding_fees = 0;
   assert.equal(verifyFundingFees(tampered, dataset).matches, false);
+  const tamperedDataset = structuredClone(dataset);
+  tamperedDataset.fundingRate.rows[0].rate += 0.001;
+  assert.throws(() => verifyFundingFees(summary, tamperedDataset), /hash mismatch/);
 });
 
 test('freezes complete Freqtrade JSON inputs into one immutable cost dataset', async (t) => {

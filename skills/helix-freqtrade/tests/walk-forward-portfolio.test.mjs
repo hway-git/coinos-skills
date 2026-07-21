@@ -1,19 +1,20 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
+  createWalkForwardPortfolioReportFromVerifiedMembers,
   loadPromotableWalkForwardPortfolioReport,
   verifyWalkForwardEvidenceReportFile,
   verifyWalkForwardPortfolioReport,
   walkForwardPortfolioPlanHash,
 } from '../lib/walk-forward-portfolio.mjs';
-import { walkForwardReportHash } from '../lib/walk-forward.mjs';
+import { verifyWalkForwardReportWithBundle, walkForwardReportHash } from '../lib/walk-forward.mjs';
 import { createPromotableWalkForwardReport } from './helpers/promotable-report.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -97,6 +98,42 @@ async function runPortfolio(root, planFile, reports, output = 'portfolio') {
   });
   return JSON.parse(stdout);
 }
+
+test('builds from verified member descriptors without reopening their archived paths', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'helix-walk-forward-portfolio-descriptors-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const members = await createMemberReports(root);
+  const plan = portfolioPlan(members);
+  const portfolioRoot = join(root, 'portfolio');
+  await mkdir(portfolioRoot, { recursive: true });
+  await writeFile(
+    join(portfolioRoot, 'walk-forward-portfolio-plan.json'),
+    `${JSON.stringify(plan, null, 2)}\n`,
+  );
+  const verifiedMembers = await Promise.all(members.map(async ({ reportFile }) => {
+    const verified = verifyWalkForwardReportWithBundle(
+      JSON.parse(await readFile(reportFile, 'utf8')),
+      null,
+      dirname(reportFile),
+    );
+    const name = `walk-forward-report-${verified.report.reportHash.replace(':', '-')}.json`;
+    return {
+      file: join(portfolioRoot, 'members', verified.report.reportHash.replace(':', '-'), name),
+      ...verified,
+    };
+  }));
+
+  const report = createWalkForwardPortfolioReportFromVerifiedMembers(
+    plan,
+    verifiedMembers.reverse(),
+    portfolioRoot,
+  );
+  assert.deepEqual(report.members.map(({ source }) => source), SOURCES);
+  assert.throws(
+    () => verifyWalkForwardPortfolioReport(report, portfolioRoot),
+    /cannot read walk-forward member report/,
+  );
+});
 
 async function convertMemberArchiveToLegacy(portfolioRoot, member, index) {
   const currentFile = resolve(portfolioRoot, member.reportFile);
