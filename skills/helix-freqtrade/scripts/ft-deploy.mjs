@@ -1409,10 +1409,23 @@ async function fetchOkxArchiveResource(url, options, name) {
         headers: { 'User-Agent': 'Helix/2.0', ...(options?.headers || {}) },
         signal: AbortSignal.timeout(30_000),
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        const retryable = response.status === 429 || response.status >= 500;
+        if (!retryable || attempt === 3) break;
+        const retryAfter = Number(response.headers.get('retry-after'));
+        const delayMs = Number.isFinite(retryAfter) && retryAfter >= 0
+          ? Math.min(60_000, retryAfter * 1_000)
+          : Math.min(60_000, 2_500 * (2 ** (attempt - 1)));
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+        continue;
+      }
       return response;
     } catch (error) {
       lastError = error;
+      if (attempt < 3) {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_500 * (2 ** (attempt - 1))));
+      }
     }
   }
   throw new Error(`cannot download ${name}: ${lastError?.message || 'unknown error'}`);
@@ -1442,6 +1455,9 @@ async function downloadOkxFundingArchive(params) {
       }),
     }, 'OKX funding archive index').then((value) => value.json());
     descriptors.push(...okxFundingArchiveFiles(response, request));
+    if (index + 1 < plan.requests.length) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_500));
+    }
   }
   const expectedDays = plan.requests.flatMap(({ dates }) => dates);
   if (descriptors.length !== expectedDays.length
